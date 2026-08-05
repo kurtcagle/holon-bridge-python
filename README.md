@@ -2,7 +2,7 @@
 title: HolonBridge (Python)
 version: 0.1.0
 status: working core, not yet at parity with the Node bridge
----
+--- 
 
 # HolonBridge — Python
 
@@ -1002,5 +1002,6 @@ Registry writes (registering and deleting a query through the API) are
 deliberately not here: the registry is a DataBook artefact, so `push_turtle`
 into `urn:{dataset}:named-queries` plus `reload_named_queries` is the honest
 path until there is a reason for a dedicated write route.
-#   h o l o n - b r i d g e - p y t h o n  
+#   h o l o n - b r i d g e - p y t h o n 
+ 
  
