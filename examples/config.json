@@ -1,0 +1,23 @@
+{
+  "default": "local",
+  "banks": {
+    "local": {
+      "url": "http://localhost:3030",
+      "dataset": "ds",
+      "auth": null
+    },
+    "bridgerton": {
+      "url": "http://localhost:3030",
+      "dataset": "bridgerton",
+      "auth": null
+    },
+    "ggsc": {
+      "url": "https://ggsc.example.org",
+      "dataset": "ggsc",
+      "auth": {
+        "type": "bearer",
+        "token": "REPLACE_ME"
+      }
+    }
+  }
+}
