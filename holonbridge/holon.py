@@ -9,6 +9,13 @@ Neighbourhood traversal discovers its predicates rather than hardcoding
 containment or connection predicate participates, so a domain that models
 ``geo:administrativePartOf`` or ``org:reportsTo`` navigates without the
 bridge knowing those terms exist.
+
+Current state is a union of two graphs: ``holons`` (structural triples,
+static) and ``scene`` (fluent current-values, destructively updated on
+every transition -- see :mod:`holonbridge.fluent`). Supplying ``observed_at``
+switches the fluent-valued part of the projection to an as-of read over
+``events`` instead of ``scene``, walking the hevt:StateAssertion ledger by
+timestamp.
 """
 
 from __future__ import annotations
@@ -22,12 +29,15 @@ from .databook import Block, DataBook
 from .fuseki import FusekiClient
 
 HOLON = "https://w3id.org/holon/"
+HEVT = "https://w3id.org/holon/event/"
 
 PROJECTION_MODES = ("immersive", "cinematic", "active_inference", "exploded_view")
 
 _PREFIXES = f"""PREFIX holon: <{HOLON}>
+PREFIX hevt:  <{HEVT}>
 PREFIX rdfs:  <http://www.w3.org/2000/01/rdf-schema#>
 PREFIX rdf:   <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX xsd:   <http://www.w3.org/2001/XMLSchema#>
 """
 
 
@@ -39,11 +49,69 @@ class Neighbour:
 
 
 def state_query(conn: Conn, holon_iri: str) -> str:
-    """CONSTRUCT the holon's own triples."""
+    """CONSTRUCT the holon's own triples: structural (holons) plus current
+    fluent values (scene), unioned. A holon with no fluents gets an empty
+    second clause and behaves exactly as before scene existed."""
     return f"""{_PREFIXES}
 CONSTRUCT {{ <{holon_iri}> ?p ?o . }}
 WHERE {{
-  GRAPH <{conn.holons_graph}> {{ <{holon_iri}> ?p ?o . }}
+  {{ GRAPH <{conn.holons_graph}> {{ <{holon_iri}> ?p ?o . }} }}
+  UNION
+  {{ GRAPH <{conn.scene_graph}> {{ <{holon_iri}> ?p ?o . }} }}
+}}"""
+
+
+def as_of_query(
+    conn: Conn,
+    holon_iri: str,
+    *,
+    observed_at: str,
+    inserted_at: str | None = None,
+) -> str:
+    """CONSTRUCT the holon's structural triples plus what its fluents'
+    values were as of valid-time ``observed_at`` (an ISO xsd:dateTime
+    string), optionally also bounded by transaction-time ``inserted_at``.
+    ``inserted_at`` defaults to ``observed_at`` when not supplied -- the
+    common case is 'this happened and was recorded at the same moment';
+    the two axes diverge only for backdated or corrective entries.
+
+    Walks hevt:StateAssertion by hevt:assertedDateTime directly, rather
+    than following hevt:supersedes chains -- consistent with
+    hevt:supersedes's own documented intent: it answers lineage, not
+    chronology.
+    """
+    inserted = inserted_at or observed_at
+    return f"""{_PREFIXES}
+CONSTRUCT {{
+  <{holon_iri}> ?p ?o .
+  ?fluent holon:currentValue ?value .
+}}
+WHERE {{
+  {{ GRAPH <{conn.holons_graph}> {{ <{holon_iri}> ?p ?o . }} }}
+  UNION
+  {{
+    GRAPH <{conn.holons_graph}> {{
+      <{holon_iri}> ?anyPred ?fluent .
+      ?fluent a holon:Fluent .
+    }}
+    GRAPH <{conn.graph("events")}> {{
+      ?assertion hevt:forFluent ?fluent ;
+                 hevt:hasValue ?value ;
+                 hevt:assertedDateTime ?assertedAt .
+      FILTER (?assertedAt <= "{observed_at}"^^xsd:dateTime)
+      FILTER NOT EXISTS {{
+        ?assertion hevt:invalidatedAt ?invalidatedAt .
+        FILTER (?invalidatedAt <= "{inserted}"^^xsd:dateTime)
+      }}
+    }}
+    FILTER NOT EXISTS {{
+      GRAPH <{conn.graph("events")}> {{
+        ?later hevt:forFluent ?fluent ;
+               hevt:assertedDateTime ?laterAt .
+        FILTER (?laterAt <= "{observed_at}"^^xsd:dateTime && ?laterAt > ?assertedAt)
+      }}
+    }}
+  }}
 }}"""
 
 
@@ -99,8 +167,18 @@ async def get_holon(
     holon_iri: str,
     projection_mode: str = "immersive",
     include_shapes: bool = True,
+    observed_at: datetime | None = None,
+    inserted_at: datetime | None = None,
 ) -> DataBook:
-    """Retrieve a holon and project it as a DataBook."""
+    """Retrieve a holon and project it as a DataBook.
+
+    With neither ``observed_at`` nor ``inserted_at``, current state comes
+    from :func:`state_query` -- a union of ``holons`` and ``scene``, the
+    fast path, no ledger walk. Supplying either switches the fluent-valued
+    part of the projection to :func:`as_of_query`; ``observed_at`` defaults
+    to now() and ``inserted_at`` defaults to ``observed_at`` when only one
+    of the two is given.
+    """
 
     if projection_mode not in PROJECTION_MODES:
         raise ValueError(
@@ -108,7 +186,21 @@ async def get_holon(
             f"expected one of {', '.join(PROJECTION_MODES)}"
         )
 
-    query = state_query(conn, holon_iri)
+    as_of = observed_at is not None or inserted_at is not None
+    eff_observed: datetime | None = None
+    eff_inserted: datetime | None = None
+    if as_of:
+        eff_observed = observed_at or datetime.now(timezone.utc)
+        eff_inserted = inserted_at or eff_observed
+        query = as_of_query(
+            conn,
+            holon_iri,
+            observed_at=eff_observed.isoformat(),
+            inserted_at=eff_inserted.isoformat(),
+        )
+    else:
+        query = state_query(conn, holon_iri)
+
     state = await client.construct(conn, query)
 
     up_query = _neighbour_query(conn, holon_iri, root="isPartOf", direction="up")
@@ -128,6 +220,7 @@ async def get_holon(
         "graph": {
             "dataset": conn.dataset,
             "named_graph": conn.holons_graph,
+            "scene_graph": conn.scene_graph,
         },
         "projection": {
             "mode": projection_mode,
@@ -136,6 +229,11 @@ async def get_holon(
             "connections": len(peers),
         },
     }
+    if as_of:
+        frontmatter["asOf"] = {
+            "observedAt": eff_observed.isoformat() if eff_observed else None,
+            "insertedAt": eff_inserted.isoformat() if eff_inserted else None,
+        }
 
     book = DataBook(frontmatter=frontmatter, body=_summary(holon_iri, parents, children, peers))
     book.blocks.append(
