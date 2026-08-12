@@ -30,6 +30,7 @@ GRAPH_ROLES: Final = (
     "holons",
     "ontology",
     "events",
+    "scene",
     "shacl",
     "named-queries",
     "named-rules",
@@ -120,6 +121,10 @@ class Conn:
     @property
     def shapes_graph(self) -> str:
         return self.graph("shacl")
+
+    @property
+    def scene_graph(self) -> str:
+        return self.graph("scene")
 
     def describe(self) -> dict[str, object]:
         return {
