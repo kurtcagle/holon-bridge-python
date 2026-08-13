@@ -18,7 +18,17 @@ observe a ledger entry with no matching scene update, or vice versa.
 Concurrency follows the exact compare-and-set pattern already proven in
 :mod:`holonbridge.sequence`: read the current value, build a guarded
 DELETE/INSERT/WHERE that only fires if that value hasn't changed underneath
-us, and retry on a losing race.
+us, and retry on a losing race. The WHERE clause's guard pattern is
+explicitly wrapped in ``GRAPH <scene_graph> { ... }`` -- earlier versions
+of this module omitted that wrapper, which only worked because the Fuseki
+datasets used for testing happen to have union-default-graph enabled. On a
+dataset without it, an unwrapped guard silently matches nothing: every Set
+would behave like an Init (duplicate or silently-wrong overwrite) and every
+Insert/Remove would loop through every retry attempt and then fail, since
+their WHERE would never find the existing value to match against. Found by
+hand-tracing the exact query text during a live pre-commit test, not by
+hitting the failure -- every test so far ran against union-default-graph
+datasets, so this never actually misfired in this session.
 
 Init is not a separate operation. ``Operation.SET`` on a fluent with no
 existing ``holon:currentValue`` simply matches no prior triple in its WHERE
@@ -47,6 +57,9 @@ that against the dataset's shapes graph. Only if that conforms does the
 identical update run for real, against the live graphs. A rejected
 transition never appears in ``events`` or ``scene`` -- not even briefly,
 and there is nothing to compensate because nothing live was ever touched.
+Verified directly: after a deliberately rejected transition, both live
+graphs were re-read and confirmed byte-for-byte unchanged from before the
+attempt.
 
 An absent or empty shapes graph is not an error -- it means no gate is
 configured for this dataset, which is the common case, and transitions
@@ -370,6 +383,10 @@ async def update_fluent(
   }}
 }}"""
 
+        # The guard pattern is scoped to scene_graph explicitly -- never
+        # rely on a default-graph query implicitly seeing named-graph
+        # content, since that only happens on datasets configured with
+        # union-default-graph. See the module docstring.
         scene_update = f"""DELETE {{
   GRAPH <{scene_graph}> {{
     {scene_delete}
@@ -381,7 +398,9 @@ INSERT {{
   }}
 }}
 WHERE {{
-  {guard_clause}
+  GRAPH <{scene_graph}> {{
+    {guard_clause}
+  }}
 }}"""
 
         if gated:
@@ -447,7 +466,16 @@ def _plan(
     pattern) for one transition. All arithmetic happens here, in Python --
     not pushed into SPARQL, since SPARQL 1.1 has no trustworthy native
     date-duration arithmetic and list membership isn't a scalar operation
-    regardless."""
+    regardless.
+
+    The guard returned here is a bare pattern -- no GRAPH wrapper. The
+    caller (update_fluent) wraps it in GRAPH <scene_graph> { ... } once,
+    since every branch below needs the same wrapping and only the caller
+    knows the graph IRI. A FILTER NOT EXISTS/EXISTS pattern nested inside
+    that outer GRAPH block inherits its graph scope correctly per SPARQL
+    semantics, so this works uniformly across the Init, delta, and list
+    branches without each needing to know about graph scoping itself.
+    """
 
     if operation in (Operation.LIST_INSERT, Operation.LIST_REMOVE):
         member_term = _render_input(value, is_iri=is_iri)
@@ -492,7 +520,7 @@ def _plan(
     else:
         guard = (
             f"<{fluent}> holon:currentValue ?existingValue .\n"
-            f"  FILTER (?existingValue = {current.as_term()})"
+            f"    FILTER (?existingValue = {current.as_term()})"
         )
         scene_delete = f"<{fluent}> holon:currentValue ?existingValue ."
 
