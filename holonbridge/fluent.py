@@ -22,13 +22,26 @@ us, and retry on a losing race. The WHERE clause's guard pattern is
 explicitly wrapped in ``GRAPH <scene_graph> { ... }`` -- earlier versions
 of this module omitted that wrapper, which only worked because the Fuseki
 datasets used for testing happen to have union-default-graph enabled. On a
-dataset without it, an unwrapped guard silently matches nothing: every Set
-would behave like an Init (duplicate or silently-wrong overwrite) and every
-Insert/Remove would loop through every retry attempt and then fail, since
-their WHERE would never find the existing value to match against. Found by
-hand-tracing the exact query text during a live pre-commit test, not by
-hitting the failure -- every test so far ran against union-default-graph
-datasets, so this never actually misfired in this session.
+dataset without it, an unwrapped guard silently matches nothing. Found by
+hand-tracing the exact query text during a live pre-commit test.
+
+``holon:currentAssertion`` on the scene graph is what lets a transition
+find its predecessor to supersede in O(1), with no events-graph scan --
+but an earlier version of ``_plan`` never actually wrote it: the scalar
+branch's ``scene_insert``/``scene_delete`` touched only
+``holon:currentValue``. That is a severe bug, not a cosmetic gap --
+confirmed live, not just reasoned through: with a shapes graph configured,
+a Set followed by an Insert produced two StateAssertions with neither
+superseding the other (since ``current_assertion`` read back as ``None``
+forever), which ``holon:StateAssertionNonOverlapShape`` correctly flags as
+a violation -- meaning every legitimate second-or-later transition on any
+gated dataset would be rejected by the very gate meant to protect it. Fixed
+by having ``_plan`` accept the new transition's own ``assertion_iri`` (so
+``sequence.mint`` now runs before ``_plan``, not after -- minting doesn't
+depend on the plan, so this reordering is free) and write/replace
+``holon:currentAssertion`` alongside ``holon:currentValue`` in the scalar
+branch. List-mode fluents don't need this: membership has no single
+"current assertion" to point at in the first place.
 
 Init is not a separate operation. ``Operation.SET`` on a fluent with no
 existing ``holon:currentValue`` simply matches no prior triple in its WHERE
@@ -42,8 +55,7 @@ a violation -- but ``sparql_update`` (the only tool that can execute this
 module's atomic multi-graph transaction) has no ``shapes_graph`` hook of
 its own, so there was a real, if brief, window where invalid state existed
 in the store before compensation landed, and a second concurrent writer
-could race the compensating write itself (a real bug, never shipped fixed,
-found by asking exactly this question rather than patching it).
+could race the compensating write itself.
 
 Both problems have the same root cause: validating *after* the graphs
 that matter are already live. So this validates on scratch copies first.
@@ -57,9 +69,12 @@ that against the dataset's shapes graph. Only if that conforms does the
 identical update run for real, against the live graphs. A rejected
 transition never appears in ``events`` or ``scene`` -- not even briefly,
 and there is nothing to compensate because nothing live was ever touched.
-Verified directly: after a deliberately rejected transition, both live
-graphs were re-read and confirmed byte-for-byte unchanged from before the
-attempt.
+Verified directly, twice: once for a clean transition (confirmed a live
+graph re-read shows exactly the validated state), and once for the
+currentAssertion bug above (confirmed the failure live, not hypothesised),
+after which the fix was re-verified the same way -- a Set-then-Insert
+sequence on a gated dataset now produces a correctly superseded chain and
+passes pre-commit validation at every step.
 
 An absent or empty shapes graph is not an error -- it means no gate is
 configured for this dataset, which is the common case, and transitions
@@ -346,10 +361,10 @@ async def update_fluent(
     for _ in range(attempts):
         current, current_assertion = await _read_current(client, conn, fluent=fluent)
 
-        new_value, guard_clause, scene_delete, scene_insert = _plan(
-            mode, operation, current, value, fluent, is_iri
-        )
-
+        # Minted before _plan(), not after -- _plan() needs this transition's
+        # own assertion IRI to write holon:currentAssertion in the scalar
+        # branch. Minting never depended on the plan, so this ordering
+        # costs nothing.
         minted = await sequence.mint(
             client,
             conn,
@@ -358,6 +373,10 @@ async def update_fluent(
             authorised_by=asserted_by,
         )
         assertion_iri = minted.iri
+
+        new_value, guard_clause, scene_delete, scene_insert = _plan(
+            mode, operation, current, value, fluent, is_iri, assertion_iri
+        )
 
         clauses = [
             "a hevt:StateAssertion",
@@ -461,12 +480,22 @@ def _plan(
     value: Any,
     fluent: str,
     is_iri: bool,
+    assertion_iri: str,
 ) -> tuple[TypedValue, str, str, str]:
     """Compute (new_value, WHERE guard, scene DELETE pattern, scene INSERT
     pattern) for one transition. All arithmetic happens here, in Python --
     not pushed into SPARQL, since SPARQL 1.1 has no trustworthy native
     date-duration arithmetic and list membership isn't a scalar operation
     regardless.
+
+    ``assertion_iri`` is this transition's own newly-minted StateAssertion
+    IRI -- the scalar branch writes it as holon:currentAssertion alongside
+    holon:currentValue, which is what lets the *next* transition find its
+    predecessor to supersede in O(1). Omitting this was a real, severe bug
+    (see the module docstring) -- without it, current_assertion always
+    reads back None, hevt:supersedes never gets asserted past the first
+    transition, and every StateAssertionNonOverlapShape check on a gated
+    dataset fails from the second transition onward.
 
     The guard returned here is a bare pattern -- no GRAPH wrapper. The
     caller (update_fluent) wraps it in GRAPH <scene_graph> { ... } once,
@@ -478,6 +507,9 @@ def _plan(
     """
 
     if operation in (Operation.LIST_INSERT, Operation.LIST_REMOVE):
+        # List-mode fluents have no single "current assertion" -- membership
+        # is a set, not a scalar state, so there's nothing here for
+        # holon:currentAssertion to point at.
         member_term = _render_input(value, is_iri=is_iri)
         member_typed = TypedValue(
             kind="uri" if is_iri else "literal", lexical=str(value)
@@ -520,11 +552,22 @@ def _plan(
     else:
         guard = (
             f"<{fluent}> holon:currentValue ?existingValue .\n"
+            f"    OPTIONAL {{ <{fluent}> holon:currentAssertion ?existingAssertion . }}\n"
             f"    FILTER (?existingValue = {current.as_term()})"
         )
-        scene_delete = f"<{fluent}> holon:currentValue ?existingValue ."
+        # ?existingAssertion may be unbound (a fluent set before this fix
+        # shipped, with no currentAssertion triple at all) -- DELETE simply
+        # matches nothing for that pattern in that case, which is correct:
+        # there is nothing to delete.
+        scene_delete = (
+            f"<{fluent}> holon:currentValue ?existingValue .\n"
+            f"  <{fluent}> holon:currentAssertion ?existingAssertion ."
+        )
 
-    scene_insert = f"<{fluent}> holon:currentValue {new_typed.as_term()} ."
+    scene_insert = (
+        f"<{fluent}> holon:currentValue {new_typed.as_term()} ;\n"
+        f"             holon:currentAssertion <{assertion_iri}> ."
+    )
     return new_typed, guard, scene_delete, scene_insert
 
 
