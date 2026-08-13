@@ -26,27 +26,32 @@ clause and inserts fresh -- the same code path, not a special case. Clear
 and Unset are deliberately not primitives here -- see :func:`prior_value`
 for how a caller builds a "revert" from an ordinary Set.
 
-Gating. ``sparql_update`` -- the only tool that can execute this module's
-atomic multi-graph transaction -- has no ``shapes_graph`` hook of its own
-(unlike ``push_turtle``/``ingest``, which validate before a single-graph
-write). Confirmed by testing directly: a hand-crafted violation of
-``holon:StateAssertionNonOverlapShape`` inserted via raw ``sparql_update``
-met zero resistance. So this module validates itself, after the fact: once
-a transition's write is confirmed, the fluent's own current-state
-neighbourhood (never the whole ledger, which only grows) is checked against
-whatever shapes exist in the dataset's shapes graph. A blocking violation is
-compensated -- the just-inserted ledger entry is deleted and scene state is
-restored to what it was -- and raised as a :class:`FluentError`. This is
-detect-and-compensate, not prevent-before-write: there is a real, if brief,
-window where the bad state exists in the store before the compensation
-lands. A caller that cannot tolerate that window at all needs a different
-mechanism (a SPARQL-level CONSTRUCT-based pre-check the caller runs before
-ever calling this function) -- not something this module can close on its
-own without the underlying tool gaining a real pre-write hook.
+Gating: true pre-commit prevention, not detect-and-compensate. An earlier
+version of this module validated after the live write and rolled back on
+a violation -- but ``sparql_update`` (the only tool that can execute this
+module's atomic multi-graph transaction) has no ``shapes_graph`` hook of
+its own, so there was a real, if brief, window where invalid state existed
+in the store before compensation landed, and a second concurrent writer
+could race the compensating write itself (a real bug, never shipped fixed,
+found by asking exactly this question rather than patching it).
+
+Both problems have the same root cause: validating *after* the graphs
+that matter are already live. So this validates on scratch copies first.
+``_precommit_check`` COPYs the affected graphs (events, scene) to scratch,
+applies the *exact same* candidate SPARQL text against those copies (only
+the graph IRIs are substituted -- nothing else differs from what would run
+against the live graphs), scopes a check to just this fluent's own
+current-state neighbourhood (never the whole ledger, which only grows --
+this stays O(1) per fluent regardless of history length), and validates
+that against the dataset's shapes graph. Only if that conforms does the
+identical update run for real, against the live graphs. A rejected
+transition never appears in ``events`` or ``scene`` -- not even briefly,
+and there is nothing to compensate because nothing live was ever touched.
 
 An absent or empty shapes graph is not an error -- it means no gate is
 configured for this dataset, which is the common case, and transitions
-proceed unchecked exactly as before this was added.
+proceed straight to the live commit, exactly as before this was added, at
+no extra cost.
 """
 
 from __future__ import annotations
@@ -82,8 +87,8 @@ PREFIX rdfs:  <http://www.w3.org/2000/01/rdf-schema#>
 
 class FluentError(RuntimeError):
     """A fluent update was rejected -- wrong mode/operation pairing, a delta
-    operation with no prior value, a post-write SHACL violation that was
-    compensated, or exhausted retry attempts."""
+    operation with no prior value, a pre-commit SHACL violation (nothing
+    live was touched), or exhausted retry attempts."""
 
     def __init__(self, message: str, *, report: "shacl_mod.ValidationReport | None" = None) -> None:
         super().__init__(message)
@@ -197,14 +202,20 @@ SELECT ?mode WHERE {{
 
 
 async def _read_current(
-    client: FusekiClient, conn: Conn, *, fluent: str
+    client: FusekiClient, conn: Conn, *, fluent: str, scene_graph: str | None = None
 ) -> tuple[TypedValue | None, str | None]:
     """Return (current value, current StateAssertion IRI), typed properly
     from the SPARQL JSON binding rather than sniffed from its string form.
-    (None, None) means this fluent has never been set."""
+    (None, None) means this fluent has never been set.
+
+    ``scene_graph`` defaults to the live scene graph; a caller checking a
+    scratch copy during pre-commit validation passes the scratch IRI
+    instead, so this same helper works for both.
+    """
+    graph = scene_graph or conn.scene_graph
     query = f"""{_PREFIXES}
 SELECT ?value ?assertion WHERE {{
-  GRAPH <{conn.scene_graph}> {{
+  GRAPH <{graph}> {{
     <{fluent}> holon:currentValue ?value .
     OPTIONAL {{ <{fluent}> holon:currentAssertion ?assertion . }}
   }}
@@ -219,46 +230,67 @@ SELECT ?value ?assertion WHERE {{
     return value, assertion
 
 
-async def _validate_transition(
-    client: FusekiClient, conn: Conn, *, fluent: str
-) -> "shacl_mod.ValidationReport | None":
-    """Check this fluent's own current-state neighbourhood -- its
+async def _precommit_check(
+    client: FusekiClient,
+    conn: Conn,
+    *,
+    fluent: str,
+    events_graph: str,
+    scene_graph: str,
+    ledger_insert: str,
+    scene_update: str,
+    shapes_turtle: str,
+) -> "shacl_mod.ValidationReport":
+    """Validate the exact candidate transition before it ever touches a
+    live graph.
+
+    Copies ``events_graph`` and ``scene_graph`` to scratch graphs, applies
+    ``ledger_insert``/``scene_update`` against those copies with only the
+    graph IRIs substituted -- the SPARQL text is otherwise byte-for-byte
+    what would run against the live graphs, so what gets validated is
+    exactly the candidate transition, not an approximation of it. Then
+    scopes a check to this fluent's own current-state neighbourhood (its
     non-invalidated, non-superseded StateAssertion(s), which should be
-    exactly one -- against whatever shapes exist in the dataset's shapes
-    graph. Scoped deliberately: validating the whole events graph on every
-    transition would grow with the ledger forever; this stays O(1) per
-    fluent regardless of how long its history gets.
+    exactly one) against ``shapes_turtle``.
 
-    Returns None (nothing to check) when the shapes graph is empty or
-    absent, rather than treating an unconfigured gate as a violation --
-    most datasets will not have fluent shapes declared, and that is a
-    legitimate, common state, not an error.
+    Everything scratch is dropped before returning, success or failure.
     """
-    shapes_turtle = await client.get_graph(conn, conn.shapes_graph)
-    if not shapes_turtle.strip():
-        return None
+    token = uuid.uuid4().hex
+    scratch_events = f"urn:{conn.dataset}:scratch:fluent-{token}:events"
+    scratch_scene = f"urn:{conn.dataset}:scratch:fluent-{token}:scene"
 
-    scope_query = f"""{_PREFIXES}
+    trial_ledger = ledger_insert.replace(f"<{events_graph}>", f"<{scratch_events}>")
+    trial_scene = scene_update.replace(f"<{scene_graph}>", f"<{scratch_scene}>")
+
+    try:
+        await client.update(conn, f"COPY SILENT GRAPH <{events_graph}> TO <{scratch_events}>")
+        await client.update(conn, f"COPY SILENT GRAPH <{scene_graph}> TO <{scratch_scene}>")
+        await client.update(conn, f"{_PREFIXES}\n{trial_ledger}\n;\n{trial_scene}")
+
+        scope_query = f"""{_PREFIXES}
 CONSTRUCT {{ ?assertion ?p ?o . }}
 WHERE {{
-  GRAPH <{conn.graph("events")}> {{
+  GRAPH <{scratch_events}> {{
     ?assertion hevt:forFluent <{fluent}> ; ?p ?o .
     FILTER NOT EXISTS {{ ?assertion hevt:invalidatedAt ?anyInvalidation }}
     FILTER NOT EXISTS {{ ?later hevt:supersedes ?assertion }}
   }}
 }}"""
-    scoped_turtle = await client.construct(conn, scope_query)
+        scoped_turtle = await client.construct(conn, scope_query)
 
-    scratch = f"urn:{conn.dataset}:scratch:fluent-validate-{uuid.uuid4().hex}"
-    try:
-        await client.post_graph(conn, scratch, scoped_turtle)
-        report_turtle = await client.shacl_validate(
-            conn, target_graph=scratch, shapes_turtle=shapes_turtle
-        )
+        validate_scratch = f"urn:{conn.dataset}:scratch:fluent-validate-{token}"
+        try:
+            await client.post_graph(conn, validate_scratch, scoped_turtle)
+            report_turtle = await client.shacl_validate(
+                conn, target_graph=validate_scratch, shapes_turtle=shapes_turtle
+            )
+        finally:
+            await client.drop_graph(conn, validate_scratch)
+
+        return shacl_mod.parse_report(report_turtle)
     finally:
-        await client.drop_graph(conn, scratch)
-
-    return shacl_mod.parse_report(report_turtle)
+        await client.drop_graph(conn, scratch_events)
+        await client.drop_graph(conn, scratch_scene)
 
 
 async def update_fluent(
@@ -275,9 +307,10 @@ async def update_fluent(
     attempts: int = 8,
 ) -> FluentUpdateResult:
     """Perform one fluent transition: an atomic ledger append plus a
-    destructive scene-graph update, in a single SPARQL request, then a
-    scoped post-write SHACL check (see the module docstring's "Gating"
-    section for what this does and does not guarantee).
+    destructive scene-graph update, in a single SPARQL request -- validated
+    on scratch copies first when the dataset has a shapes graph configured
+    (see the module docstring's "Gating" section), so a rejected transition
+    never reaches the live graphs at all.
 
     ``value`` means different things per operation: the absolute new value
     for SET, the delta magnitude for INSERT/REMOVE, the member IRI/literal
@@ -293,6 +326,9 @@ async def update_fluent(
     asserted_dt = asserted_datetime or datetime.now(timezone.utc)
     events_graph = conn.graph("events")
     scene_graph = conn.scene_graph
+
+    shapes_turtle = await client.get_graph(conn, conn.shapes_graph)
+    gated = bool(shapes_turtle.strip())
 
     for _ in range(attempts):
         current, current_assertion = await _read_current(client, conn, fluent=fluent)
@@ -348,6 +384,26 @@ WHERE {{
   {guard_clause}
 }}"""
 
+        if gated:
+            report = await _precommit_check(
+                client,
+                conn,
+                fluent=fluent,
+                events_graph=events_graph,
+                scene_graph=scene_graph,
+                ledger_insert=ledger_insert,
+                scene_update=scene_update,
+                shapes_turtle=shapes_turtle,
+            )
+            if report.blocking:
+                raise FluentError(
+                    f"<{fluent}> {operation.value} rejected by shapes graph "
+                    f"<{conn.shapes_graph}> ({len(report.blocking)} violation(s)); "
+                    "nothing live was touched -- checked on a scratch copy "
+                    "before this transition ever reached events or scene",
+                    report=report,
+                )
+
         full_update = f"{_PREFIXES}\n{ledger_insert}\n;\n{scene_update}"
         await client.update(conn, full_update)
 
@@ -355,29 +411,13 @@ WHERE {{
             client, conn, fluent=fluent
         )
         if confirmed_assertion != assertion_iri:
-            # Lost the race: another writer's transition landed between our
-            # read and our write. Retry from a fresh read, same as
-            # sequence.mint().
+            # Lost the race on the live commit: another writer's transition
+            # landed between our read and our write. Retry from a fresh
+            # read, same as sequence.mint(). This is a live-commit
+            # concurrency loss, distinct from a pre-commit shapes
+            # rejection above -- the latter is never worth retrying, since
+            # the same violation would just recur.
             continue
-
-        report = await _validate_transition(client, conn, fluent=fluent)
-        if report is not None and report.blocking:
-            await _compensate(
-                client,
-                conn,
-                fluent=fluent,
-                assertion_iri=assertion_iri,
-                prior_value=current,
-                prior_assertion=current_assertion,
-            )
-            raise FluentError(
-                f"<{fluent}> {operation.value} rejected by shapes graph "
-                f"<{conn.shapes_graph}> ({len(report.blocking)} violation(s)); "
-                "write was compensated -- scene and ledger are as if this "
-                "transition never happened, except for the ledger entry "
-                "itself, which nothing ever deletes (see below)",
-                report=report,
-            )
 
         return FluentUpdateResult(
             fluent=fluent,
@@ -393,66 +433,6 @@ WHERE {{
         f"could not update <{fluent}> after {attempts} attempts "
         "(contention from a concurrent writer)"
     )
-
-
-async def _compensate(
-    client: FusekiClient,
-    conn: Conn,
-    *,
-    fluent: str,
-    assertion_iri: str,
-    prior_value: TypedValue | None,
-    prior_assertion: str | None,
-) -> None:
-    """Undo a transition that failed post-write validation: restore scene
-    to exactly what it held before, and mark (never delete) the rejected
-    ledger entry.
-
-    The ledger entry itself is NOT deleted -- this module's whole premise
-    is that the ledger is append-only, and an entry that was written and
-    then rejected is still a true fact ("this was attempted, and shown to
-    violate a shape") worth keeping. It is marked hevt:invalidatedAt /
-    hevt:invalidationReason instead, using the same correct-without-erasing
-    mechanism the ledger already has for every other kind of correction.
-    Only the *scene* graph -- which was always meant to be disposable and
-    reconstructable -- gets rolled back outright.
-    """
-    now = datetime.now(timezone.utc).isoformat()
-    scene_restore = (
-        f"""INSERT {{
-  GRAPH <{conn.scene_graph}> {{
-    <{fluent}> holon:currentValue {prior_value.as_term()} ;
-               holon:currentAssertion <{prior_assertion}> .
-  }}
-}}
-WHERE {{ }}"""
-        if prior_value is not None and prior_assertion is not None
-        else "# nothing to restore -- this was an Init, so scene simply reverts to absent"
-    )
-
-    update = f"""{_PREFIXES}
-DELETE {{
-  GRAPH <{conn.scene_graph}> {{
-    <{fluent}> holon:currentValue ?anyValue ;
-               holon:currentAssertion ?anyAssertion .
-  }}
-}}
-WHERE {{
-  GRAPH <{conn.scene_graph}> {{
-    <{fluent}> holon:currentValue ?anyValue .
-    OPTIONAL {{ <{fluent}> holon:currentAssertion ?anyAssertion . }}
-  }}
-}}
-;
-{scene_restore}
-;
-INSERT DATA {{
-  GRAPH <{conn.graph("events")}> {{
-    <{assertion_iri}> hevt:invalidatedAt "{now}"^^xsd:dateTime ;
-                       hevt:invalidationReason "rejected by post-write SHACL validation; scene state was compensated" .
-  }}
-}}"""
-    await client.update(conn, update)
 
 
 def _plan(
