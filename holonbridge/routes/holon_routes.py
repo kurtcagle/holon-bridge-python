@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
@@ -25,6 +27,14 @@ async def holon(
     iri: str = Query(..., description="holon IRI"),
     projection_mode: str = Query(default="immersive"),
     include_shapes: bool = Query(default=True),
+    observed_at: datetime | None = Query(
+        default=None,
+        description="Valid-time as-of read over fluent history. Omit for current state.",
+    ),
+    inserted_at: datetime | None = Query(
+        default=None,
+        description="Transaction-time bound, paired with observed_at. Defaults to observed_at when only one is given.",
+    ),
 ) -> str:
     """Return a holon as a rendered DataBook."""
     if projection_mode not in PROJECTION_MODES:
@@ -39,6 +49,8 @@ async def holon(
             holon_iri=iri,
             projection_mode=projection_mode,
             include_shapes=include_shapes,
+            observed_at=observed_at,
+            inserted_at=inserted_at,
         )
     except FusekiError as exc:
         raise HTTPException(exc.status or 502, detail=exc.as_dict()) from exc

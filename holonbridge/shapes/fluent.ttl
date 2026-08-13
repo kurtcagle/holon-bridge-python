@@ -1,0 +1,80 @@
+## Reference SHACL shapes for the fluent/scene-graph pattern.
+##
+## Push into a dataset's own `shacl` graph (conn.shapes_graph) to enable
+## the gating that holonbridge.fluent.update_fluent() checks against.
+##
+## Corrects a bug found during scratch testing (2026-08-12): an earlier
+## draft of holon:FluentPropertyRangeShape used
+## `sh:targetObjectsOf holon:fluentProperty`, which validates the WRONG
+## triple pattern -- it checked the object of the *link* property
+## (holon:fluentProperty, added this session, connecting a Fluent instance
+## to which FluentProperty type it instantiates) rather than the pattern
+## the shape's own name and original intent describe: any DOMAIN predicate
+## declared `a holon:FluentProperty` (e.g. `Account:hasValue`) must, in its
+## own usage anywhere in the graph, point at a holon:Fluent. Those are two
+## different constraints on two different properties, and the first draft
+## validated the wrong one -- confirmed against a live SHACL endpoint
+## (full-mode validate_turtle), not merely re-read. Fixed below by giving
+## each pattern its own shape.
+
+@prefix holon: <https://w3id.org/holon/> .
+@prefix hevt:  <https://w3id.org/holon/event/> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sh:    <http://www.w3.org/ns/shacl#> .
+
+## Any predicate declared `a holon:FluentProperty` must, wherever it is
+## used as a predicate, point at a holon:Fluent -- never a direct literal
+## or entity value. A SPARQL target, not a static sh:targetObjectsOf on one
+## fixed predicate, because the set of FluentProperty-typed predicates is
+## open: any domain can declare a new one (e.g. Account:hasValue) without
+## this shape needing to know its name in advance.
+holon:FluentPropertyRangeShape a sh:NodeShape ;
+    rdfs:comment "Any predicate declared a holon:FluentProperty must, wherever used, point at a holon:Fluent -- never a direct literal or entity value."@en ;
+    sh:target [
+        a sh:SPARQLTarget ;
+        sh:select """
+            PREFIX holon: <https://w3id.org/holon/>
+            SELECT ?this WHERE {
+                ?predicate a holon:FluentProperty .
+                ?s ?predicate ?this .
+            }
+        """ ;
+    ] ;
+    sh:class holon:Fluent .
+
+## The correct constraint for holon:fluentProperty itself (added this
+## session): its object is the FluentProperty type descriptor a Fluent
+## instantiates -- e.g. Account:AccountBalanceProperty -- which must be a
+## holon:FluentProperty, not a holon:Fluent. Distinct shape, distinct
+## pattern; the bug above came from conflating this one with the shape
+## above.
+holon:FluentPropertyLinkRangeShape a sh:NodeShape ;
+    rdfs:comment "holon:fluentProperty links a Fluent instance to the FluentProperty type it instantiates -- its object must be a holon:FluentProperty (the type descriptor), never a holon:Fluent."@en ;
+    sh:targetObjectsOf holon:fluentProperty ;
+    sh:class holon:FluentProperty .
+
+## Verified correct as originally written -- both a positive case (a clean
+## supersession chain conforms) and a negative case (a deliberately
+## inserted rogue StateAssertion that neither supersedes the prior current
+## assertion nor is invalidated) were run against a live SHACL endpoint.
+## The negative case correctly flagged both sides of the overlapping pair.
+holon:StateAssertionNonOverlapShape a sh:NodeShape ;
+    rdfs:comment "For a given hevt:forFluent, at most one non-invalidated hevt:StateAssertion may exist without being superseded by another non-invalidated one."@en ;
+    sh:targetClass hevt:StateAssertion ;
+    sh:sparql [
+        sh:message "This StateAssertion's fluent has more than one current (non-invalidated, non-superseded) assertion." ;
+        sh:select """
+            PREFIX hevt: <https://w3id.org/holon/event/>
+            SELECT $this WHERE {
+                $this hevt:forFluent ?fluent .
+                FILTER NOT EXISTS { $this hevt:invalidatedAt ?anyInvalidation }
+                FILTER NOT EXISTS { ?later hevt:supersedes $this }
+                FILTER EXISTS {
+                    ?other hevt:forFluent ?fluent .
+                    FILTER (?other != $this)
+                    FILTER NOT EXISTS { ?other hevt:invalidatedAt ?anyOtherInvalidation }
+                    FILTER NOT EXISTS { ?laterOther hevt:supersedes ?other }
+                }
+            }
+        """ ;
+    ] .
