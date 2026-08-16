@@ -300,6 +300,21 @@ async def _call(
         return response.text
 
 
+# --- identity -------------------------------------------------------------
+
+
+@mcp.tool()
+async def whoami() -> dict:
+    """Which Person the bridge resolved this session's credential as.
+
+    Requires nothing beyond a resolved identity -- no grant on anything.
+    Exists because every founder currently holds identical grants, so no
+    permission-based test can tell them apart; this answers "who am I"
+    directly instead of by inference from what does or doesn't succeed.
+    """
+    return await _call("GET", "/whoami")
+
+
 # --- P1 core ------------------------------------------------------------------
 
 
