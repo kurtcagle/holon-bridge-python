@@ -139,13 +139,47 @@ async def build_animus(
 
 
 # --------------------------------------------------------------------------
+# Admin bypass
+# --------------------------------------------------------------------------
+#
+# Deliberately NOT another entry in the most-specific-wins precedence chain
+# that governs everything else in this module (individual override beats
+# role grant). Admin is a separate axis -- a narrowly-held, break-glass
+# capability for bootstrap and administration, not a role competing for
+# access the ordinary way. Holding it bypasses every check below
+# unconditionally, including past a deniedTo override. Because it skips the
+# override check too, it should be granted sparingly and audited, not
+# treated as "just another role with more grants."
+
+def _admin_role(holons_graph: str) -> str:
+    """The reserved admin Role IRI for this dataset, derived the same way
+    every other org-tier resource is named: swap the trailing ``:holons``
+    for the resource's own path segment."""
+    suffix = ":holons"
+    if not holons_graph.endswith(suffix):
+        raise ValueError(f"expected holons_graph to end with {suffix!r}, got {holons_graph!r}")
+    return holons_graph[: -len(suffix)] + ":role:admin"
+
+
+async def is_admin(query_fn: QueryFn, holons_graph: str, *, person: str) -> bool:
+    """Whether ``person`` holds the reserved admin Role for this dataset."""
+    query = f"""
+    PREFIX holon: <{HOLON}>
+    ASK {{ GRAPH <{holons_graph}> {{ <{person}> holon:hasRole <{_admin_role(holons_graph)}> . }} }}
+    """
+    result = await _run(query_fn, query)
+    return bool(result.get("boolean"))
+
+
+# --------------------------------------------------------------------------
 # Grant checks
 # --------------------------------------------------------------------------
 #
-# All three share one shape: check the individual override first (it always
-# wins), then check whether any Role the Person holds carries a matching
-# grant. Absence of a grant is a denial, never an allow -- there is no
-# default-permit path anywhere in this module.
+# All three share one shape: check admin first (unconditional bypass), then
+# the individual override (it always wins over an ordinary role grant),
+# then whether any Role the Person holds carries a matching grant. Absence
+# of a grant is a denial, never an allow -- there is no default-permit path
+# anywhere in this module below the admin bypass.
 
 async def _denied_by_override(
     query_fn: QueryFn, holons_graph: str, *, target: str, person: str
@@ -162,6 +196,8 @@ async def check_read(
     query_fn: QueryFn, holons_graph: str, *, person: str, persona: str
 ) -> AclDecision:
     """May ``person`` read content scoped to ``persona`` (a Persona IRI)?"""
+    if await is_admin(query_fn, holons_graph, person=person):
+        return AclDecision(True, "admin role bypass", person)
     if await _denied_by_override(query_fn, holons_graph, target=persona, person=person):
         return AclDecision(False, "individual deniedTo override", person)
 
@@ -185,6 +221,8 @@ async def check_invoke(
     query_fn: QueryFn, holons_graph: str, *, person: str, named_query: str
 ) -> AclDecision:
     """May ``person`` invoke ``named_query`` (or a NamedRule, same shape)?"""
+    if await is_admin(query_fn, holons_graph, person=person):
+        return AclDecision(True, "admin role bypass", person)
     if await _denied_by_override(query_fn, holons_graph, target=named_query, person=person):
         return AclDecision(False, "individual deniedTo override", person)
 
@@ -207,9 +245,12 @@ async def check_invoke(
 async def check_write(
     query_fn: QueryFn, holons_graph: str, *, person: str, target: str
 ) -> AclDecision:
-    """May ``person`` write to ``target``? Never via a Role -- see the
-    read/write asymmetry in the DataBook. Only an explicit holon:grantsWrite
-    naming this exact (person, target) pair allows it."""
+    """May ``person`` write to ``target``? Never via an ordinary Role grant
+    -- see the read/write asymmetry in the DataBook -- and the admin bypass
+    is the sole deliberate exception to that. Otherwise only an explicit
+    holon:grantsWrite naming this exact (person, target) pair allows it."""
+    if await is_admin(query_fn, holons_graph, person=person):
+        return AclDecision(True, "admin role bypass", person)
     query = f"""
     PREFIX holon: <{HOLON}>
     ASK {{
