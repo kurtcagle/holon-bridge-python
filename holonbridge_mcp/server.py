@@ -21,6 +21,16 @@ Read from a shared ``.env`` — see :mod:`holonbridge.envfile` — before any of
 the constants below are resolved, so this module is the one place a direct
 ``python -m holonbridge_mcp.server`` invocation is still covered even though
 it never goes through ``__main__.py``.
+
+CHANGED 2026-08-15: ``_headers()`` now adds ``X-Holon-Animus-Id`` /
+``X-Holon-Animus-Type`` when :data:`holonbridge_mcp.identity.current_github_login`
+carries a verified identity — the REST bridge's ACL layer resolves that
+header to a Person and checks their Role grants before allowing a read,
+write, or named-query invocation. Absent (stdio transport, or the remote
+transport's static-token credential, which by design has no per-user
+identity) means no animus header is sent, and the bridge's own
+``require_animus`` dependency is what turns that into a clean 401 rather
+than a silent bypass.
 """
 
 from __future__ import annotations
@@ -35,6 +45,8 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 from holonbridge.envfile import load_shared_env
+
+from .identity import current_github_login
 
 log = logging.getLogger("holonbridge_mcp.server")
 
@@ -236,6 +248,10 @@ def _headers() -> dict[str, str]:
         headers["Authorization"] = f"Bearer {BEARER}"
     if _dataset_override:
         headers["X-Dataset-Override"] = _dataset_override
+    login = current_github_login.get()
+    if login:
+        headers["X-Holon-Animus-Id"] = login
+        headers["X-Holon-Animus-Type"] = "GitHubIdentity"
     return headers
 
 
