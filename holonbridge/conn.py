@@ -14,6 +14,15 @@ dataset for the same reason -- flipping it unconditionally for every bank
 would silently break every dataset that has not actually been rewritten
 onto the new convention, which as of 2026-07-29 is every dataset except
 worldtest.
+
+CHANGED 2026-08-15: added persona_user_graph / persona_graph /
+persona_for_graph. The Aimee/Carlo proof-of-concept needed a graph per
+(persona, role, user) -- one level deeper than ``scoped`` goes -- and it
+was built by hand against a live dataset before this method existed to
+build it correctly. These three methods are that convention made into
+code, so nothing constructs ``urn:{dataset}:persona:...`` as a raw string
+anywhere else. See the ACL architecture DataBook for why the shape looks
+like this.
 """
 
 from __future__ import annotations
@@ -41,6 +50,8 @@ GRAPH_ROLES: Final = (
     "sequences",
     "meta",
 )
+
+_IRI_UNSAFE: Final = "<> \"{}|^`"
 
 
 @dataclass(frozen=True)
@@ -82,33 +93,75 @@ class Conn:
         see the module docstring for why."""
         return self.dataset in self.bank_scoped_datasets
 
+    def _prefix(self) -> str:
+        if self._bank_scoped:
+            return f"urn:{self.bank_name}:{self.dataset}"
+        return f"urn:{self.dataset}"
+
     def graph(self, role: str) -> str:
         """Return the canonical graph IRI for a role in this dataset."""
         if role not in GRAPH_ROLES:
             raise ValueError(
                 f"unknown graph role {role!r}; expected one of {', '.join(GRAPH_ROLES)}"
             )
-        if self._bank_scoped:
-            return f"urn:{self.bank_name}:{self.dataset}:{role}"
-        return f"urn:{self.dataset}:{role}"
+        return f"{self._prefix()}:{role}"
 
     def scoped(self, role: str, key: str) -> str:
         """A per-artefact graph under a role: ``urn:{dataset}:{role}:{key}``,
         or ``urn:{bank}:{dataset}:{role}:{key}`` once this dataset has opted
         into the bank-scoped convention.
 
-        Used where one graph per artefact beats one graph holding many —
+        Used where one graph per artefact beats one graph holding many --
         a pipeline manifest, for instance, which is far easier to replace,
         drop, and reason about on its own.
         """
         if role not in GRAPH_ROLES:
             raise ValueError(f"unknown graph role {role!r}")
-        if not key or any(ch in key for ch in "<> \"{}|^`"):
+        if not key or any(ch in key for ch in _IRI_UNSAFE):
             raise ValueError(f"{key!r} cannot be used in a graph IRI")
         singular = role[:-1] if role.endswith("s") else role
-        if self._bank_scoped:
-            return f"urn:{self.bank_name}:{self.dataset}:{singular}:{key}"
-        return f"urn:{self.dataset}:{singular}:{key}"
+        return f"{self._prefix()}:{singular}:{key}"
+
+    def persona_user_graph(self, persona: str, role: str, user: str) -> str:
+        """Graph IRI for one persona's per-(role, user) scope:
+        ``urn:{dataset}:persona:{persona}:user:{user}:{role}``.
+
+        ``user`` is a real person's internal userId, or the reserved literal
+        ``"public"`` for that persona's own curated common-knowledge graph
+        -- ``public`` is not a real user, see the ACL architecture DataBook.
+        ``role`` is one of ``GRAPH_ROLES``, same as everywhere else; in
+        practice this is almost always ``"holons"``.
+        """
+        if role not in GRAPH_ROLES:
+            raise ValueError(f"unknown graph role {role!r}")
+        for part, label in (("persona", persona), ("user", user)):
+            if not label or any(ch in label for ch in _IRI_UNSAFE + ":"):
+                raise ValueError(f"{part} {label!r} cannot be used in a graph IRI")
+        return f"{self._prefix()}:persona:{persona}:user:{user}:{role}"
+
+    def persona_graph(self, persona: str) -> str:
+        """The org-tier ``holon:Persona`` resource IRI itself, e.g.
+        ``urn:{dataset}:persona:aimee`` -- distinct from
+        ``persona_user_graph``, which names a *graph*, not this holon."""
+        if not persona or any(ch in persona for ch in _IRI_UNSAFE + ":"):
+            raise ValueError(f"persona {persona!r} cannot be used in a graph IRI")
+        return f"{self._prefix()}:persona:{persona}"
+
+    def persona_for_graph(self, graph_iri: str) -> str | None:
+        """Inverse of ``persona_user_graph``: given any graph IRI, the
+        Persona resource IRI that owns it, or ``None`` if the graph is
+        outside the persona/user scheme entirely (org ground truth,
+        ``ontology``, ``shacl``, and so on all correctly return ``None`` --
+        those are not persona-gated; see the ACL architecture DataBook).
+        """
+        prefix = f"{self._prefix()}:persona:"
+        if not graph_iri.startswith(prefix):
+            return None
+        remainder = graph_iri[len(prefix):]
+        persona, _, _rest = remainder.partition(":")
+        if not persona:
+            return None
+        return self.persona_graph(persona)
 
     @property
     def holons_graph(self) -> str:
