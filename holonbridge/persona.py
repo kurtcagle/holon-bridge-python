@@ -21,6 +21,11 @@ does a Persona by this name exist at all in this dataset's ground truth
 (has_home, checked inside that person's own persona-user graph). Both
 build their graph IRIs from Conn, never by hand -- see persona_scope.py's
 module docstring for why that matters here too.
+
+``has_home`` takes ``person_id`` as a full Person IRI (what Animus.person
+actually holds) and derives the short graph-naming slug itself via
+``Conn.person_slug`` -- a full IRI is never a valid argument to
+``persona_user_graph`` directly, see that method's own docstring.
 """
 
 from __future__ import annotations
@@ -52,14 +57,21 @@ ASK {{ GRAPH <{conn.graph("holons")}> {{ <{conn.persona_graph(persona)}> a holon
 
 
 async def has_home(query_fn: QueryFn, conn: Conn, *, persona: str, person_id: str) -> bool:
-    """Whether `person_id` holds a holon:Home inside their own graph under
-    `persona` -- the membership test switch_persona gates on. Checked
-    inside the person's own persona-user graph, not ground truth: a Home
-    minted there is what "this person is inside this persona's envelope"
-    means."""
+    """Whether `person_id` (a full Person IRI, e.g. Animus.person) holds a
+    holon:Home inside their own graph under `persona` -- the membership
+    test switch_persona gates on. Checked inside the person's own
+    persona-user graph, not ground truth: a Home minted there is what
+    "this person is inside this persona's envelope" means.
+
+    The graph IRI is named from the short slug (``conn.person_slug
+    (person_id)``); the ASK pattern inside it still matches against the
+    full ``person_id`` IRI, since that's what ``holon:representsPerson``
+    actually points at. Two different roles for the same identifier --
+    see Conn.person_slug's docstring for why they're not interchangeable.
+    """
     query = f"""PREFIX holon: <{HOLON}>
 ASK {{
-  GRAPH <{conn.persona_user_graph(persona, "holons", person_id)}> {{
+  GRAPH <{conn.persona_user_graph(persona, "holons", conn.person_slug(person_id))}> {{
     ?home a holon:Home ;
           holon:representsPerson <{person_id}> .
   }}
