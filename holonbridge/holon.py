@@ -10,12 +10,34 @@ containment or connection predicate participates, so a domain that models
 ``geo:administrativePartOf`` or ``org:reportsTo`` navigates without the
 bridge knowing those terms exist.
 
-Current state is a union of two graphs: ``holons`` (structural triples,
-static) and ``scene`` (fluent current-values, destructively updated on
-every transition -- see :mod:`holonbridge.fluent`). Supplying ``observed_at``
-switches the fluent-valued part of the projection to an as-of read over
-``events`` instead of ``scene``, walking the hevt:StateAssertion ledger by
-timestamp.
+CHANGED 2026-08-17: current-state and neighbourhood reads are now
+persona-scoped, not pinned to ground truth alone. The caller (holon_routes.py)
+resolves a ``list[ScopedGraph]`` via ``persona_scope.resolve_scope_graphs``
+-- ordered user-private > persona-public > ground-truth, gated entirely by
+whether this caller currently holds an active persona (which itself is
+gated by Home-membership at switch_persona time, see persona_state.py) --
+and passes it in as ``scope``. No persona active means scope is exactly
+the two ground-truth graphs, same as before this change.
+
+Current state is now built with ``persona_scope.build_state_query``
+(precedence CONSTRUCT across ``scope``) rather than a plain two-graph
+UNION. Worth naming explicitly: this is a semantic change even in the
+no-persona case, from "union both graphs' triples" to "suppress a
+lower-ranked graph's triple for a predicate a higher-ranked graph already
+asserts." In practice these produce identical results for holons/scene,
+since a predicate is always either structural (holons) or fluent (scene)
+never both -- but that's a fact about how this system is actually
+populated, not something either query enforces, so it's a behaviour
+change worth someone's eyes rather than an invisible no-op.
+
+NOT YET SCOPED: ``as_of_query`` (the ``observed_at``/``inserted_at``
+path). It still reads ground truth only (``conn.holons_graph`` /
+``conn.graph("events")``), ignoring whatever ``scope`` it's given.
+Persona-scoping an as-of read means walking the events ledger per scoped
+graph with the same rank-ordered precedence ``build_state_query`` applies
+to current state, which ``persona_scope.py`` has no equivalent for yet --
+a real gap, not an oversight, and worth its own pass rather than a rushed
+extension here.
 """
 
 from __future__ import annotations
@@ -27,6 +49,7 @@ from typing import Any
 from .conn import Conn
 from .databook import Block, DataBook
 from .fuseki import FusekiClient
+from .persona_scope import ScopedGraph, build_neighbour_query, build_state_query
 
 HOLON = "https://w3id.org/holon/"
 HEVT = "https://w3id.org/holon/event/"
@@ -48,19 +71,6 @@ class Neighbour:
     predicate: str
 
 
-def state_query(conn: Conn, holon_iri: str) -> str:
-    """CONSTRUCT the holon's own triples: structural (holons) plus current
-    fluent values (scene), unioned. A holon with no fluents gets an empty
-    second clause and behaves exactly as before scene existed."""
-    return f"""{_PREFIXES}
-CONSTRUCT {{ <{holon_iri}> ?p ?o . }}
-WHERE {{
-  {{ GRAPH <{conn.holons_graph}> {{ <{holon_iri}> ?p ?o . }} }}
-  UNION
-  {{ GRAPH <{conn.scene_graph}> {{ <{holon_iri}> ?p ?o . }} }}
-}}"""
-
-
 def as_of_query(
     conn: Conn,
     holon_iri: str,
@@ -74,6 +84,9 @@ def as_of_query(
     ``inserted_at`` defaults to ``observed_at`` when not supplied -- the
     common case is 'this happened and was recorded at the same moment';
     the two axes diverge only for backdated or corrective entries.
+
+    Ground-truth only -- see this module's CHANGED note for why an as-of
+    read isn't persona-scoped yet.
 
     Walks hevt:StateAssertion by hevt:assertedDateTime directly, rather
     than following hevt:supersedes chains -- consistent with
@@ -115,35 +128,6 @@ WHERE {{
 }}"""
 
 
-def _neighbour_query(
-    conn: Conn, holon_iri: str, *, root: str, direction: str
-) -> str:
-    """Build a role-discovering neighbourhood query.
-
-    ``direction`` is ``up`` (focus → parent), ``down`` (child → focus), or
-    ``across`` (focus → peer, for connection predicates).
-    """
-    if direction == "up":
-        pattern = f"<{holon_iri}> ?predicate ?neighbour ."
-    elif direction == "down":
-        pattern = f"?neighbour ?predicate <{holon_iri}> ."
-    else:
-        pattern = f"<{holon_iri}> ?predicate ?neighbour ."
-
-    return f"""{_PREFIXES}
-SELECT DISTINCT ?neighbour ?label ?predicate
-WHERE {{
-  GRAPH <{conn.ontology_graph}> {{
-    ?predicate rdfs:subPropertyOf* holon:{root} .
-  }}
-  GRAPH <{conn.holons_graph}> {{
-    {pattern}
-    OPTIONAL {{ ?neighbour rdfs:label ?label . }}
-  }}
-}}
-ORDER BY ?predicate ?neighbour"""
-
-
 async def _neighbours(
     client: FusekiClient, conn: Conn, query: str
 ) -> list[Neighbour]:
@@ -165,6 +149,7 @@ async def get_holon(
     conn: Conn,
     *,
     holon_iri: str,
+    scope: list[ScopedGraph],
     projection_mode: str = "immersive",
     include_shapes: bool = True,
     observed_at: datetime | None = None,
@@ -172,12 +157,19 @@ async def get_holon(
 ) -> DataBook:
     """Retrieve a holon and project it as a DataBook.
 
+    ``scope`` is the caller's resolved read scope (see
+    ``persona_scope.resolve_scope_graphs``) -- the route, not this
+    function, resolves identity and persona; this function only ever
+    consumes an already-resolved scope, the same separation ``holon_routes.py``
+    keeps between identity resolution and everything downstream of it.
+
     With neither ``observed_at`` nor ``inserted_at``, current state comes
-    from :func:`state_query` -- a union of ``holons`` and ``scene``, the
-    fast path, no ledger walk. Supplying either switches the fluent-valued
-    part of the projection to :func:`as_of_query`; ``observed_at`` defaults
-    to now() and ``inserted_at`` defaults to ``observed_at`` when only one
-    of the two is given.
+    from ``persona_scope.build_state_query`` across ``scope`` -- the fast
+    path, no ledger walk. Supplying either switches the fluent-valued part
+    of the projection to :func:`as_of_query`, which is NOT scope-aware yet
+    (see the module docstring) -- ``observed_at`` defaults to now() and
+    ``inserted_at`` defaults to ``observed_at`` when only one of the two
+    is given.
     """
 
     if projection_mode not in PROJECTION_MODES:
@@ -199,14 +191,14 @@ async def get_holon(
             inserted_at=eff_inserted.isoformat(),
         )
     else:
-        query = state_query(conn, holon_iri)
+        query = build_state_query(holon_iri, scope)
 
     state = await client.construct(conn, query)
 
-    up_query = _neighbour_query(conn, holon_iri, root="isPartOf", direction="up")
-    down_query = _neighbour_query(conn, holon_iri, root="isPartOf", direction="down")
-    across_query = _neighbour_query(
-        conn, holon_iri, root="isConnectedTo", direction="across"
+    up_query = build_neighbour_query(conn, holon_iri, scope, root="isPartOf", direction="up")
+    down_query = build_neighbour_query(conn, holon_iri, scope, root="isPartOf", direction="down")
+    across_query = build_neighbour_query(
+        conn, holon_iri, scope, root="isConnectedTo", direction="across"
     )
 
     parents = await _neighbours(client, conn, up_query)
@@ -222,6 +214,12 @@ async def get_holon(
             "named_graph": conn.holons_graph,
             "scene_graph": conn.scene_graph,
         },
+        # Precedence-ordered graph IRIs actually searched for this read --
+        # explicit so a reader can see which scope produced this
+        # projection without re-deriving it, especially now that the same
+        # holon_iri can legitimately return different content to
+        # different callers.
+        "scope": [g.iri for g in scope],
         "projection": {
             "mode": projection_mode,
             "parents": len(parents),
@@ -281,7 +279,13 @@ async def get_holon(
 async def _boundary_shapes(
     client: FusekiClient, conn: Conn, holon_iri: str
 ) -> str:
-    """Fetch shapes whose target class matches any type of this holon."""
+    """Fetch shapes whose target class matches any type of this holon.
+
+    Deliberately ground-truth only, always -- shapes are not one of
+    persona_scope's SCOPED_ROLES, and a persona having a different
+    validation boundary than everyone else isn't a thing this system
+    models, so there's no scope argument to thread through here.
+    """
     query = f"""{_PREFIXES}
 PREFIX sh: <http://www.w3.org/ns/shacl#>
 
