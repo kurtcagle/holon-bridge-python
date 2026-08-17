@@ -23,6 +23,15 @@ build it correctly. These three methods are that convention made into
 code, so nothing constructs ``urn:{dataset}:persona:...`` as a raw string
 anywhere else. See the ACL architecture DataBook for why the shape looks
 like this.
+
+CHANGED 2026-08-17: added person_slug. persona_user_graph's ``user``
+argument is a short local slug (``"kurt"``), and its own validation
+rejects colons -- which a resolved Person IRI (``urn:causalspark:person:
+kurt``, what Animus.person actually holds) is full of. Every caller
+sitting on Animus.person needs this derivation before it can name that
+person's persona-user graph; centralised here for the same reason the
+three methods above are, rather than every caller re-deriving it slightly
+differently.
 """
 
 from __future__ import annotations
@@ -129,6 +138,8 @@ class Conn:
         ``user`` is a real person's internal userId, or the reserved literal
         ``"public"`` for that persona's own curated common-knowledge graph
         -- ``public`` is not a real user, see the ACL architecture DataBook.
+        This is a short local slug (``"kurt"``), never a full Person IRI --
+        see ``person_slug`` if what you have is ``Animus.person``.
         ``role`` is one of ``GRAPH_ROLES``, same as everywhere else; in
         practice this is almost always ``"holons"``.
         """
@@ -162,6 +173,21 @@ class Conn:
         if not persona:
             return None
         return self.persona_graph(persona)
+
+    @staticmethod
+    def person_slug(person_iri: str) -> str:
+        """The local user-slug segment of a Person IRI -- what
+        ``persona_user_graph``'s ``user`` argument actually expects, e.g.
+        ``urn:causalspark:person:kurt`` -> ``"kurt"``. A full Person IRI is
+        never itself a valid ``user`` argument: it contains colons, which
+        ``persona_user_graph``'s own validation rejects. Takes the
+        trailing colon-separated segment regardless of bank-scoping -- a
+        Person IRI's own local segment is always last, whatever dataset
+        (and possible bank) prefix comes before it. Static because it
+        needs no dataset/bank context of its own -- it only parses the
+        IRI it's given.
+        """
+        return person_iri.rsplit(":", 1)[-1]
 
     @property
     def holons_graph(self) -> str:
