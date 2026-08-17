@@ -5,6 +5,17 @@ When ``SHACL_REQUIRED`` is on, the shapes graph defaults to the dataset's own
 ``urn:{dataset}:shacl`` — which is precisely why the naming convention has to
 hold. Delta mode is on by default so an existing violation elsewhere in the
 target graph cannot reject an unrelated write.
+
+CHANGED 2026-08-17: ``push`` now depends on ``AnimusDep`` and runs
+``check_write`` against ``body.graph_iri`` before anything reaches Fuseki --
+this route had no ACL check of any kind before this, unlike ``/sparql/*``
+(see ``routes/sparql.py``, gated since 2026-08-15). Same ``check_write``,
+same exact-match ``holon:grantsWrite``, for both ``merge`` and ``replace``
+modes -- this does NOT yet give ``replace`` a stronger bar than ``merge``,
+which is a real simplification on a graph multiple people can write. See
+the commit message / PR description for why that's deliberately deferred
+rather than folded in here. ``/graph`` (DROP) and ``/ingest`` remain
+ungated, same as before.
 """
 
 from __future__ import annotations
@@ -14,7 +25,8 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from .. import shacl as shacl_mod
-from ..deps import ClientDep, ConnDep, SettingsDep
+from ..acl import check_write
+from ..deps import AnimusDep, ClientDep, ConnDep, SettingsDep
 from ..fuseki import FusekiError
 from ..turtle import TurtleSyntaxError, parse
 
@@ -78,7 +90,7 @@ async def get_graph(conn: ConnDep, client: ClientDep, iri: str = Query(...)) -> 
 
 @router.post("/graph/push")
 async def push_turtle(
-    body: PushRequest, conn: ConnDep, client: ClientDep, settings: SettingsDep
+    body: PushRequest, conn: ConnDep, client: ClientDep, settings: SettingsDep, animus: AnimusDep
 ) -> dict:
     # Optional local pre-parse. Off by default: rdflib cannot read Turtle 1.2,
     # so Jena stays the syntax authority unless the operator opts in.
@@ -87,6 +99,21 @@ async def push_turtle(
             parse(body.turtle)
         except TurtleSyntaxError as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    if animus.person is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="unresolved identity")
+
+    async def _query_fn(q: str) -> dict:
+        return await client.select(conn, q)
+
+    decision = await check_write(
+        _query_fn, conn.holons_graph, person=animus.person, target=body.graph_iri
+    )
+    if not decision.allowed:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail=f"{decision.reason} (graph: {body.graph_iri})",
+        )
 
     shapes_graph = body.shapes_graph
     if shapes_graph is None and settings.shacl_required:
