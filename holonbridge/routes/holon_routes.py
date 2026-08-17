@@ -13,6 +13,7 @@ from .. import shacl as shacl_mod
 from ..deps import AnimusDep, BanksDep, ClientDep, ConnDep, PersonasDep, SettingsDep
 from ..fuseki import FusekiError
 from ..holon import PROJECTION_MODES, get_holon
+from ..persona_scope import resolve_scope_graphs
 
 router = APIRouter(tags=["holon"])
 
@@ -24,29 +25,51 @@ router = APIRouter(tags=["holon"])
 async def holon(
     conn: ConnDep,
     client: ClientDep,
+    animus: AnimusDep,
+    personas: PersonasDep,
     iri: str = Query(..., description="holon IRI"),
     projection_mode: str = Query(default="immersive"),
     include_shapes: bool = Query(default=True),
     observed_at: datetime | None = Query(
         default=None,
-        description="Valid-time as-of read over fluent history. Omit for current state.",
+        description="Valid-time as-of read over fluent history. Omit for current state. NOT persona-scoped yet -- see holon.py's module docstring.",
     ),
     inserted_at: datetime | None = Query(
         default=None,
         description="Transaction-time bound, paired with observed_at. Defaults to observed_at when only one is given.",
     ),
 ) -> str:
-    """Return a holon as a rendered DataBook."""
+    """Return a holon as a rendered DataBook.
+
+    CHANGED 2026-08-17: this route now requires a resolved identity
+    (``AnimusDep``), which it did not before -- same shape as the
+    ``/endpoint`` change from the switch_persona PR. A caller hitting
+    ``/holon`` with only a bearer token and no animus header will start
+    getting a 401 and needs to send ``X-Holon-Animus-Id`` like every
+    other identity-gated route.
+
+    This is what makes persona scoping real rather than advisory: the
+    read scope is resolved from the caller's own credential and their own
+    current persona switch (see ``persona_scope.resolve_scope_graphs``),
+    never from anything the request itself supplies -- there is no
+    ``persona=`` query parameter, so a caller can only ever get their own
+    scope, not name someone else's or one they haven't switched into.
+    With no persona switched, scope is exactly ground truth, matching
+    this route's behaviour before this change.
+    """
     if projection_mode not in PROJECTION_MODES:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             detail=f"projection_mode must be one of {', '.join(PROJECTION_MODES)}",
         )
+    persona, _persona_source = personas.get(person_id=animus.person, dataset=conn.dataset)
+    scope = resolve_scope_graphs(conn, person_id=animus.person, persona=persona)
     try:
         book = await get_holon(
             client,
             conn,
             holon_iri=iri,
+            scope=scope,
             projection_mode=projection_mode,
             include_shapes=include_shapes,
             observed_at=observed_at,
