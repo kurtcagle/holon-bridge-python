@@ -13,11 +13,28 @@ reachable (2026-08-17), 20/20 passing -- this is what caught
 has_home/resolve_scope_graphs passing a full Person IRI where
 persona_user_graph expects a short slug, before that bug ever reached a
 real request.
+
+FIXED 2026-08-17: PersonaStoreTests._tmp() and app_client both used to
+leave state on disk shared across test runs -- _tmp() at a fixed OS-temp
+path with no cleanup, app_client by never overriding app.state.personas
+at all, so it fell through to PersonaStore()'s real default
+(~/.holonbridge/persona-state.json). Running this file alongside another
+suite that also touches persona state (tests/test_bridge.py, once /holon
+is persona-scoped) reproduces real cross-test contamination -- a test
+here can silently inherit a persona another test switched to, or a
+different test's leftover file from a prior run. Both fixed the same way
+tests_bridge.py's own stub swaps app.state.fuseki after lifespan startup:
+route tests now explicitly install an isolated PersonaStore; the
+unittest-style store tests get a fresh temp directory per test via
+setUp(), which unittest already guarantees runs before every method.
 """
 
 from __future__ import annotations
 
+import shutil
+import tempfile
 import unittest
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -120,6 +137,16 @@ class PersonaExistsHasHomeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PersonaStoreTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # A fresh directory per test method -- unittest guarantees setUp
+        # runs before every test, so this is real isolation, not just a
+        # differently-named file that could still collide across runs.
+        self._state_dir = Path(tempfile.mkdtemp(prefix="persona-store-test-"))
+        self.addCleanup(shutil.rmtree, self._state_dir, ignore_errors=True)
+
+    def _tmp(self, name: str) -> Path:
+        return self._state_dir / f"{name}.json"
+
     def test_unset_reports_none(self) -> None:
         store = PersonaStore(path=self._tmp("a"))
         self.assertEqual(store.get(person_id=KURT, dataset="causalspark"), (None, "none"))
@@ -183,13 +210,6 @@ class PersonaStoreTests(unittest.TestCase):
         finally:
             del os.environ["HOLONBRIDGE_PERSONA"]
 
-    @staticmethod
-    def _tmp(name: str):
-        import tempfile
-        from pathlib import Path
-
-        return Path(tempfile.gettempdir()) / f"test-persona-state-{name}.json"
-
 
 # --- route tests ------------------------------------------------------------
 
@@ -220,11 +240,16 @@ TOKEN = "test-token"
 
 
 @pytest.fixture
-def app_client():
+def app_client(tmp_path):
     settings = Settings(bearer_token=TOKEN, fuseki_dataset="causalspark")
     app = create_app(settings)
     with TestClient(app) as client:
         app.state.fuseki = RdflibFuseki(make_dataset())
+        # Isolated per test -- see this module's FIXED note. Without this,
+        # app.state.personas is PersonaStore()'s real default
+        # (~/.holonbridge/persona-state.json), shared with every other
+        # test and every other suite run in the same environment.
+        app.state.personas = PersonaStore(path=tmp_path / "persona-state.json")
         yield app, client
 
 
