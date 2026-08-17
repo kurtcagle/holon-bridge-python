@@ -16,6 +16,16 @@ named graph just reads as empty, not as an error. That's the exact
 prevent. This file has no IRI-building logic of its own; it's a thin,
 ordered composition of `Conn`'s methods.
 
+FIXED 2026-08-17: `resolve_scope_graphs` was calling
+`conn.persona_user_graph(persona, role, person_id)` directly with
+`person_id` as a full Person IRI (e.g. `urn:causalspark:person:kurt`).
+`persona_user_graph`'s `user` argument is a short local slug ("kurt"),
+and its own validation rejects colons -- a full Person IRI is full of
+them, so this raised `ValueError` on every real call, never exercised
+until persona.py's `has_home` hit the identical shape and it was caught
+there. Now goes through `conn.person_slug(person_id)` first, same as
+`has_home` does.
+
 Read gating (holon:ReadGrant) is deliberately NOT here -- see acl.py's
 check_read / authorize_query. This module only decides which graphs a
 resolved (person_id, persona) pair is entitled to have *searched*, not
@@ -31,9 +41,10 @@ INTEGRATION NOTE -- not done in this file: `get_holon` / `state_query` /
 `_neighbour_query` in holon.py currently take only `conn: Conn`, no
 identity or persona. Wiring this in means the route handler in
 holon_routes.py adds `AnimusDep` (deps.py) to resolve `animus.person`,
-plus a persona lookup (the switch_persona session-state store -- designed
-in the spec, not yet built), and passes `person_id`/`persona` down to
-`resolve_scope_graphs` instead of handing `get_holon` a bare `conn`.
+plus a persona lookup (the switch_persona session-state store -- now
+built, see persona_state.py and routes/persona.py), and passes
+`person_id`/`persona` down to `resolve_scope_graphs` instead of handing
+`get_holon` a bare `conn`.
 
 OPEN DECISIONS this file makes explicit instead of implicit -- change the
 constant, not the call sites, once you've decided:
@@ -81,7 +92,7 @@ PREFIX rdfs:  <http://www.w3.org/2000/01/rdf-schema#>
 class ScopedGraph:
     """One graph in a resolved scope: its IRI, precedence rank (0 highest),
     and the role it was built for -- kept as a field rather than parsed
-    back out of the IRI, so callers never have to string-match graph names
+    back out of the IRI, so callers never have to string-match graph IRIs
     to tell a holons graph from a scene graph."""
 
     iri: str
@@ -100,13 +111,14 @@ def resolve_scope_graphs(
 
     `person_id` and `persona` must already be resolved values, never raw
     request input: `person_id` is `Animus.person` (deps.py's
-    `require_animus`, itself from the caller's credential -- see acl.py),
-    `persona` is that same person's switch_persona session state. Neither
-    is a parameter a caller can name arbitrarily. That is the whole
-    access-control story at this layer: there is no argument through
-    which a caller could ask for someone else's scope, so a scope list
-    built from these two values can never contain another person's
-    private graph.
+    `require_animus`, itself from the caller's credential -- see acl.py) --
+    a full Person IRI, converted to the short graph-naming slug internally
+    via `conn.person_slug` -- `persona` is that same person's
+    switch_persona session state. Neither is a parameter a caller can name
+    arbitrarily. That is the whole access-control story at this layer:
+    there is no argument through which a caller could ask for someone
+    else's scope, so a scope list built from these two values can never
+    contain another person's private graph.
 
     Returns an empty-persona-tier scope (ground truth only) when persona
     is falsy, and skips the user-private tier specifically when person_id
@@ -119,8 +131,9 @@ def resolve_scope_graphs(
     rank = 0
 
     if persona and person_id:
+        user_slug = conn.person_slug(person_id)
         for role in roles:
-            scope.append(ScopedGraph(conn.persona_user_graph(persona, role, person_id), rank, role))
+            scope.append(ScopedGraph(conn.persona_user_graph(persona, role, user_slug), rank, role))
             rank += 1
 
     if persona:
@@ -204,11 +217,11 @@ ORDER BY ?predicate ?neighbour"""
 
 
 # ---------------------------------------------------------------------------
-# Example wiring (illustrative only -- AnimusDep and the switch_persona
-# session-state store aren't built yet, so this doesn't run as-is):
+# Example wiring (illustrative only -- AnimusDep resolution is real now,
+# but this route doesn't call resolve_scope_graphs yet):
 #
-#   async def get_holon(..., conn: ConnDep, animus: AnimusDep):
-#       persona = await current_persona(animus.person, conn.dataset)  # TODO
+#   async def get_holon(..., conn: ConnDep, animus: AnimusDep, personas: PersonasDep):
+#       persona, _source = personas.get(person_id=animus.person, dataset=conn.dataset)
 #       scope = resolve_scope_graphs(conn, person_id=animus.person, persona=persona)
 #       state = await client.construct(conn, build_state_query(holon_iri, scope))
 #       up = build_neighbour_query(conn, holon_iri, scope, root="isPartOf", direction="up")
