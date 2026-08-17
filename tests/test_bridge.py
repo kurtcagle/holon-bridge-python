@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from holonbridge.config import BankStore, Settings
 from holonbridge.conn import Conn, resolve_conn
 from holonbridge.databook import DataBook
+from holonbridge.persona_state import PersonaStore
 from holonbridge.server import create_app
 from holonbridge.shacl import parse_report
 from holonbridge.turtle import escape_literal, literal, looks_like_rdf12
@@ -38,19 +39,47 @@ VIOLATION_REPORT = """
    ] .
 """
 
+# What build_animus's resolve_person query expects back for a successful
+# identity resolution -- shared by every test that needs AnimusDep to
+# actually resolve rather than 401.
+IDENTITY_RESULT = {
+    "results": {
+        "bindings": [
+            {
+                "person": {"type": "uri", "value": "urn:ds:person:kurt"},
+                "label": {"type": "literal", "value": "Kurt Cagle"},
+            }
+        ]
+    }
+}
+
 
 class StubFuseki:
-    """Records calls and replays scripted responses."""
+    """Records calls and replays scripted responses.
+
+    CHANGED 2026-08-17: select() now branches on query shape rather than
+    always returning one canned ``select_result``. AnimusDep's
+    build_animus sends two distinct query shapes of its own
+    (hasExternalIdentity for the person, memberOfTeam for teams) before a
+    route handler's own queries ever run -- routes that don't require
+    AnimusDep never hit this branch at all, so nothing about their
+    existing behaviour changes.
+    """
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
         self.select_result: dict = {"results": {"bindings": []}}
+        self.identity_result: dict = IDENTITY_RESULT
         self.construct_result = "# empty\n"
         self.graphs: dict[str, str] = {}
         self.shacl_reports: list[str] = []
 
     async def select(self, conn, query, *, default_graph=None):
         self.calls.append(("select", query))
+        if "hasExternalIdentity" in query:
+            return self.identity_result
+        if "memberOfTeam" in query:
+            return {"results": {"bindings": []}}
         return self.select_result
 
     async def construct(self, conn, query, *, default_graph=None):
@@ -103,15 +132,30 @@ def stub() -> StubFuseki:
 
 
 @pytest.fixture
-def client(settings: Settings, stub: StubFuseki):
+def client(settings: Settings, stub: StubFuseki, tmp_path):
     app = create_app(settings)
     with TestClient(app) as test_client:
         app.state.fuseki = stub  # replace the real client after lifespan startup
+        # Isolated per test -- without this, app.state.personas is
+        # PersonaStore()'s real default (~/.holonbridge/persona-state.json),
+        # shared with every other test and every other suite run in the
+        # same environment. See tests/test_persona.py's matching fix.
+        app.state.personas = PersonaStore(path=tmp_path / "persona-state.json")
         yield test_client
 
 
 def auth(extra: dict[str, str] | None = None) -> dict[str, str]:
     headers = {"Authorization": f"Bearer {TOKEN}"}
+    headers.update(extra or {})
+    return headers
+
+
+def animus_auth(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """auth() plus a resolvable animus identity -- for routes gated by
+    AnimusDep (whoami, /endpoint, /holon, the sparql endpoints)."""
+    headers = auth(
+        {"X-Holon-Animus-Id": "kurtcagle", "X-Holon-Animus-Type": "GitHubIdentity"}
+    )
     headers.update(extra or {})
     return headers
 
@@ -267,6 +311,14 @@ def test_report_parsing():
 # --- holon --------------------------------------------------------------------
 
 
+def test_holon_requires_identity(client):
+    """CHANGED 2026-08-17: /holon now requires AnimusDep, same shape as
+    /endpoint's breaking change in PR #7 -- personaOverride/scope are
+    per-person, so the route can't answer without knowing who's asking."""
+    response = client.get("/holon", params={"iri": "urn:holon:earth"}, headers=auth())
+    assert response.status_code == 401
+
+
 def test_get_holon_renders_a_databook(client, stub):
     stub.construct_result = "<urn:holon:earth> a <https://w3id.org/holon/Holon> ."
     stub.select_result = {
@@ -280,7 +332,7 @@ def test_get_holon_renders_a_databook(client, stub):
             ]
         }
     }
-    response = client.get("/holon", params={"iri": "urn:holon:earth"}, headers=auth())
+    response = client.get("/holon", params={"iri": "urn:holon:earth"}, headers=animus_auth())
     assert response.status_code == 200
 
     book = DataBook.parse(response.text)
@@ -289,9 +341,43 @@ def test_get_holon_renders_a_databook(client, stub):
     assert "subPropertyOf*" in book.block("retrieval-query").body
 
 
+def test_get_holon_with_no_persona_scopes_to_ground_truth_only(client, stub):
+    """No persona switched -> scope is exactly the two ground-truth
+    graphs, same as this route's behaviour before persona-scoping."""
+    response = client.get("/holon", params={"iri": "urn:holon:earth"}, headers=animus_auth())
+    assert response.status_code == 200
+    book = DataBook.parse(response.text)
+    assert book.frontmatter["scope"] == ["urn:ds:holons", "urn:ds:scene"]
+
+
+def test_get_holon_with_active_persona_widens_scope(client, stub):
+    """With a persona active, scope grows to include that persona's
+    user-private and public tiers, ranked ahead of ground truth --
+    exactly what resolve_scope_graphs promises, now proven through the
+    actual route rather than only through persona_scope's own unit tests.
+    """
+    app = client.app
+    personas: PersonaStore = app.state.personas
+    personas.set(person_id="urn:ds:person:kurt", dataset="ds", persona="aimee")
+
+    response = client.get("/holon", params={"iri": "urn:holon:earth"}, headers=animus_auth())
+    assert response.status_code == 200
+    book = DataBook.parse(response.text)
+    assert book.frontmatter["scope"] == [
+        "urn:ds:persona:aimee:user:kurt:holons",
+        "urn:ds:persona:aimee:user:kurt:scene",
+        "urn:ds:persona:aimee:user:public:holons",
+        "urn:ds:persona:aimee:user:public:scene",
+        "urn:ds:holons",
+        "urn:ds:scene",
+    ]
+
+
 def test_bad_projection_mode(client):
     response = client.get(
-        "/holon", params={"iri": "urn:holon:earth", "projection_mode": "wat"}, headers=auth()
+        "/holon",
+        params={"iri": "urn:holon:earth", "projection_mode": "wat"},
+        headers=animus_auth(),
     )
     assert response.status_code == 400
 
