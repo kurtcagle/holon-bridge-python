@@ -69,5 +69,30 @@ class PersonaGraphNamingTests(unittest.TestCase):
         )
 
 
+class PersonSlugTests(unittest.TestCase):
+    """person_slug added 2026-08-17: persona_user_graph's `user` argument
+    is a short slug, but Animus.person (what every real caller actually
+    has) is a full Person IRI -- see conn.py's own CHANGED note and
+    persona_scope.py / persona.py for the bug this was fixing."""
+
+    def test_derives_the_trailing_segment(self) -> None:
+        self.assertEqual(Conn.person_slug("urn:causalspark:person:kurt"), "kurt")
+
+    def test_works_regardless_of_bank_scoping_prefix(self) -> None:
+        # The prefix ahead of the local segment never matters -- only the
+        # trailing segment does.
+        self.assertEqual(
+            Conn.person_slug("urn:local:causalspark:person:caroline"), "caroline"
+        )
+
+    def test_feeds_persona_user_graph_without_raising(self) -> None:
+        conn = make_conn()
+        slug = conn.person_slug("urn:causalspark:person:kurt")
+        self.assertEqual(
+            conn.persona_user_graph("aimee", "holons", slug),
+            "urn:causalspark:persona:aimee:user:kurt:holons",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
