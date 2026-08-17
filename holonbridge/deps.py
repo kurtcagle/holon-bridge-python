@@ -16,6 +16,12 @@ The two checks are independent and both run -- a valid bearer token gets
 you in the door, a resolved animus gets you access to something once
 you're through it. See the ACL architecture DataBook for the model this
 resolves against.
+
+CHANGED 2026-08-17: added :func:`get_personas`. Session state for "which
+persona is this person currently reading as" -- see persona_state.py for
+why it's keyed by Animus.person rather than living in the MCP layer
+alongside the dataset/bank overrides. One ``PersonaStore`` per process,
+same lifetime as ``app.state.fuseki``.
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ from .config import BankStore, Settings
 from .conn import DATASET_OVERRIDE_HEADER, Conn, resolve_conn
 from .cache import RegistryCache
 from .fuseki import FusekiClient
+from .persona_state import PersonaStore
 
 ANIMUS_ID_HEADER = "x-holon-animus-id"
 ANIMUS_TYPE_HEADER = "x-holon-animus-type"
@@ -50,6 +57,10 @@ def get_client(request: Request) -> FusekiClient:
 
 def get_registry(request: Request) -> RegistryCache:
     return request.app.state.registry
+
+
+def get_personas(request: Request) -> PersonaStore:
+    return request.app.state.personas
 
 
 def require_auth(
@@ -153,3 +164,4 @@ SettingsDep = Annotated[Settings, Depends(get_settings_dep)]
 BanksDep = Annotated[BankStore, Depends(get_banks)]
 RegistryDep = Annotated[RegistryCache, Depends(get_registry)]
 AnimusDep = Annotated[Animus, Depends(require_animus)]
+PersonasDep = Annotated[PersonaStore, Depends(get_personas)]
