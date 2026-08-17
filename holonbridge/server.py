@@ -19,6 +19,7 @@ from .config import BankStore, Settings, get_settings
 from .fuseki import FusekiClient
 from .cache import RegistryCache
 from .conn import resolve_conn
+from .persona_state import PersonaStore
 from .routes import (
     banks,
     dataset_admin,
@@ -27,6 +28,7 @@ from .routes import (
     holon_routes,
     named_queries,
     named_rules,
+    persona,
     pipeline,
     projection,
     scheduler as scheduler_routes,
@@ -47,6 +49,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         application.state.banks = BankStore(settings)
         application.state.fuseki = FusekiClient(timeout=settings.request_timeout)
         application.state.registry = RegistryCache(ttl=settings.named_query_ttl)
+        # Per-person persona session state -- see persona_state.py for why
+        # this lives here (one per process, keyed by resolved Person)
+        # rather than as MCP-layer module state like the dataset/bank
+        # overrides.
+        application.state.personas = PersonaStore()
         # Strong references to background runs. asyncio holds only a weak one,
         # so an unheld task can be collected mid-flight and the run just stops.
         application.state.tasks = set()
@@ -103,6 +110,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(pipeline.router)
     app.include_router(scheduler_routes.router)
     app.include_router(projection.router)
+    app.include_router(persona.router)
     app.include_router(whoami.router)
     return app
 

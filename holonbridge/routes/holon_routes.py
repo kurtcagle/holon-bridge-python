@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from .. import sequence as sequence_mod
 from .. import shacl as shacl_mod
-from ..deps import BanksDep, ClientDep, ConnDep, SettingsDep
+from ..deps import AnimusDep, BanksDep, ClientDep, ConnDep, PersonasDep, SettingsDep
 from ..fuseki import FusekiError
 from ..holon import PROJECTION_MODES, get_holon
 
@@ -166,8 +166,34 @@ async def health(settings: SettingsDep) -> dict:
 
 
 @meta_router.get("/endpoint")
-async def get_endpoint(conn: ConnDep, client: ClientDep) -> dict:
-    return {**conn.describe(), "reachable": await client.ping(conn)}
+async def get_endpoint(
+    conn: ConnDep, client: ClientDep, animus: AnimusDep, personas: PersonasDep
+) -> dict:
+    """Show the active bank, dataset, and canonical graph IRIs, plus this
+    caller's persona override for the current dataset.
+
+    CHANGED 2026-08-17: this route now requires a resolved identity
+    (AnimusDep), which it did not before -- ``personaOverride`` is
+    per-person, so reporting it accurately means knowing who is asking.
+    Every route that already required AnimusDep (whoami, the sparql
+    endpoints) is unaffected; a caller that was hitting ``/endpoint`` with
+    only a bearer token and no animus header will start getting a 401
+    here and needs to start sending ``X-Holon-Animus-Id`` like every other
+    identity-gated route.
+
+    ``personaOverride`` is this person's active persona for
+    ``conn.dataset`` (``null`` if none). ``personaOverrideSource`` is
+    ``explicit`` (set by switch_persona this run), ``persisted``
+    (restored from a prior run), ``env`` (HOLONBRIDGE_PERSONA, only when
+    this person has no stored entry), or ``none``.
+    """
+    persona, persona_source = personas.get(person_id=animus.person, dataset=conn.dataset)
+    return {
+        **conn.describe(),
+        "reachable": await client.ping(conn),
+        "personaOverride": persona,
+        "personaOverrideSource": persona_source,
+    }
 
 
 @meta_router.get("/endpoints")
