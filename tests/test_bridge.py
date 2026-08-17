@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from holonbridge.config import BankStore, Settings
 from holonbridge.conn import Conn, resolve_conn
 from holonbridge.databook import DataBook
+from holonbridge.persona_state import PersonaStore
 from holonbridge.server import create_app
 from holonbridge.shacl import parse_report
 from holonbridge.turtle import escape_literal, literal, looks_like_rdf12
@@ -131,10 +132,15 @@ def stub() -> StubFuseki:
 
 
 @pytest.fixture
-def client(settings: Settings, stub: StubFuseki):
+def client(settings: Settings, stub: StubFuseki, tmp_path):
     app = create_app(settings)
     with TestClient(app) as test_client:
         app.state.fuseki = stub  # replace the real client after lifespan startup
+        # Isolated per test -- without this, app.state.personas is
+        # PersonaStore()'s real default (~/.holonbridge/persona-state.json),
+        # shared with every other test and every other suite run in the
+        # same environment. See tests/test_persona.py's matching fix.
+        app.state.personas = PersonaStore(path=tmp_path / "persona-state.json")
         yield test_client
 
 
@@ -350,8 +356,6 @@ def test_get_holon_with_active_persona_widens_scope(client, stub):
     exactly what resolve_scope_graphs promises, now proven through the
     actual route rather than only through persona_scope's own unit tests.
     """
-    from holonbridge.persona_state import PersonaStore
-
     app = client.app
     personas: PersonaStore = app.state.personas
     personas.set(person_id="urn:ds:person:kurt", dataset="ds", persona="aimee")
