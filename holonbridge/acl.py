@@ -175,11 +175,10 @@ async def is_admin(query_fn: QueryFn, holons_graph: str, *, person: str) -> bool
 # Grant checks
 # --------------------------------------------------------------------------
 #
-# All three share one shape: check admin first (unconditional bypass), then
-# the individual override (it always wins over an ordinary role grant),
-# then whether any Role the Person holds carries a matching grant. Absence
-# of a grant is a denial, never an allow -- there is no default-permit path
-# anywhere in this module below the admin bypass.
+# All share one shape: check admin first (unconditional bypass), then
+# either an individual override or an explicit grant. Absence of a grant is
+# a denial, never an allow -- there is no default-permit path anywhere in
+# this module below the admin bypass.
 
 async def _denied_by_override(
     query_fn: QueryFn, holons_graph: str, *, target: str, person: str
@@ -245,10 +244,13 @@ async def check_invoke(
 async def check_write(
     query_fn: QueryFn, holons_graph: str, *, person: str, target: str
 ) -> AclDecision:
-    """May ``person`` write to ``target``? Never via an ordinary Role grant
-    -- see the read/write asymmetry in the DataBook -- and the admin bypass
-    is the sole deliberate exception to that. Otherwise only an explicit
-    holon:grantsWrite naming this exact (person, target) pair allows it."""
+    """May ``person`` write (append/merge) to ``target``? Never via an
+    ordinary Role grant -- see the read/write asymmetry in the DataBook --
+    and the admin bypass is the sole deliberate exception to that.
+    Otherwise only an explicit holon:grantsWrite naming this exact
+    (person, target) pair allows it. This governs additive/merge writes
+    only -- see check_replace for wholesale graph overwrite, which is
+    deliberately a stricter, independent grant."""
     if await is_admin(query_fn, holons_graph, person=person):
         return AclDecision(True, "admin role bypass", person)
     query = f"""
@@ -261,6 +263,41 @@ async def check_write(
     if result.get("boolean"):
         return AclDecision(True, "explicit grantsWrite", person, target)
     return AclDecision(False, "writes are never role-based; no explicit grantsWrite found", person)
+
+
+async def check_replace(
+    query_fn: QueryFn, holons_graph: str, *, person: str, target: str
+) -> AclDecision:
+    """May ``person`` wholesale-replace ``target`` (GSP PUT -- discards
+    everything already in the graph, not an additive merge)?
+
+    Added 2026-08-17 on Kurt's own framing: appends should be the norm,
+    not the exception, so the ability to overwrite everyone else's
+    contribution to a shared graph in one call must never be implied by an
+    ordinary holon:grantsWrite. Deliberately a separate predicate, not a
+    stronger reading of the same one -- holding grantsWrite for a graph
+    confers nothing here, by design, and as of this writing nothing in any
+    dataset holds grantsReplace at all, which is the intended starting
+    state (appends available by default, replace available to no one until
+    someone deliberately decides otherwise), not an oversight to backfill.
+    Same admin bypass, same fail-closed default as check_write."""
+    if await is_admin(query_fn, holons_graph, person=person):
+        return AclDecision(True, "admin role bypass", person)
+    query = f"""
+    PREFIX holon: <{HOLON}>
+    ASK {{
+      GRAPH <{holons_graph}> {{ <{target}> holon:grantsReplace <{person}> . }}
+    }}
+    """
+    result = await _run(query_fn, query)
+    if result.get("boolean"):
+        return AclDecision(True, "explicit grantsReplace", person, target)
+    return AclDecision(
+        False,
+        "replace is stricter than write; no explicit grantsReplace found "
+        "(holding grantsWrite does not imply it)",
+        person,
+    )
 
 
 def _literal(value: str) -> str:
