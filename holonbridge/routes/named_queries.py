@@ -46,22 +46,35 @@ class RunRequest(BaseModel):
     graph: str | None = None
 
 
-async def _reachable_ids(
-    conn, client, animus, personas, cache, *, query_ids: list[str]
-) -> set[str]:
-    """The subset of `query_ids` this caller's active persona can reach.
-    Thin wrapper so every handler below resolves reachability the same
-    way — persona lookup, then one toolset query, keyed by id rather than
-    iri since routes look tools up by id.
+def _not_found(query_id: str, available_ids: list[str]) -> HTTPException:
+    """Same 404 shape whether the id is genuinely unknown or just outside
+    this caller's reachable set -- see this module's docstring for why
+    that indistinguishability is the point, not an accident."""
+    return HTTPException(
+        status.HTTP_404_NOT_FOUND,
+        detail={
+            "error": "unknown_named_query",
+            "id": query_id,
+            "available": available_ids,
+        },
+    )
+
+
+async def _reachable_ids(result, conn, client, persona: str | None) -> set[str]:
+    """The subset of `result.queries` (by id) this persona can reach.
+    Shared by list/get/run so all three agree on exactly the same set —
+    resolved once per request, not cached, since it depends on the
+    caller's current persona switch, not just the dataset.
     """
-    persona, _source = personas.get(person_id=animus.person, dataset=conn.dataset)
 
     async def query_fn(q: str) -> dict:
         return await client.select(conn, q)
 
-    # candidate_iris keyed by id so the result can be translated straight
-    # back to the ids callers actually look tools up by.
-    return persona, query_fn  # placeholder, replaced below
+    id_by_iri = {q.iri: q.id for q in result.queries}
+    reachable_iris = await resolve_reachable(
+        query_fn, conn, persona=persona, candidate_iris=list(id_by_iri)
+    )
+    return {id_by_iri[iri] for iri in reachable_iris}
 
 
 @router.get("/named-queries")
@@ -80,15 +93,7 @@ async def list_named_queries(
     )
 
     persona, _source = personas.get(person_id=animus.person, dataset=conn.dataset)
-
-    async def query_fn(q: str) -> dict:
-        return await client.select(conn, q)
-
-    id_by_iri = {q.iri: q.id for q in result.queries}
-    reachable_iris = await resolve_reachable(
-        query_fn, conn, persona=persona, candidate_iris=list(id_by_iri)
-    )
-    reachable_ids = {id_by_iri[iri] for iri in reachable_iris}
+    reachable_ids = await _reachable_ids(result, conn, client, persona)
 
     queries = [q for q in result.queries if q.id in reachable_ids]
     if vocabulary:
@@ -108,23 +113,7 @@ async def list_named_queries(
     }
 
 
-def _not_found(query_id: str, available_ids: list[str]) -> HTTPException:
-    """Same 404 shape whether the id is genuinely unknown or just outside
-    this caller's reachable set -- see this module's docstring for why
-    that indistinguishability is the point, not an accident."""
-    return HTTPException(
-        status.HTTP_404_NOT_FOUND,
-        detail={
-            "error": "unknown_named_query",
-            "id": query_id,
-            "available": available_ids,
-        },
-    )
-
-
-async def _load_and_authorise(
-    query_id: str, conn, client, animus, personas, cache
-):
+async def _load_and_authorise(query_id: str, conn, client, animus, personas, cache):
     """Load the registry, resolve this caller's reachable set, and return
     the query if both known and reachable — otherwise raise the shared
     404. Centralised so get/run can't drift on what "reachable" means.
@@ -136,15 +125,7 @@ async def _load_and_authorise(
         raise _not_found(query_id, available_ids)
 
     persona, _source = personas.get(person_id=animus.person, dataset=conn.dataset)
-
-    async def query_fn(q: str) -> dict:
-        return await client.select(conn, q)
-
-    id_by_iri = {q.iri: q.id for q in result.queries}
-    reachable_iris = await resolve_reachable(
-        query_fn, conn, persona=persona, candidate_iris=list(id_by_iri)
-    )
-    reachable_ids = {id_by_iri[iri] for iri in reachable_iris}
+    reachable_ids = await _reachable_ids(result, conn, client, persona)
 
     if query.id not in reachable_ids:
         raise _not_found(query_id, sorted(reachable_ids))
