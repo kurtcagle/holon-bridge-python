@@ -23,6 +23,19 @@ an extension of it:
   persona as a query/rule parameter, server-side only -- never accepted as
   a client-supplied value, the same rule switch_persona itself follows for
   `person`.
+
+CORRECTED 2026-08-18: resolve_reachable was originally one query using
+`(EXISTS {...} AS ?var)` in the SELECT projection. Caught by actually
+running it (against an rdflib-backed stub, the same technique the test
+suite uses for named-queries/rules -- not against live Fuseki, which may
+well have handled it): rdflib's SPARQL engine cannot evaluate EXISTS
+inside a projection expression at all, only inside a FILTER. Since the
+test suite's own stub story depends on rdflib evaluating whatever this
+module sends it, portability to rdflib is a real requirement here, not
+just a nice-to-have -- rewritten as two plain SELECT DISTINCT queries
+(restricted-tools, persona-reachable-tools) combined in Python instead,
+which is both simpler to read and avoids the whole question of which
+engines support which EXISTS placement.
 """
 
 from __future__ import annotations
@@ -48,6 +61,11 @@ async def _run(query_fn: QueryFn, query: str) -> dict:
     return result
 
 
+def _tool_set(result: dict) -> set[str]:
+    rows = result.get("results", {}).get("bindings", [])
+    return {row["tool"]["value"] for row in rows}
+
+
 async def resolve_reachable(
     query_fn: QueryFn,
     conn: Conn,
@@ -62,54 +80,52 @@ async def resolve_reachable(
     every tool reachable via one of this persona's own holon:hasToolset
     links.
 
-    One VALUES-bounded query, scoped to exactly the candidates the caller
-    already loaded -- this never tries to independently decide "what is a
-    tool" from ground truth; the registry loaders already did that, and
+    Two queries, scoped to exactly the candidates the caller already
+    loaded -- this never tries to independently decide "what is a tool"
+    from ground truth; the registry loaders already did that, and
     duplicating that decision here would be a second place for the two to
     drift apart.
 
     A dataset with zero holon:Toolset resources anywhere degrades to
-    "every candidate is universal" automatically -- `restricted` is false
-    for every tool when no `a holon:Toolset` triple exists at all, so this
-    needs no separate "have Toolsets even been adopted yet" check. Nothing
-    already registered needs migrating for this to ship safely.
+    "every candidate is universal" automatically -- the first query below
+    returns nothing restricted when no `a holon:Toolset` triple exists at
+    all, so this needs no separate "have Toolsets even been adopted yet"
+    check. Nothing already registered needs migrating for this to ship
+    safely.
 
-    persona=None returns exactly the universal set: the empty
-    VALUES clause below matches zero solutions, so `reachable` is always
-    false and only the "not restricted at all" branch can include a tool.
+    persona=None skips the second query entirely and returns exactly the
+    universal set.
     """
     if not candidate_iris:
         return set()
 
     values = " ".join(f"<{iri}>" for iri in candidate_iris)
-    persona_values = f"<{persona}>" if persona else ""
+    holons = conn.graph("holons")
 
-    query = f"""PREFIX holon: <{HOLON}>
-SELECT ?tool
-       (EXISTS {{
-          ?tool holon:isPartOf ?anyToolset .
-          ?anyToolset a holon:Toolset .
-        }} AS ?restricted)
-       (EXISTS {{
-          VALUES ?persona {{ {persona_values} }}
-          ?persona holon:hasToolset ?toolset .
-          ?tool holon:isPartOf ?toolset .
-        }} AS ?reachable)
-WHERE {{
-  GRAPH <{conn.graph("holons")}> {{ VALUES ?tool {{ {values} }} }}
+    restricted_query = f"""PREFIX holon: <{HOLON}>
+SELECT DISTINCT ?tool WHERE {{
+  GRAPH <{holons}> {{
+    VALUES ?tool {{ {values} }}
+    ?tool holon:isPartOf ?anyToolset .
+    ?anyToolset a holon:Toolset .
+  }}
 }}"""
+    restricted = _tool_set(await _run(query_fn, restricted_query))
 
-    result = await _run(query_fn, query)
-    rows = result.get("results", {}).get("bindings", [])
+    reachable_via_persona: set[str] = set()
+    if persona:
+        persona_query = f"""PREFIX holon: <{HOLON}>
+SELECT DISTINCT ?tool WHERE {{
+  GRAPH <{holons}> {{
+    VALUES ?tool {{ {values} }}
+    <{persona}> holon:hasToolset ?toolset .
+    ?tool holon:isPartOf ?toolset .
+  }}
+}}"""
+        reachable_via_persona = _tool_set(await _run(query_fn, persona_query))
 
-    reachable: set[str] = set()
-    for row in rows:
-        tool = row["tool"]["value"]
-        restricted = row.get("restricted", {}).get("value") == "true"
-        reachable_here = row.get("reachable", {}).get("value") == "true"
-        if not restricted or reachable_here:
-            reachable.add(tool)
-    return reachable
+    universal = set(candidate_iris) - restricted
+    return universal | reachable_via_persona
 
 
 def bind_persona_param(
