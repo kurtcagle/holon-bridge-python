@@ -24,18 +24,31 @@ an extension of it:
   a client-supplied value, the same rule switch_persona itself follows for
   `person`.
 
-CORRECTED 2026-08-18: resolve_reachable was originally one query using
-`(EXISTS {...} AS ?var)` in the SELECT projection. Caught by actually
-running it (against an rdflib-backed stub, the same technique the test
-suite uses for named-queries/rules -- not against live Fuseki, which may
-well have handled it): rdflib's SPARQL engine cannot evaluate EXISTS
-inside a projection expression at all, only inside a FILTER. Since the
-test suite's own stub story depends on rdflib evaluating whatever this
-module sends it, portability to rdflib is a real requirement here, not
-just a nice-to-have -- rewritten as two plain SELECT DISTINCT queries
-(restricted-tools, persona-reachable-tools) combined in Python instead,
-which is both simpler to read and avoids the whole question of which
-engines support which EXISTS placement.
+CORRECTED 2026-08-18 (two rounds, both caught by actually running the
+tests, not by reading the code):
+
+1. resolve_reachable was originally one query using `(EXISTS {...} AS
+   ?var)` in the SELECT projection. rdflib's SPARQL engine cannot
+   evaluate EXISTS inside a projection expression at all, only inside a
+   FILTER -- and since the test suite's own stub story depends on rdflib
+   evaluating whatever this module sends it, portability to rdflib is a
+   real requirement here, not just a nice-to-have. Rewritten as two plain
+   SELECT DISTINCT queries (restricted-tools, persona-reachable-tools)
+   combined in Python instead.
+
+2. resolve_reachable's `persona` parameter was inconsistent with the rest
+   of the codebase: persona.py's has_home/persona_exists both take a
+   *short* persona name ("carlo") and build the full Persona IRI
+   internally via conn.persona_graph -- exactly what PersonaStore.get()
+   itself returns (confirmed live: whoami's own `persona` field is a
+   short name, never a full IRI). This module's first draft expected a
+   full IRI directly, which produced a syntactically-parseable but
+   semantically empty triple pattern (`<carlo> holon:hasToolset
+   ?toolset`, matching nothing) whenever a route passed PersonaStore's
+   own return value straight through -- caught by a route-level test
+   asserting a real membership hit, not by the lower-level unit tests,
+   which happened to pass a full IRI in by hand. Now takes the same short
+   name persona.py's functions do, and converts internally the same way.
 """
 
 from __future__ import annotations
@@ -80,6 +93,12 @@ async def resolve_reachable(
     every tool reachable via one of this persona's own holon:hasToolset
     links.
 
+    `persona` is the short name PersonaStore already deals in (what
+    `personas.get(...)` returns, e.g. "carlo") -- converted to the full
+    Persona IRI internally via `conn.persona_graph`, same as
+    persona.py's `has_home`/`persona_exists` already do. A route calling
+    this never needs its own conversion step.
+
     Two queries, scoped to exactly the candidates the caller already
     loaded -- this never tries to independently decide "what is a tool"
     from ground truth; the registry loaders already did that, and
@@ -114,11 +133,12 @@ SELECT DISTINCT ?tool WHERE {{
 
     reachable_via_persona: set[str] = set()
     if persona:
+        persona_iri = conn.persona_graph(persona)
         persona_query = f"""PREFIX holon: <{HOLON}>
 SELECT DISTINCT ?tool WHERE {{
   GRAPH <{holons}> {{
     VALUES ?tool {{ {values} }}
-    <{persona}> holon:hasToolset ?toolset .
+    <{persona_iri}> holon:hasToolset ?toolset .
     ?tool holon:isPartOf ?toolset .
   }}
 }}"""
@@ -146,10 +166,16 @@ def bind_persona_param(
     case, and this makes that the silent, zero-cost default rather than
     an error.
 
-    persona_iri must already be resolved server-side
-    (personas.get(person_id=animus.person, dataset=conn.dataset)), never
-    accepted from the request body -- the caller's own `persona` key, if
-    supplied for some unrelated reason, is always overwritten (or
+    Unlike `resolve_reachable`, this one takes the already-resolved full
+    Persona IRI, not the short name -- it has no `Conn` to convert with,
+    and the caller (a route) already needs that conversion done once for
+    `resolve_reachable`'s own `persona=` argument's sibling call, so
+    there is no shared work to save by taking a short name here too.
+
+    persona_iri must already be resolved server-side (via
+    `conn.persona_graph(personas.get(person_id=animus.person, ...)[0])`),
+    never accepted from the request body -- the caller's own `persona`
+    key, if supplied for some unrelated reason, is always overwritten (or
     removed, if no persona is active), the same rule switch_persona
     itself follows for `person`.
     """
