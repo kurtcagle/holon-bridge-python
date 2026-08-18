@@ -7,7 +7,8 @@ built from; keeping them together means the semantics have one home.
 CHANGED 2026-08-18: list/get/run/run-all now require a resolved identity
 (``AnimusDep``) and are gated by Toolset membership, same shape and same
 reasoning as ``routes/named_queries.py``'s matching change — see that
-module's docstring. ``/graph-op`` is untouched; it isn't part of the
+module's docstring, including the short-name-vs-full-IRI note for
+``bind_persona_param``. ``/graph-op`` is untouched; it isn't part of the
 named-rule registry and this design doesn't reach it.
 """
 
@@ -78,7 +79,8 @@ def _not_found(rule_id: str, available_ids: list[str]) -> HTTPException:
 
 async def _reachable_ids(result, conn, client, persona: str | None) -> set[str]:
     """The subset of `result.rules` (by id) this persona can reach —
-    same shared-resolution shape as routes/named_queries.py's helper."""
+    same shared-resolution shape as routes/named_queries.py's helper.
+    `persona` is the short name; resolve_reachable converts it itself."""
 
     async def query_fn(q: str) -> dict:
         return await client.select(conn, q)
@@ -166,9 +168,10 @@ async def run_named_rule(
     rule, persona = await _load_and_authorise(
         rule_id, conn, client, animus, personas, cache
     )
+    persona_iri = conn.persona_graph(persona) if persona else None
     params = bind_persona_param(
         body.params,
-        persona_iri=persona,
+        persona_iri=persona_iri,
         declares_persona="persona" in rule.declared,
     )
 
@@ -221,14 +224,16 @@ async def run_all_named_rules(
     result = await cache.get(client, conn, kind=KIND, loader=load_named_rules)
     persona, _source = personas.get(person_id=animus.person, dataset=conn.dataset)
     reachable_ids = await _reachable_ids(result, conn, client, persona)
+    persona_iri = conn.persona_graph(persona) if persona else None
 
     active = [r for r in result.rules if r.runnable and r.id in reachable_ids]
-    params = bind_persona_param(body.params, persona_iri=persona, declares_persona=True)
 
     runs: list[dict] = []
     errors: list[dict] = []
     for rule in active:
-        rule_params = params if "persona" in rule.declared else body.params
+        rule_params = bind_persona_param(
+            body.params, persona_iri=persona_iri, declares_persona="persona" in rule.declared
+        )
         try:
             runs.append(
                 await _run(conn, client, rule, rule_params, None, body.timeout)
