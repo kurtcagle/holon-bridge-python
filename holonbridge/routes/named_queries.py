@@ -20,6 +20,12 @@ still executes it on request isn't really a boundary. A caller asking for
 a query outside their reachable set gets the same 404 shape as an unknown
 id, so a restricted tool never differentially confirms its own existence
 to someone who can't reach it.
+
+``personas.get()`` returns a short persona name ("carlo"), the same shape
+``resolve_reachable`` itself takes (see toolset.py). ``bind_persona_param``
+needs the full Persona IRI instead — converted once, right before that
+call, via ``conn.persona_graph`` — since it has no ``Conn`` to convert
+with itself.
 """
 
 from __future__ import annotations
@@ -64,7 +70,9 @@ async def _reachable_ids(result, conn, client, persona: str | None) -> set[str]:
     """The subset of `result.queries` (by id) this persona can reach.
     Shared by list/get/run so all three agree on exactly the same set —
     resolved once per request, not cached, since it depends on the
-    caller's current persona switch, not just the dataset.
+    caller's current persona switch, not just the dataset. `persona` is
+    the short name, passed straight through to resolve_reachable, which
+    does its own conversion to the full Persona IRI.
     """
 
     async def query_fn(q: str) -> dict:
@@ -162,9 +170,10 @@ async def run_named_query(
         query_id, conn, client, animus, personas, cache
     )
 
+    persona_iri = conn.persona_graph(persona) if persona else None
     params = bind_persona_param(
         body.params,
-        persona_iri=persona,
+        persona_iri=persona_iri,
         declares_persona="persona" in query.declared,
     )
 
