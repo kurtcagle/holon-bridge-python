@@ -22,6 +22,7 @@ Two things this module is deliberately *not*:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
@@ -364,7 +365,77 @@ def extract_graph_refs(sparql_text: str) -> set[str] | None:
             _walk(request, refs, set())
         return refs
     except Exception:
+        pass
+
+    return _fallback_graph_refs(sparql_text)
+
+
+# --------------------------------------------------------------------------
+# RDF 1.2 preflight fallback -- rdflib 6.0.0's SPARQL grammar predates RDF
+# 1.2 entirely and throws on both current embedded-triple notations:
+#   * triple terms      <<( s p o )>> / the older informal <<s p o>>
+#   * annotation syntax  s p o {| ex:prop val |}
+# Rather than let every query using either construct fall through to a
+# blanket deny, this does a narrow, purely TEXTUAL scan for the same
+# graph-referencing keywords the algebra walk above looks for -- but only
+# once we already know the real parser failed, and only when the failure
+# looks explained by RDF 1.2 syntax specifically. Any other parse failure
+# (a genuine typo, a malformed query, anything else) still falls through
+# to the original fail-closed ``None`` from extract_graph_refs, unchanged.
+#
+# Deliberately conservative in its own right, independent of the above: it
+# only trusts a graph reference written as a full IRIREF (``<...>``). A
+# PrefixedName graph reference (``GRAPH ex:g1``) would need PREFIX
+# declarations resolved to be read correctly, and a wrong resolution here
+# is a silent *under*-report of what a query touches -- worse than denying
+# a query that would otherwise have been fine. So the moment a non-IRIREF
+# token shows up where a graph reference is expected, this bails to
+# ``None`` rather than guess, same as the algebra path does on any other
+# unresolvable construct.
+#
+# This does not make the bridge understand RDF 1.2 -- Fuseki already does,
+# natively, on the storage/query side, which is why writes and hand-run
+# queries against Fuseki directly are unaffected by any of this. This only
+# unblocks the preflight ACL check in front of sparql_select/sparql_update
+# so those bridge-level calls stop being denied outright.
+
+_GRAPH_REF_KEYWORDS = re.compile(
+    r"""
+    \b(?:
+        GRAPH
+      | FROM\s+NAMED
+      | FROM
+      | SERVICE(?:\s+SILENT)?
+      | WITH
+      | USING\s+NAMED
+      | USING
+    )\b
+    \s*
+    (?:
+        <(?P<iri>[^<>\s]+)>          # a full IRIREF -- the only form trusted
+      | (?P<bad>\S+)                 # anything else (PrefixedName, etc.)
+    )
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+
+
+def _fallback_graph_refs(sparql_text: str) -> set[str] | None:
+    """Textual best-effort graph-reference scan. Only ever called after the
+    real parser has already failed -- see the module comment above for the
+    full reasoning and the deliberate limits (RDF-1.2-triggered only,
+    IRIREF-only, no PrefixedName resolution)."""
+    if "<<" not in sparql_text and "{|" not in sparql_text:
+        # Not an RDF 1.2 case -- don't second-guess the real parser's
+        # failure by assuming this fallback would have done any better.
         return None
+
+    refs: set[str] = set()
+    for match in _GRAPH_REF_KEYWORDS.finditer(sparql_text):
+        if match.group("bad") is not None:
+            return None  # can't safely resolve a PrefixedName here -- deny
+        refs.add(match.group("iri"))
+    return refs
 
 
 async def authorize_query(
