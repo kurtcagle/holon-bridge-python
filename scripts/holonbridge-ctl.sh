@@ -32,6 +32,8 @@
 # ~/.holonbridge/run/ so start/stop/restart/status all work independently
 # and the stack can run detached (e.g. from a systemd unit or a plain
 # `nohup ... &` login-shell exit) instead of needing a terminal held open.
+ngrok config add-authtoken 2hqCOfvF5DPy2fefu5FsmIzBVeo_6GYm9dsqLn4ci4Cr5smbK
+ngrok http 3034 --url https://causalspark.ngrok.io &
 
 set -euo pipefail
 
@@ -39,10 +41,10 @@ set -euo pipefail
 # Configuration — override via environment or edit here
 # ---------------------------------------------------------------------------
 
-FUSEKI_HOME="${FUSEKI_HOME:-$HOME/apache-jena-fuseki-6.0.0}"
+FUSEKI_HOME="${FUSEKI_HOME:-/opt/fuseki}"
 FUSEKI_DATASET="${FUSEKI_DATASET:-ds}"
 FUSEKI_MODE="${FUSEKI_MODE:-mem}"          # "mem" or "loc"
-FUSEKI_DATA_DIR="${FUSEKI_DATA_DIR:-$HOME/fuseki-data}"   # used only when FUSEKI_MODE=loc
+FUSEKI_DATA_DIR="${FUSEKI_DATA_DIR:-/opt/fuseki}"   # used only when FUSEKI_MODE=loc
 FUSEKI_PORT="${FUSEKI_PORT:-3030}"
 
 HOLONBRIDGE_DIR="${HOLONBRIDGE_DIR:-/opt/holon-bridge-python}"
