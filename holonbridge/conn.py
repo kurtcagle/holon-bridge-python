@@ -32,6 +32,14 @@ sitting on Animus.person needs this derivation before it can name that
 person's persona-user graph; centralised here for the same reason the
 three methods above are, rather than every caller re-deriving it slightly
 differently.
+
+CHANGED 2026-08-25: added person_iri / role_iri. The identity_admin
+routes (create_person, assign_persona) needed to build a Person IRI and a
+Role IRI from a short slug -- the exact inverse of person_slug, and the
+general form of what acl.py's ``_admin_role`` already derives by hand for
+the one built-in role. Same reasoning as persona_graph et al.: better one
+place building these than a second admin-only convention growing beside
+the persona one.
 """
 
 from __future__ import annotations
@@ -188,6 +196,28 @@ class Conn:
         IRI it's given.
         """
         return person_iri.rsplit(":", 1)[-1]
+
+    def person_iri(self, slug: str) -> str:
+        """The canonical Person IRI for a local slug, e.g. ``"kurt"`` ->
+        ``"urn:{dataset}:person:kurt"`` (or bank-scoped). The inverse of
+        ``person_slug`` for the common case of building rather than
+        parsing one -- used by the identity_admin routes so a Person IRI
+        is never hand-built as a raw string there either.
+        """
+        if not slug or any(ch in slug for ch in _IRI_UNSAFE + ":"):
+            raise ValueError(f"slug {slug!r} cannot be used in a Person IRI")
+        return f"{self._prefix()}:person:{slug}"
+
+    def role_iri(self, slug: str) -> str:
+        """The canonical Role IRI for a local slug, e.g. ``"admin"`` ->
+        ``"urn:{dataset}:role:admin"`` (or bank-scoped) -- the general
+        form of what ``acl.py``'s ``_admin_role`` already derives by hand
+        for the one built-in role, now available for any role a caller
+        wants to grant via identity_admin's create_person.
+        """
+        if not slug or any(ch in slug for ch in _IRI_UNSAFE + ":"):
+            raise ValueError(f"slug {slug!r} cannot be used in a Role IRI")
+        return f"{self._prefix()}:role:{slug}"
 
     @property
     def holons_graph(self) -> str:
