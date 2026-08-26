@@ -80,10 +80,25 @@ An absent or empty shapes graph is not an error -- it means no gate is
 configured for this dataset, which is the common case, and transitions
 proceed straight to the live commit, exactly as before this was added, at
 no extra cost.
+
+CHANGED 2026-08-26: a successful transition now also evaluates every
+Active ``StateTrigger`` (see :mod:`holonbridge.triggers`) -- write-driven,
+contextual condition checking, distinct from the scheduler's periodic
+sweep of ``TemporalTrigger``s. This runs *after* the transition is fully
+committed and confirmed (never inside the retry loop, and never able to
+affect whether this transition itself succeeds), and a failure in trigger
+evaluation is logged, never raised -- a broken or misconfigured trigger
+must not be able to break the fluent write that happens to trip it. No
+``touched_predicates`` narrowing is applied here yet: every active
+StateTrigger is evaluated on every fluent transition, which is correct
+but not the cheapest it could be -- see ``triggers.py``'s module
+docstring for why that's an explicit, deferred choice rather than an
+oversight.
 """
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -96,6 +111,8 @@ from . import shacl as shacl_mod
 from .conn import Conn
 from .fuseki import FusekiClient
 from .turtle import escape_literal
+
+log = logging.getLogger("holonbridge.fluent")
 
 HOLON_NS = "https://w3id.org/holon/"
 HEVT_NS = "https://w3id.org/holon/event/"
@@ -321,6 +338,21 @@ WHERE {{
         await client.drop_graph(conn, scratch_scene)
 
 
+async def _evaluate_state_triggers(client: FusekiClient, conn: Conn, *, fluent: str) -> None:
+    """Fire every Active StateTrigger after a successful, confirmed
+    transition. Never allowed to affect the transition itself -- see the
+    module docstring's 2026-08-26 note."""
+    try:
+        from .triggers import TRIGGER_STATE, evaluate_triggers  # noqa: PLC0415
+
+        await evaluate_triggers(client, conn, kind=TRIGGER_STATE)
+    except Exception:  # noqa: BLE001 - a trigger failure must not break the write
+        log.exception(
+            "StateTrigger evaluation failed after updating <%s> (transition already committed)",
+            fluent,
+        )
+
+
 async def update_fluent(
     client: FusekiClient,
     conn: Conn,
@@ -456,6 +488,8 @@ WHERE {{
             # rejection above -- the latter is never worth retrying, since
             # the same violation would just recur.
             continue
+
+        await _evaluate_state_triggers(client, conn, fluent=fluent)
 
         return FluentUpdateResult(
             fluent=fluent,

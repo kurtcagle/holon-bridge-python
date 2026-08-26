@@ -34,6 +34,7 @@ from .routes import (
     projection,
     scheduler as scheduler_routes,
     sparql,
+    triggers,
     whoami,
 )
 from .scheduler import AnthropicProposer, Scheduler
@@ -109,6 +110,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(identity_admin.router)
     app.include_router(named_queries.router)
     app.include_router(named_rules.router)
+    app.include_router(triggers.router)
     app.include_router(pipeline.router)
     app.include_router(scheduler_routes.router)
     app.include_router(projection.router)

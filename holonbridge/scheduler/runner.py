@@ -464,7 +464,22 @@ class Scheduler:
     async def _run_maintenance(
         self, task: Task, record: FiringRecord, conn: Conn
     ) -> None:
-        """Housekeeping the bridge owns. Currently one job."""
+        """Housekeeping the bridge owns.
+
+        CHANGED 2026-08-26: added ``trigger-sweep`` — the periodic half of
+        the named-trigger feature (see ``holonbridge/triggers.py``). A
+        ``TemporalTrigger`` has no write to hook, unlike a ``StateTrigger``
+        (wired into ``fluent.py`` instead) — its condition can only become
+        true because wall-clock time passed a threshold, so it needs a
+        caller to ask again periodically. This maintenance job is that
+        caller: an ordinary scheduler ``Task`` with
+        ``maintenance="trigger-sweep"`` on whatever interval fits the
+        condition (an hourly age-eligibility sweep is more than adequate;
+        there is nothing here that benefits from a shorter one). Imported
+        lazily, same as the ``projection-sweep`` job just above it, to
+        avoid a module-level import cycle between the scheduler package
+        and ``triggers.py``.
+        """
         job = task.maintenance.strip().lower()
         if job in {"projection-sweep", "sweep"}:
             from ..projection import ProjectionRunner
@@ -474,6 +489,22 @@ class Scheduler:
             record.detail = (
                 f"swept {result['abandonedCount']} abandoned delivery(ies), "
                 f"{result['orphanedCount']} orphaned graph(s)"
+            )
+            return
+
+        if job in {"trigger-sweep", "sweep-triggers"}:
+            from ..triggers import TRIGGER_TEMPORAL as _TEMPORAL
+            from ..triggers import evaluate_triggers
+
+            firings = await evaluate_triggers(self._client, conn, kind=_TEMPORAL)
+            proposed = sum(1 for f in firings if f.outcome == "proposed")
+            executed = sum(1 for f in firings if f.outcome == "executed")
+            failed = sum(1 for f in firings if f.outcome == "failed")
+            record.outcome = "failed" if failed and not (proposed or executed) else "committed"
+            record.triples_written = 0
+            record.detail = (
+                f"{len(firings)} firing(s): {proposed} proposed, {executed} executed, "
+                f"{failed} failed"
             )
             return
 
