@@ -26,6 +26,19 @@
     never resolves. This removes the one place that mismatch could come
     from.
 
+    CHANGED 2026-08-26: added the optional BootstrapAdmin* parameters,
+    calling the new holonbridge-bootstrap-admin console script (see
+    holonbridge/bootstrap.py) right after Fuseki comes up, before the
+    REST bridge starts -- the bootstrap talks to Fuseki directly and
+    doesn't need the bridge running at all. Solves the AnimusDep
+    chicken-and-egg problem on a genuinely fresh dataset, where no route
+    through the REST API can create the very first Person. Idempotent
+    (checks by external id before writing, never touches an existing
+    identity's role), so it is safe to leave set across every run --
+    a no-op once the identity already exists. Leaving
+    -BootstrapAdminGithubUser unset (the default) means nothing changes
+    here at all.
+
 .PARAMETER RepoPath
     Directory containing the holonbridge and holonbridge_mcp packages.
 
@@ -41,11 +54,38 @@
     Reserved ngrok hostname for the REST bridge's tunnel, if you actually
     need one. Empty by default -- see DESCRIPTION.
 
+.PARAMETER BootstrapAdminGithubUser
+    GitHub login to bootstrap an identity for, directly against Fuseki,
+    bypassing AnimusDep. Empty by default -- when unset, no bootstrap
+    happens and nothing about this script's behaviour changes. Requires
+    -BootstrapAdminSlug and -BootstrapAdminName to also be set.
+
+.PARAMETER BootstrapAdminSlug
+    Local identifier for the bootstrap identity, e.g. "kurt". Becomes the
+    trailing segment of the Person IRI.
+
+.PARAMETER BootstrapAdminName
+    Display name (rdfs:label) for the bootstrap identity.
+
+.PARAMETER BootstrapAdminRole
+    Role slug to grant the bootstrap identity. Default "admin".
+
+.PARAMETER BootstrapAdminDataset
+    Dataset to bootstrap into. Defaults to the bank's own dataset when
+    left empty.
+
+.PARAMETER BootstrapAdminBank
+    Named bank to bootstrap through (see ~/.holonbridge/config.json).
+    Default "local".
+
 .EXAMPLE
     .\start-holonbridge.ps1
 
 .EXAMPLE
     .\start-holonbridge.ps1 -RestNgrokUrl "kurtcagle-rest-python.ngrok.io"
+
+.EXAMPLE
+    .\start-holonbridge.ps1 -BootstrapAdminGithubUser "kurtcagle" -BootstrapAdminSlug "kurt" -BootstrapAdminName "Kurt Cagle"
 #>
 
 param(
@@ -65,7 +105,15 @@ param(
     [int]$FusekiPort2      = 3040,
     [string]$FusekiBase2   = "C:\jena\fuseki-base2",
     [string]$FusekiLoc2    = "C:\jena\data2",
-    [string]$FusekiDataset2 = "/ds"
+    [string]$FusekiDataset2 = "/ds",
+
+    # Optional one-time-per-identity bootstrap admin (see DESCRIPTION).
+    [string]$BootstrapAdminGithubUser = "",
+    [string]$BootstrapAdminSlug       = "",
+    [string]$BootstrapAdminName       = "",
+    [string]$BootstrapAdminRole       = "admin",
+    [string]$BootstrapAdminDataset    = "",
+    [string]$BootstrapAdminBank       = "local"
 )
 
 $ErrorActionPreference = "Stop"
@@ -115,6 +163,40 @@ function Start-Logged {
     return [PSCustomObject]@{ Name = $Name; Process = $proc; OutLog = $outLog; ErrLog = $errLog }
 }
 
+function Invoke-BootstrapAdmin {
+    # Opt-in and idempotent -- see .DESCRIPTION above. Talks directly to
+    # Fuseki (never through the REST bridge), which is why this runs
+    # right after Fuseki comes up rather than after holonbridge itself.
+    if (-not $BootstrapAdminGithubUser) {
+        return
+    }
+    if (-not $BootstrapAdminSlug -or -not $BootstrapAdminName) {
+        Write-Host "  -BootstrapAdminGithubUser is set but -BootstrapAdminSlug/-BootstrapAdminName are not -- skipping bootstrap admin" -ForegroundColor Yellow
+        return
+    }
+
+    $bootstrapExe = Join-Path $RepoPath "$VenvFolder\Scripts\holonbridge-bootstrap-admin.exe"
+    if (-not (Test-Path $bootstrapExe)) {
+        Write-Host "  holonbridge-bootstrap-admin not found at $bootstrapExe -- skipping" -ForegroundColor Yellow
+        Write-Host "  Rebuild the venv to pick it up: pip install -e `".[mcp,dev]`"" -ForegroundColor DarkGray
+        return
+    }
+
+    $bootstrapArgs = @(
+        "--slug", $BootstrapAdminSlug,
+        "--name", $BootstrapAdminName,
+        "--github-user", $BootstrapAdminGithubUser,
+        "--role", $BootstrapAdminRole,
+        "--bank", $BootstrapAdminBank
+    )
+    if ($BootstrapAdminDataset) {
+        $bootstrapArgs += @("--dataset", $BootstrapAdminDataset)
+    }
+
+    Write-Host "Ensuring bootstrap identity for $BootstrapAdminGithubUser (idempotent)..."
+    & $bootstrapExe @bootstrapArgs
+}
+
 Write-Host "Clearing ports $FusekiPort1, $FusekiPort2, $RestPort, and $McpPort of any orphaned processes..."
 Clear-Port -Port $FusekiPort1
 Clear-Port -Port $FusekiPort2
@@ -153,6 +235,8 @@ $handles += Start-Logged -Name "fuseki2" -FilePath $fusekiExe -WorkingDirectory 
 Remove-Item Env:\FUSEKI_BASE -ErrorAction SilentlyContinue
 
 Start-Sleep -Seconds 3   # give Fuseki a moment to bind before the REST bridge starts calling it
+
+Invoke-BootstrapAdmin
 
 if (Test-Path $holonbridgeExe) {
     $handles += Start-Logged -Name "rest" -FilePath $holonbridgeExe -ArgumentList @()
