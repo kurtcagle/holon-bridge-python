@@ -745,6 +745,116 @@ async def graph_op(
     )
 
 
+# --- named triggers -------------------------------------------------------
+#
+# Added 2026-08-26, alongside PR #11 on the bridge itself. A trigger's
+# condition is an ordinary named query (a SELECT projecting ?focus) and its
+# action is an ordinary named rule bound with $this=focus -- no new query
+# dialect, no new rule mechanism. StateTrigger fires from a fluent.py hook
+# after a confirmed transition; TemporalTrigger fires from the scheduler's
+# periodic "trigger-sweep" maintenance job. A reviewRequired=true trigger's
+# firing stages its rule's literal output as a Turtle candidate (see
+# "candidate review queue" below) instead of writing it immediately.
+#
+# Not yet Toolset/persona-reachability-gated on the bridge side, same as
+# named-queries/named-rules were before PR #9 -- routes/triggers.py notes
+# this as deferred, not dropped.
+
+
+@mcp.tool()
+async def list_named_triggers(
+    trigger_status: str | None = None, refresh: bool = False
+) -> dict:
+    """List registered named triggers.
+
+    Filter by ``Active``, ``Suspended``, or ``Deprecated``. Each entry
+    reports its ``triggerKind`` (``StateTrigger`` or ``TemporalTrigger``),
+    its condition (a named-query id) and action (a named-rule id), and
+    whether firing stages to the candidate queue (``reviewRequired: true``)
+    or runs the rule directly.
+    """
+    params: dict[str, Any] = {}
+    if trigger_status:
+        params["trigger_status"] = trigger_status
+    if refresh:
+        params["refresh"] = refresh
+    return await _call("GET", "/named-triggers", params=params or None)
+
+
+@mcp.tool()
+async def get_named_trigger(trigger_id: str) -> dict:
+    """Full definition of one named trigger, including its condition and action."""
+    return await _call("GET", f"/named-trigger/{trigger_id}")
+
+
+@mcp.tool()
+async def evaluate_named_trigger(
+    trigger_id: str, touched_predicates: list[str] | None = None
+) -> dict:
+    """Evaluate one trigger on demand, out of band from its normal firing path.
+
+    A StateTrigger normally fires from a fluent transition, a TemporalTrigger
+    from the scheduler's periodic sweep — this runs the same condition/action
+    logic immediately, for testing a newly registered trigger or re-checking
+    one manually. ``touched_predicates`` narrows evaluation to triggers that
+    declared a matching ``watchedPredicate``; omit it to evaluate regardless
+    of that narrowing.
+
+    A ``reviewRequired`` trigger's firing lands in the candidate queue (see
+    ``list_candidates``/``get_candidate``) rather than writing immediately —
+    check there for the result, not the target graph, until it's approved.
+    """
+    return await _call(
+        "POST",
+        f"/named-trigger/{trigger_id}/evaluate",
+        json_body={"touched_predicates": touched_predicates},
+    )
+
+
+@mcp.tool()
+async def reload_named_triggers() -> dict:
+    """Re-read the named-trigger registry, discarding the cached copy."""
+    return await _call("POST", "/named-triggers/reload")
+
+
+# --- candidate review queue -------------------------------------------------
+#
+# Where a reviewRequired=true trigger's firing lands: the literal Turtle its
+# rule would produce, staged for a human to approve or reject rather than
+# written immediately. Approval always merges (GSP POST) regardless of the
+# rule's own declared write mode -- an unreviewed action that later gets a
+# human's approval should never be more destructive than strictly additive,
+# since the live graph may have changed between proposal and approval.
+
+
+@mcp.tool()
+async def list_candidates(candidate_status: str | None = None) -> dict:
+    """List staged trigger candidates. Filter by Pending, Approved, or Rejected."""
+    params = {"candidate_status": candidate_status} if candidate_status else None
+    return await _call("GET", "/candidates", params=params)
+
+
+@mcp.tool()
+async def get_candidate(candidate_id: str) -> dict:
+    """One candidate's detail, including the literal Turtle it would merge on approval."""
+    return await _call("GET", f"/candidate/{candidate_id}")
+
+
+@mcp.tool()
+async def approve_candidate(candidate_id: str) -> dict:
+    """Approve a pending candidate: merges its staged Turtle (GSP POST) into
+    the target graph, regardless of the underlying rule's own write mode
+    (see the section note above). Refused (409) if not Pending."""
+    return await _call("POST", f"/candidate/{candidate_id}/approve")
+
+
+@mcp.tool()
+async def reject_candidate(candidate_id: str) -> dict:
+    """Reject a pending candidate. No write happens; the candidate is marked
+    Rejected. Refused (409) if not Pending."""
+    return await _call("POST", f"/candidate/{candidate_id}/reject")
+
+
 # --- pipelines and ingestion --------------------------------------------------
 
 
