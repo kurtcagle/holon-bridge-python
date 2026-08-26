@@ -9,6 +9,7 @@
 #   3. holonbridge-mcp      (stdio — only started standalone if you pass --with-mcp;
 #                            normally Claude Code/Desktop launches this itself
 #                            as a child process, per the mcpServers config)
+#   4. ngrok tunnel         (public endpoint for the MCP layer — see NGROK_* below)
 #
 # Usage:
 #   ./holonbridge-ctl.sh start [--with-mcp]
@@ -24,7 +25,7 @@
 #   python3 -m venv .venv
 #   source .venv/bin/activate
 #   pip install -e ".[mcp,dev]"
-#   cp .env.example .env   # then set BEARER_TOKEN
+#   cp .env.example .env   # then set BEARER_TOKEN and NGROK_AUTHTOKEN
 #
 # This is the Linux/bash counterpart to scripts/start-holonbridge.ps1. It
 # takes a different shape deliberately: rather than a foreground watcher you
@@ -32,8 +33,15 @@
 # ~/.holonbridge/run/ so start/stop/restart/status all work independently
 # and the stack can run detached (e.g. from a systemd unit or a plain
 # `nohup ... &` login-shell exit) instead of needing a terminal held open.
-ngrok config add-authtoken 2hqCOfvF5DPy2fefu5FsmIzBVeo_6GYm9dsqLn4ci4Cr5smbK
-ngrok http 3034 --url https://causalspark.ngrok.io &
+#
+# CHANGED 2026-08-26: NGROK_AUTHTOKEN is read from the environment or from
+# .env, never hardcoded in this file — an earlier version of this script
+# had a real token committed in plain text. If that token is still active,
+# rotate it in the ngrok dashboard; simply removing it from this file does
+# not remove it from git history. The ngrok tunnel itself also moved from
+# an unconditional top-of-file command (which fired on every invocation of
+# this script, including `stop` and `status`) into do_start(), with proper
+# PID tracking like every other service here.
 
 set -euo pipefail
 
@@ -66,16 +74,25 @@ BOOTSTRAP_ADMIN_ROLE="${BOOTSTRAP_ADMIN_ROLE:-admin}"
 BOOTSTRAP_ADMIN_DATASET="${BOOTSTRAP_ADMIN_DATASET:-}"   # default: the bank's own dataset
 BOOTSTRAP_ADMIN_BANK="${BOOTSTRAP_ADMIN_BANK:-local}"
 
+# ngrok tunnel for the MCP layer. NGROK_AUTHTOKEN is resolved below (env var
+# first, then HOLONBRIDGE_DIR/.env) — never hardcoded here. See the header
+# note above if a token was previously committed in this file.
+NGROK_AUTHTOKEN="${NGROK_AUTHTOKEN:-}"
+NGROK_URL="${NGROK_URL:-https://causalspark.ngrok.io}"
+NGROK_LOCAL_PORT="${NGROK_LOCAL_PORT:-3034}"
+
 RUN_DIR="${RUN_DIR:-$HOME/.holonbridge/run}"
 LOG_DIR="${LOG_DIR:-$HOME/.holonbridge/logs}"
 
 FUSEKI_PID_FILE="$RUN_DIR/fuseki.pid"
 BRIDGE_PID_FILE="$RUN_DIR/holonbridge.pid"
 MCP_PID_FILE="$RUN_DIR/holonbridge-mcp.pid"
+NGROK_PID_FILE="$RUN_DIR/ngrok.pid"
 
 FUSEKI_LOG="$LOG_DIR/fuseki.log"
 BRIDGE_LOG="$LOG_DIR/holonbridge.log"
 MCP_LOG="$LOG_DIR/holonbridge-mcp.log"
+NGROK_LOG="$LOG_DIR/ngrok.log"
 
 STARTUP_TIMEOUT=30   # seconds to wait for each service to come up
 
@@ -128,6 +145,22 @@ stop_pid_file() {
   fi
 }
 
+read_env_var() {
+  # $1 = key, $2 = .env file path. Prints the value (unquoted), or nothing
+  # if the key or file is absent. Reads just this one key rather than
+  # sourcing the whole file — .env may contain values this script has no
+  # business executing, and dotenv values can contain characters bash
+  # would otherwise try to interpret.
+  local key="$1" file="$2"
+  [[ -f "$file" ]] || return 0
+  grep -E "^${key}=" "$file" | tail -n1 | cut -d= -f2- \
+    | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//"
+}
+
+if [[ -z "$NGROK_AUTHTOKEN" ]]; then
+  NGROK_AUTHTOKEN="$(read_env_var NGROK_AUTHTOKEN "$HOLONBRIDGE_DIR/.env")"
+fi
+
 # ---------------------------------------------------------------------------
 # Actions
 # ---------------------------------------------------------------------------
@@ -166,6 +199,30 @@ do_bootstrap_admin() {
       --bank "$BOOTSTRAP_ADMIN_BANK" \
       "${dataset_args[@]}"
   )
+}
+
+do_start_ngrok() {
+  if is_running "$NGROK_PID_FILE"; then
+    log "ngrok already running (PID $(cat "$NGROK_PID_FILE")), skipping"
+    return 0
+  fi
+  if [[ -z "$NGROK_AUTHTOKEN" ]]; then
+    err "NGROK_AUTHTOKEN not set (checked the environment and"
+    err "  $HOLONBRIDGE_DIR/.env) — skipping the ngrok tunnel."
+    err "Add NGROK_AUTHTOKEN=<token> to .env, or export it before running"
+    err "this script. Get a token from https://dashboard.ngrok.com if the"
+    err "previous one was rotated out."
+    return 0
+  fi
+  if ! command -v ngrok >/dev/null 2>&1; then
+    err "ngrok not found on PATH — skipping the tunnel"
+    return 0
+  fi
+
+  ngrok config add-authtoken "$NGROK_AUTHTOKEN"
+  log "Starting ngrok tunnel ($NGROK_LOCAL_PORT -> $NGROK_URL)..."
+  nohup ngrok http "$NGROK_LOCAL_PORT" --url "$NGROK_URL" >"$NGROK_LOG" 2>&1 &
+  echo $! > "$NGROK_PID_FILE"
 }
 
 do_start() {
@@ -244,6 +301,11 @@ do_start() {
       log "(-m holonbridge_mcp.server) with HOLONBRIDGE_ENV_FILE set to your .env."
       log "Run it standalone only for a smoke test — logs go to $MCP_LOG, but there's"
       log "no interactive stdin/stdout here since nothing is piping into it."
+      log "NOTE: this is the stdio variant, not the --transport sse process the"
+      log "ngrok tunnel below actually needs for a real remote connection — that"
+      log "one currently has to be started separately (see start-holonbridge.ps1"
+      log "for the equivalent invocation: python -m holonbridge_mcp --transport"
+      log "sse --port $NGROK_LOCAL_PORT)."
       (
         cd "$HOLONBRIDGE_DIR"
         nohup "$HOLONBRIDGE_VENV/bin/holonbridge-mcp" >"$MCP_LOG" 2>&1 &
@@ -261,17 +323,21 @@ do_start() {
     log "For normal use, let Claude Code/Desktop start it via its own MCP config."
   fi
 
+  # --- ngrok tunnel ---
+  do_start_ngrok
+
   log "Stack up. Fuseki: http://localhost:$FUSEKI_PORT  HolonBridge: http://localhost:$HOLONBRIDGE_PORT"
 }
 
 do_stop() {
+  stop_pid_file "$NGROK_PID_FILE" "ngrok"
   stop_pid_file "$MCP_PID_FILE" "holonbridge-mcp"
   stop_pid_file "$BRIDGE_PID_FILE" "HolonBridge"
   stop_pid_file "$FUSEKI_PID_FILE" "Fuseki"
 }
 
 do_status() {
-  for pair in "Fuseki:$FUSEKI_PID_FILE" "HolonBridge:$BRIDGE_PID_FILE" "holonbridge-mcp:$MCP_PID_FILE"; do
+  for pair in "Fuseki:$FUSEKI_PID_FILE" "HolonBridge:$BRIDGE_PID_FILE" "holonbridge-mcp:$MCP_PID_FILE" "ngrok:$NGROK_PID_FILE"; do
     local name="${pair%%:*}" pid_file="${pair##*:}"
     if is_running "$pid_file"; then
       echo "  $name: running (PID $(cat "$pid_file"))"
