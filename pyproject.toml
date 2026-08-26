@@ -28,6 +28,7 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5"]
 [project.scripts]
 holonbridge = "holonbridge.server:main"
 holonbridge-mcp = "holonbridge_mcp.__main__:main"
+holonbridge-bootstrap-admin = "holonbridge.bootstrap:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["holonbridge", "holonbridge_mcp"]
