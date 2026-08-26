@@ -1,0 +1,58 @@
+## Reference SHACL shapes for Person/identity/persona-membership creation.
+##
+## Push into a dataset's own `shacl` graph (conn.shapes_graph) to enable
+## gating on /admin/person and /admin/persona/assign, the same way
+## fluent.ttl gates holonbridge.fluent.update_fluent(). Neither admin
+## route validates against this by default -- see their own docstrings in
+## routes/identity_admin.py.
+##
+## Deliberately NOT sh:closed on any shape below. A Person accumulates
+## metadata over time -- organisation, location, whatever comes up next --
+## and none of it should need a shape edit just to be written. Only what's
+## actually enforced needs a property shape here; everything else passes
+## through unvalidated until it earns one.
+
+@prefix holon: <https://w3id.org/holon/> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sh:    <http://www.w3.org/ns/shacl#> .
+@prefix xsd:   <http://www.w3.org/2001/XMLSchema#> .
+
+## Common superclass for external identity providers. GitHubIdentity is
+## the only concrete subclass so far -- require_animus in deps.py resolves
+## against it specifically today -- but holon:hasExternalIdentity's own
+## range is this superclass, not GitHubIdentity directly, so a second
+## provider type (an EmailIdentity, say) slots in as one more
+## rdfs:subClassOf without PersonShape needing to change at all.
+holon:ExternalIdentity a rdfs:Class ;
+    rdfs:comment "An external identity provider account (GitHub login, etc.) linked to a holon:Person via holon:hasExternalIdentity."@en .
+
+holon:GitHubIdentity rdfs:subClassOf holon:ExternalIdentity .
+
+holon:PersonShape a sh:NodeShape ;
+    rdfs:comment "A Person known to this dataset's Animus/ACL layer."@en ;
+    sh:targetClass holon:Person ;
+    sh:property
+        [ sh:path rdfs:label ; sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ] ,
+        [ sh:path holon:hasExternalIdentity ; sh:class holon:ExternalIdentity ; sh:minCount 1 ] ,
+        [ sh:path holon:hasRole ; sh:class holon:Role ] ,
+        [ sh:path holon:organisation ; sh:datatype xsd:string ; sh:maxCount 1 ] ,
+        [ sh:path holon:location ; sh:datatype xsd:string ; sh:maxCount 1 ] .
+
+holon:GitHubIdentityShape a sh:NodeShape ;
+    rdfs:comment "The GitHub login backing an external identity link."@en ;
+    sh:targetClass holon:GitHubIdentity ;
+    sh:property
+        [ sh:path holon:identifier ; sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ] .
+
+holon:RoleShape a sh:NodeShape ;
+    rdfs:comment "A Role a Person can hold, e.g. the reserved per-dataset admin Role acl.py's is_admin checks for."@en ;
+    sh:targetClass holon:Role ;
+    sh:property
+        [ sh:path rdfs:label ; sh:datatype xsd:string ; sh:maxCount 1 ] .
+
+holon:HomeShape a sh:NodeShape ;
+    rdfs:comment "A Person's membership marker inside one Persona's per-user graph -- switch_persona's has_home gate in persona.py looks for exactly this pattern."@en ;
+    sh:targetClass holon:Home ;
+    sh:property
+        [ sh:path holon:representsPerson ; sh:nodeKind sh:IRI ; sh:minCount 1 ; sh:maxCount 1 ] ,
+        [ sh:path rdfs:label ; sh:datatype xsd:string ; sh:maxCount 1 ] .
