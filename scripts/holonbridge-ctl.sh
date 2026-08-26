@@ -51,6 +51,21 @@ HOLONBRIDGE_DIR="${HOLONBRIDGE_DIR:-/opt/holon-bridge-python}"
 HOLONBRIDGE_VENV="${HOLONBRIDGE_VENV:-$HOLONBRIDGE_DIR/.venv}"
 HOLONBRIDGE_PORT="${HOLONBRIDGE_PORT:-3031}"
 
+# Optional one-time-per-identity bootstrap admin (see holonbridge.bootstrap,
+# console script holonbridge-bootstrap-admin). Solves the AnimusDep
+# chicken-and-egg problem on a genuinely fresh dataset, where no route
+# through the REST API can create the very first Person. Idempotent — checks
+# by external id before writing, never touches an existing identity's role —
+# so it is safe to leave set across every start; a no-op once the identity
+# already exists. Unset BOOTSTRAP_ADMIN_GITHUB_USER (the default) means
+# nothing changes here at all.
+BOOTSTRAP_ADMIN_GITHUB_USER="${BOOTSTRAP_ADMIN_GITHUB_USER:-}"
+BOOTSTRAP_ADMIN_SLUG="${BOOTSTRAP_ADMIN_SLUG:-}"
+BOOTSTRAP_ADMIN_NAME="${BOOTSTRAP_ADMIN_NAME:-}"
+BOOTSTRAP_ADMIN_ROLE="${BOOTSTRAP_ADMIN_ROLE:-admin}"
+BOOTSTRAP_ADMIN_DATASET="${BOOTSTRAP_ADMIN_DATASET:-}"   # default: the bank's own dataset
+BOOTSTRAP_ADMIN_BANK="${BOOTSTRAP_ADMIN_BANK:-local}"
+
 RUN_DIR="${RUN_DIR:-$HOME/.holonbridge/run}"
 LOG_DIR="${LOG_DIR:-$HOME/.holonbridge/logs}"
 
@@ -117,6 +132,42 @@ stop_pid_file() {
 # Actions
 # ---------------------------------------------------------------------------
 
+do_bootstrap_admin() {
+  # Opt-in and idempotent — see the Configuration section above. Talks
+  # directly to Fuseki (never through the REST bridge, so it works even
+  # before holonbridge itself has started), which is why this runs
+  # immediately after Fuseki is confirmed up rather than after holonbridge.
+  if [[ -z "$BOOTSTRAP_ADMIN_GITHUB_USER" ]]; then
+    return 0
+  fi
+  if [[ -z "$BOOTSTRAP_ADMIN_SLUG" || -z "$BOOTSTRAP_ADMIN_NAME" ]]; then
+    err "BOOTSTRAP_ADMIN_GITHUB_USER is set but BOOTSTRAP_ADMIN_SLUG and/or"
+    err "BOOTSTRAP_ADMIN_NAME are not — skipping bootstrap admin"
+    return 0
+  fi
+  if [[ ! -x "$HOLONBRIDGE_VENV/bin/holonbridge-bootstrap-admin" ]]; then
+    err "holonbridge-bootstrap-admin not found at"
+    err "  $HOLONBRIDGE_VENV/bin/holonbridge-bootstrap-admin"
+    err "Rebuild the venv to pick it up: pip install -e \".[mcp,dev]\""
+    return 0
+  fi
+
+  local dataset_args=()
+  [[ -n "$BOOTSTRAP_ADMIN_DATASET" ]] && dataset_args=(--dataset "$BOOTSTRAP_ADMIN_DATASET")
+
+  log "Ensuring bootstrap identity for $BOOTSTRAP_ADMIN_GITHUB_USER (idempotent)..."
+  (
+    cd "$HOLONBRIDGE_DIR"
+    "$HOLONBRIDGE_VENV/bin/holonbridge-bootstrap-admin" \
+      --slug "$BOOTSTRAP_ADMIN_SLUG" \
+      --name "$BOOTSTRAP_ADMIN_NAME" \
+      --github-user "$BOOTSTRAP_ADMIN_GITHUB_USER" \
+      --role "$BOOTSTRAP_ADMIN_ROLE" \
+      --bank "$BOOTSTRAP_ADMIN_BANK" \
+      "${dataset_args[@]}"
+  )
+}
+
 do_start() {
   local with_mcp="${1:-false}"
 
@@ -144,6 +195,11 @@ do_start() {
     echo $! > "$FUSEKI_PID_FILE"
     wait_for_port "$FUSEKI_PORT" "Fuseki"
   fi
+
+  # --- Bootstrap admin identity (opt-in, idempotent) ---
+  # Runs on every start regardless of whether Fuseki was already up — cheap
+  # and safe, since it no-ops once the identity exists.
+  do_bootstrap_admin
 
   # --- HolonBridge REST API (Python: FastAPI, console script from the venv) ---
   if is_running "$BRIDGE_PID_FILE"; then
