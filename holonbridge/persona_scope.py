@@ -192,14 +192,31 @@ def build_neighbour_query(
     include scene at every tier -- harmless in practice if that convention
     holds, but a real behaviour change, not a mechanical port. Set this to
     True only once that's a decision, not a default.
+
+    FIXED 2026-08-26: `direction="across"` (root `isConnectedTo`) was
+    sharing `"up"`'s single-direction triple shape
+    (`<holon_iri> ?predicate ?neighbour`), so it only ever found
+    connections where holon_iri was asserted as the subject -- silently
+    missing any connection asserted from the other endpoint. Containment
+    (`up`/`down`) stays single-direction by design -- a child always
+    points at its parent, per holon-schema-patterns -- but connections
+    are explicitly NOT direction-guaranteed at write time (see that
+    skill's "Connections are checked in both directions" rule), and
+    `lib/holon.js`'s `fetchHolonProjection` in the Node reference
+    implementation already gets this right with an equivalent UNION.
+    `across` now unions both triple shapes to match.
     """
     graphs = scope if include_scene else [g for g in scope if g.role == "holons"]
     values = " ".join(f"<{g.iri}>" for g in graphs)
 
     if direction == "down":
         pattern = f"?neighbour ?predicate <{holon_iri}> ."
-    else:  # "up" and "across" share the same triple shape
+    elif direction == "up":
         pattern = f"<{holon_iri}> ?predicate ?neighbour ."
+    else:  # "across" -- connections may be asserted from either endpoint
+        pattern = f"""{{ <{holon_iri}> ?predicate ?neighbour . }}
+    UNION
+    {{ ?neighbour ?predicate <{holon_iri}> . }}"""
 
     return f"""{_PREFIXES}
 SELECT DISTINCT ?neighbour ?label ?predicate ?g
