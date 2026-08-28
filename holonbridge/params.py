@@ -240,3 +240,74 @@ def values_clause(bindings: Iterable[tuple[str, str]]) -> str:
     names = " ".join(f"?{name}" for name, _ in pairs)
     terms = " ".join(term for _, term in pairs)
     return f"VALUES ({names}) {{ ({terms}) }}"
+
+
+# --- SHACL parameter-shape rendering -------------------------------------------
+#
+# CHANGED 2026-08-28: added for named_query_schema (GET
+# /named-query/{id}/schema). Derives a SHACL NodeShape from exactly the
+# Parameter declarations apply_query_params already binds against -- one
+# source of truth for "what does this query accept", not a second,
+# hand-authored shape that can drift from the actual {{placeholder}}/VALUES
+# bindings. If a query later needs constraints this flat declaration set
+# cannot express (value ranges, sh:in enumerations, cross-parameter rules),
+# the intended extension point is an author-supplied shapes block living
+# alongside the query in the registry, preferred over the derived one when
+# present -- not yet built; this module only does the derived half.
+
+#: Namespace for the synthetic per-parameter sh:path used below. These are
+#: not real predicates asserted on any data; they only need to be stable
+#: and distinct per parameter name so a form-generating client can key off
+#: them consistently across calls.
+_PARAM_PATH_NS = "https://w3id.org/holonbridge/param/"
+
+
+def shacl_shape_for_query(query_id: str, query_iri: str, params: list[Parameter]) -> str:
+    """Render ``params`` as a ``sh:NodeShape`` in Turtle, targeting the
+    query's own IRI.
+
+    Each :class:`Parameter` becomes one ``sh:property``: ``sh:nodeKind
+    sh:IRI`` for an IRI-typed parameter (same test as ``is_iri_datatype``
+    everywhere else), ``sh:datatype`` for a literal-typed one, ``sh:minCount
+    1`` when ``required`` is set, and ``sh:defaultValue``/``sh:description``
+    when the registry declared them. Parameters are ordered by name for a
+    stable, diffable output; ``sh:order`` on each property preserves that
+    ordering for a client that wants to render a form in a fixed sequence.
+    """
+    shape_iri = f"{query_iri}#ParameterShape"
+    header = (
+        f"<{shape_iri}>\n"
+        "    a sh:NodeShape ;\n"
+        f"    sh:targetNode <{query_iri}> ;\n"
+        f'    sh:name "{escape_literal(query_id)} parameters"'
+    )
+
+    if not params:
+        return (
+            "@prefix sh: <http://www.w3.org/ns/shacl#> .\n\n"
+            f"{header} .\n"
+        )
+
+    property_blocks: list[str] = []
+    for order, param in enumerate(sorted(params, key=lambda p: p.name)):
+        fields = [
+            f"sh:path <{_PARAM_PATH_NS}{param.name}>",
+            f'sh:name "{escape_literal(param.name)}"',
+        ]
+        if is_iri_datatype(param.datatype):
+            fields.append("sh:nodeKind sh:IRI")
+        elif param.datatype:
+            fields.append(f"sh:datatype <{_expand_datatype(param.datatype)}>")
+        fields.append(f"sh:minCount {1 if param.required else 0}")
+        fields.append("sh:maxCount 1")
+        if param.default is not None:
+            fields.append(f'sh:defaultValue "{escape_literal(param.default)}"')
+        if param.description:
+            fields.append(f'sh:description "{escape_literal(param.description)}"')
+        fields.append(f"sh:order {order}")
+
+        body = " ;\n          ".join(fields)
+        property_blocks.append(f"    sh:property [\n          {body}\n        ]")
+
+    shape = header + " ;\n" + " ;\n".join(property_blocks) + " .\n"
+    return "@prefix sh: <http://www.w3.org/ns/shacl#> .\n\n" + shape

@@ -79,15 +79,23 @@ class DataBook:
         return [b for b in self.blocks if b.lang == lang]
 
     def primary_graph_block(self) -> Block:
-        """The block ingestion lands: the first ``turtle`` or ``turtle12``
-        fence. Raised rather than silently skipping to a non-RDF block or
-        picking one that happens to come first for the wrong reason — a
-        DataBook with no RDF payload is not something ingestion can act on.
+        """The block ingestion lands: the first ``turtle``, ``turtle12``, or
+        ``json-ld`` fence. Raised rather than silently skipping to a
+        non-RDF block or picking one that happens to come first for the
+        wrong reason — a DataBook with no RDF payload is not something
+        ingestion can act on.
+
+        CHANGED 2026-08-28: added ``json-ld`` alongside ``turtle``/
+        ``turtle12`` — create_holon and create_message both accept either
+        serialisation. A matched ``json-ld`` block is converted to Turtle
+        by the caller (see ``holonbridge.turtle.from_json_ld``) before it
+        reaches the single GSP write path, which stays ``text/turtle``
+        unconditionally either way.
         """
         for block in self.blocks:
-            if block.lang in ("turtle", "turtle12"):
+            if block.lang in ("turtle", "turtle12", "json-ld"):
                 return block
-        raise ValueError("DataBook has no turtle or turtle12 block to ingest")
+        raise ValueError("DataBook has no turtle, turtle12, or json-ld block to ingest")
 
     @property
     def named_graph(self) -> str | None:

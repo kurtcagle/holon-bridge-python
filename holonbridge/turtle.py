@@ -12,6 +12,15 @@ Two things matter here.
    Jena unparsed by default and Jena is the syntax authority. Local parsing
    is opt-in and is used only where the bridge genuinely needs the triples
    in-process (delta SHACL, holon projection).
+
+CHANGED 2026-08-28: added :func:`from_json_ld`. create_holon and
+create_message both accept a ``json-ld`` DataBook block as an alternative
+to ``turtle``/``turtle12`` (see ``databook.DataBook.primary_graph_block``).
+Rather than teach ``FusekiClient._gsp`` a second content-type, JSON-LD is
+converted to Turtle once, in-process, before it reaches the single GSP
+write path -- which stays ``text/turtle`` unconditionally, same as every
+other caller. rdflib 6+ parses ``json-ld`` natively; no extra plugin
+package required.
 """
 
 from __future__ import annotations
@@ -77,6 +86,25 @@ def parse(turtle: str, *, base: str | None = None) -> Graph:
             ) from exc
         raise TurtleSyntaxError(str(exc)) from exc
     return graph
+
+
+def from_json_ld(text: str, *, base: str | None = None) -> str:
+    """Convert a JSON-LD payload to Turtle.
+
+    Used by create_holon and create_message when a DataBook's matched
+    block is ``json-ld`` rather than ``turtle``/``turtle12`` -- the result
+    goes on to the same ``write_turtle_to_graph`` path either way, so
+    Fuseki only ever receives ``text/turtle``. Raises
+    :class:`TurtleSyntaxError` on a payload rdflib cannot parse as
+    JSON-LD, same failure type ``parse`` raises for Turtle, so callers can
+    catch one exception regardless of which serialisation a block used.
+    """
+    graph = Graph()
+    try:
+        graph.parse(data=text, format="json-ld", publicID=base)
+    except Exception as exc:  # rdflib raises a range of parser errors
+        raise TurtleSyntaxError(f"could not parse json-ld payload: {exc}") from exc
+    return graph.serialize(format="turtle")
 
 
 def serialise(graph: Graph) -> str:

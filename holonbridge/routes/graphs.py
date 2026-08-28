@@ -15,6 +15,14 @@ ACL check of any kind, unlike ``/sparql/*`` (gated since 2026-08-15).
 wholesale graph overwrite is the deliberately-rare exception; see
 ``holonbridge.acl.check_replace`` for the reasoning. ``/graph`` (DROP) and
 ``/ingest`` remain ungated, same as before.
+
+CHANGED 2026-08-28: the ACL check, SHACL gate, and GSP write themselves
+moved into ``holonbridge.ingest.write_turtle_to_graph``, shared with
+``POST /holon`` (create_holon) and ``POST /message/create``
+(create_message) -- see that module's docstring. This route now only owns
+the parts specific to a raw Turtle push: the optional local pre-parse and
+unpacking the request body. Behaviour is unchanged; this is a pure
+extraction.
 """
 
 from __future__ import annotations
@@ -23,10 +31,9 @@ from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
-from .. import shacl as shacl_mod
-from ..acl import check_replace, check_write
 from ..deps import AnimusDep, ClientDep, ConnDep, SettingsDep
 from ..fuseki import FusekiError
+from ..ingest import write_turtle_to_graph
 from ..turtle import TurtleSyntaxError, parse
 
 router = APIRouter(tags=["graphs"])
@@ -99,83 +106,18 @@ async def push_turtle(
         except TurtleSyntaxError as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    if animus.person is None:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="unresolved identity")
-
-    async def _query_fn(q: str) -> dict:
-        return await client.select(conn, q)
-
-    # Replace is the stricter, independent check -- grantsWrite never
-    # substitutes for it. See holonbridge.acl.check_replace.
-    if body.mode == "replace":
-        decision = await check_replace(
-            _query_fn, conn.holons_graph, person=animus.person, target=body.graph_iri
-        )
-    else:
-        decision = await check_write(
-            _query_fn, conn.holons_graph, person=animus.person, target=body.graph_iri
-        )
-    if not decision.allowed:
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN,
-            detail=f"{decision.reason} (graph: {body.graph_iri})",
-        )
-
-    shapes_graph = body.shapes_graph
-    if shapes_graph is None and settings.shacl_required:
-        shapes_graph = conn.shapes_graph
-
-    report_payload = None
-    if shapes_graph:
-        try:
-            if settings.shacl_delta:
-                report = await shacl_mod.validate_delta(
-                    client,
-                    conn,
-                    turtle=body.turtle,
-                    shapes_graph=shapes_graph,
-                    target_graph=body.graph_iri,
-                    write_mode=body.mode,
-                    reduction_rule_id=body.reduction_rule_id,
-                )
-            else:
-                report = await shacl_mod.validate_full(
-                    client,
-                    conn,
-                    turtle=body.turtle,
-                    shapes_graph=shapes_graph,
-                    target_graph=body.graph_iri,
-                    write_mode=body.mode,
-                    reduction_rule_id=body.reduction_rule_id,
-                )
-        except ValueError as exc:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-        except FusekiError as exc:
-            raise HTTPException(exc.status or 502, detail=exc.as_dict()) from exc
-
-        report_payload = report.as_dict()
-        if not report.conforms:
-            raise HTTPException(
-                422,
-                detail={"error": "shacl_violation", **report_payload},
-            )
-
-    try:
-        if body.mode == "replace":
-            await client.put_graph(conn, body.graph_iri, body.turtle)
-        else:
-            await client.post_graph(conn, body.graph_iri, body.turtle)
-    except FusekiError as exc:
-        raise HTTPException(exc.status or 502, detail=exc.as_dict()) from exc
-
-    return {
-        "ok": True,
-        "graph": body.graph_iri,
-        "dataset": conn.dataset,
-        "mode": body.mode,
-        "validated": bool(shapes_graph),
-        "validation": report_payload,
-    }
+    return await write_turtle_to_graph(
+        turtle=body.turtle,
+        graph_iri=body.graph_iri,
+        mode=body.mode,
+        shapes_graph=body.shapes_graph,
+        reduction_rule_id=body.reduction_rule_id,
+        conn=conn,
+        client=client,
+        shacl_required=settings.shacl_required,
+        shacl_delta=settings.shacl_delta,
+        animus=animus,
+    )
 
 
 @router.delete("/graph")
