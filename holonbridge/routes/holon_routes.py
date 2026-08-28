@@ -1,4 +1,14 @@
-"""Holon retrieval, SHACL validation, sequence minting, and meta routes."""
+"""Holon retrieval, creation, SHACL validation, sequence minting, and meta routes.
+
+CHANGED 2026-08-28: added ``POST /holon`` (create_holon) alongside the
+existing ``GET /holon``. It accepts a DataBook message rather than raw
+Turtle: parse the DataBook, pull its primary RDF block (``turtle``,
+``turtle12``, or ``json-ld``), resolve a target graph from the request or
+the DataBook's own ``graph.named_graph`` frontmatter, and hand off to
+``holonbridge.ingest.write_turtle_to_graph`` -- the exact same ACL/SHACL/
+write path ``POST /graph/push`` uses. See that module's docstring for why
+this is a wrapper and not a second implementation.
+"""
 
 from __future__ import annotations
 
@@ -10,10 +20,13 @@ from pydantic import BaseModel, Field
 
 from .. import sequence as sequence_mod
 from .. import shacl as shacl_mod
+from ..databook import DataBook
 from ..deps import AnimusDep, BanksDep, ClientDep, ConnDep, PersonasDep, SettingsDep
 from ..fuseki import FusekiError
 from ..holon import PROJECTION_MODES, get_holon
+from ..ingest import write_turtle_to_graph
 from ..persona_scope import resolve_scope_graphs
+from ..turtle import TurtleSyntaxError, from_json_ld, parse
 
 router = APIRouter(tags=["holon"])
 
@@ -78,6 +91,110 @@ async def holon(
     except FusekiError as exc:
         raise HTTPException(exc.status or 502, detail=exc.as_dict()) from exc
     return book.render()
+
+
+class CreateHolonRequest(BaseModel):
+    databook: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Full DataBook markdown text: YAML frontmatter plus one or more "
+            "fenced blocks, at least one of which is turtle, turtle12, or "
+            "json-ld."
+        ),
+    )
+    block_id: str | None = Field(
+        default=None,
+        description=(
+            "Select a specific databook:id block to ingest. Defaults to the "
+            "DataBook's first turtle/turtle12/json-ld block."
+        ),
+    )
+    graph_iri: str | None = Field(
+        default=None,
+        description=(
+            "Target named graph. Overrides the DataBook's own "
+            "graph.named_graph frontmatter if both are given; one of the "
+            "two must be present."
+        ),
+    )
+    shapes_graph: str | None = None
+    mode: str = Field(default="merge", pattern="^(merge|replace)$")
+    reduction_rule_id: str | None = None
+
+
+@router.post("/holon")
+async def create_holon(
+    body: CreateHolonRequest,
+    conn: ConnDep,
+    client: ClientDep,
+    settings: SettingsDep,
+    animus: AnimusDep,
+) -> dict:
+    """Create (or merge into) a holon from a DataBook message.
+
+    This is ``databook push`` -- extract the primary RDF block, resolve
+    its target graph, validate, write -- exposed as a bridge-native
+    operation instead of something only the DataBook CLI does client-side.
+    It does not mint identity: the payload's own Turtle/JSON-LD declares
+    whatever subject IRIs the holon needs, the same as a hand-authored
+    push. A caller that also wants a fresh IRI should mint one first via
+    ``POST /sequence/mint`` and embed it in the DataBook it sends here.
+
+    Graph resolution order: the request's own ``graph_iri`` first, then
+    the DataBook's ``graph.named_graph`` frontmatter, then a 400 if
+    neither is present -- deliberately no default graph, unlike
+    create_message, because a holon with no declared home is very likely
+    a mistake rather than an intentional choice.
+    """
+    try:
+        book = DataBook.parse(body.databook)
+    except Exception as exc:  # DataBook.parse's own YAML loader can raise a range of errors
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, detail=f"could not parse DataBook: {exc}"
+        ) from exc
+
+    try:
+        block = book.block(body.block_id) if body.block_id else book.primary_graph_block()
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    if block.lang == "json-ld":
+        try:
+            turtle_payload = from_json_ld(block.body)
+        except TurtleSyntaxError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    else:
+        turtle_payload = block.body
+        if settings.parse_mode == "local":
+            try:
+                parse(turtle_payload)
+            except TurtleSyntaxError as exc:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    graph_iri = body.graph_iri or book.named_graph
+    if not graph_iri:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "no graph_iri supplied and the DataBook has no graph.named_graph "
+                "in its frontmatter; one of the two is required"
+            ),
+        )
+
+    result = await write_turtle_to_graph(
+        turtle=turtle_payload,
+        graph_iri=graph_iri,
+        mode=body.mode,
+        shapes_graph=body.shapes_graph,
+        reduction_rule_id=body.reduction_rule_id,
+        conn=conn,
+        client=client,
+        shacl_required=settings.shacl_required,
+        shacl_delta=settings.shacl_delta,
+        animus=animus,
+    )
+    return {**result, "sourceBlock": block.id or "(unlabelled)", "sourceLang": block.lang}
 
 
 # --- validation ---------------------------------------------------------------
