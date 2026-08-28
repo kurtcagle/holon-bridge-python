@@ -463,6 +463,45 @@ async def push_turtle(
 
 
 @mcp.tool()
+async def create_holon(
+    databook: str,
+    block_id: str | None = None,
+    graph_iri: str | None = None,
+    shapes_graph: str | None = None,
+    mode: str = "merge",
+    reduction_rule_id: str | None = None,
+) -> dict:
+    """Create or merge into a holon from a DataBook message.
+
+    Unlike ``push_turtle``, which takes raw Turtle and an explicit
+    ``graph_iri``, this takes a full DataBook (frontmatter plus one or more
+    fenced blocks) and extracts the RDF for you -- the first turtle,
+    turtle12, or json-ld block, or the one named by ``block_id``. A
+    json-ld block is converted to Turtle before it's written; Fuseki only
+    ever receives Turtle either way.
+
+    ``graph_iri`` overrides the DataBook's own ``graph.named_graph``
+    frontmatter if both are given; one of the two is required, there is
+    no default target graph here. Everything else -- ``shapes_graph``,
+    ``mode``, ``reduction_rule_id`` -- means exactly what it means on
+    ``push_turtle``, because both call the same gated write path on the
+    bridge.
+    """
+    return await _call(
+        "POST",
+        "/holon",
+        json_body={
+            "databook": databook,
+            "block_id": block_id,
+            "graph_iri": graph_iri,
+            "shapes_graph": shapes_graph,
+            "mode": mode,
+            "reduction_rule_id": reduction_rule_id,
+        },
+    )
+
+
+@mcp.tool()
 async def get_holon(holon_iri: str, projection_mode: str = "immersive") -> str:
     """Retrieve a holon as a DataBook.
 
@@ -618,6 +657,22 @@ async def list_named_queries(
 async def get_named_query(query_id: str) -> dict:
     """Full definition of one named query, including its SPARQL body."""
     return await _call("GET", f"/named-query/{query_id}")
+
+
+@mcp.tool()
+async def get_named_query_schema(query_id: str) -> dict:
+    """SHACL shape describing one named query's parameters.
+
+    Derived fresh from the same parameter declarations ``run_named_query``
+    binds against -- name, datatype-or-IRI, required, default,
+    description -- as both a plain parameter list and a ``sh:NodeShape``
+    in Turtle, for a client that wants to introspect or auto-generate a
+    form without parsing the query body or any ``databook:param``-style
+    comments. Gated the same way as ``get_named_query``/``run_named_query``:
+    a query outside your reachable set for the current persona comes back
+    as unknown, not as a visible-but-forbidden query.
+    """
+    return await _call("GET", f"/named-query/{query_id}/schema")
 
 
 @mcp.tool()
@@ -969,6 +1024,56 @@ async def get_message(message_id: str) -> dict:
 async def list_messages(limit: int = 20) -> dict:
     """Recent run records, most recent first."""
     return await _call("GET", "/messages", params={"limit": limit})
+
+
+# --- events -------------------------------------------------------------------
+#
+# create_message submits domain-level hev:AssertionEvent content to the
+# dataset's events graph. Naming note, deliberately placed right after
+# get_message/list_messages above: those report hb:Message pipeline-run
+# status (Received/Running/Completed/Failed); this is unrelated -- a
+# different graph, a different vocabulary, a different concept, sharing
+# the word "message" only by coincidence of two separate naming decisions.
+# See holonbridge/routes/events.py's module docstring on the bridge for
+# the full explanation. Scope, as of 2026-08-28: AssertionEvent submission
+# only -- create_message never invokes a named trigger, a rule, or the
+# scheduler.
+
+
+@mcp.tool()
+async def create_message(
+    databook: str,
+    block_id: str | None = None,
+    graph_iri: str | None = None,
+    shapes_graph: str | None = None,
+    reduction_rule_id: str | None = None,
+) -> dict:
+    """Submit a DataBook of AssertionEvent content to the events graph.
+
+    Same DataBook-envelope pattern as ``create_holon``: the first turtle/
+    turtle12/json-ld block is extracted (or the one named by ``block_id``)
+    and written. Two differences from ``create_holon``: the write is
+    always a merge -- an event ledger is append-only, there is no
+    ``mode`` parameter -- and ``graph_iri`` defaults to the dataset's own
+    events graph when neither it nor the DataBook's ``graph.named_graph``
+    frontmatter is supplied, which is the common case, not an error.
+
+    Pass ``shapes_graph`` pointing at a registered EventShape if you want
+    the bridge to actually enforce ``hev:AssertionEvent`` typing; this
+    tool does not check that on its own, only that the payload is
+    well-formed RDF.
+    """
+    return await _call(
+        "POST",
+        "/message/create",
+        json_body={
+            "databook": databook,
+            "block_id": block_id,
+            "graph_iri": graph_iri,
+            "shapes_graph": shapes_graph,
+            "reduction_rule_id": reduction_rule_id,
+        },
+    )
 
 
 # --- scheduler ----------------------------------------------------------------
