@@ -26,6 +26,20 @@ to someone who can't reach it.
 needs the full Persona IRI instead — converted once, right before that
 call, via ``conn.persona_graph`` — since it has no ``Conn`` to convert
 with itself.
+
+CHANGED 2026-08-28: added ``GET /named-query/{id}/schema``
+(named_query_schema). Renders the query's declared ``Parameter`` list as a
+SHACL NodeShape via ``holonbridge.params.shacl_shape_for_query`` -- derived
+from the exact same declarations ``apply_query_params`` binds against, so
+there is one source of truth for "what does this query accept" rather than
+a hand-authored shape that can drift from the real {{placeholder}}/VALUES
+bindings. Goes through ``_load_and_authorise`` like get/run, so a query
+outside the caller's reachable set 404s here too -- the same
+indistinguishability the module docstring above already establishes for
+get and run applies to the schema as well: a restricted query's parameter
+contract is exactly the kind of thing that would differentially confirm
+its existence to someone who can't reach it, so it gets the same treatment,
+not an exception.
 """
 
 from __future__ import annotations
@@ -36,7 +50,7 @@ from pydantic import BaseModel, Field
 from ..deps import AnimusDep, ClientDep, ConnDep, PersonasDep, RegistryDep
 from ..fuseki import FusekiError
 from ..named_queries import apply_query_params, load_named_queries
-from ..params import ParameterError
+from ..params import ParameterError, shacl_shape_for_query
 from ..sparql_kind import classify, form
 from ..toolset import bind_persona_param, resolve_reachable
 
@@ -124,7 +138,8 @@ async def list_named_queries(
 async def _load_and_authorise(query_id: str, conn, client, animus, personas, cache):
     """Load the registry, resolve this caller's reachable set, and return
     the query if both known and reachable — otherwise raise the shared
-    404. Centralised so get/run can't drift on what "reachable" means.
+    404. Centralised so get/run/schema can't drift on what "reachable"
+    means.
     """
     result = await cache.get(client, conn, kind=KIND, loader=load_named_queries)
     query = result.by_id(query_id)
@@ -154,6 +169,35 @@ async def get_named_query(
         query_id, conn, client, animus, personas, cache
     )
     return query.detail()
+
+
+@router.get("/named-query/{query_id}/schema")
+async def named_query_schema(
+    query_id: str,
+    conn: ConnDep,
+    client: ClientDep,
+    animus: AnimusDep,
+    personas: PersonasDep,
+    cache: RegistryDep,
+) -> dict:
+    """SHACL parameter shape for a named query.
+
+    Intended for a form/widget-generating client that needs to know a
+    query's parameter contract (name, datatype-or-IRI, required, default,
+    description) without parsing ``databook:param``-style directives or
+    the query body itself. The shape is generated fresh from the
+    registry's own ``Parameter`` declarations on every call, not stored —
+    so it can never drift from what ``run`` actually binds against.
+    """
+    query, _persona = await _load_and_authorise(
+        query_id, conn, client, animus, personas, cache
+    )
+    return {
+        "id": query.id,
+        "iri": query.iri,
+        "parameters": query.summary()["parameters"],
+        "shapesTurtle": shacl_shape_for_query(query.id, query.iri, query.params),
+    }
 
 
 @router.post("/named-query/{query_id}/run")

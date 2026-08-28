@@ -23,6 +23,7 @@ from .persona_state import PersonaStore
 from .routes import (
     banks,
     dataset_admin,
+    events,
     fluent,
     graphs,
     holon_routes,
@@ -106,6 +107,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(sparql.router)
     app.include_router(graphs.router)
     app.include_router(holon_routes.router)
+    app.include_router(events.router)
     app.include_router(fluent.router)
     app.include_router(identity_admin.router)
     app.include_router(named_queries.router)
