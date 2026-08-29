@@ -12,31 +12,51 @@ reference to a running task, so a task nobody holds can be collected
 mid-flight; the run would simply stop, leaving a message stuck in `Running`
 with no error to explain it.
 
-CHANGED 2026-08-29: `/ingest` now depends on `AnimusDep` and lands its
-payload through `holonbridge.ingest.write_turtle_to_graph` — the same
-gated path `push_turtle`, `create_holon`, and `create_message` already use
-— instead of its own inline validate-then-write logic. Before this change
-`/ingest` had no ACL check of any kind: it ran SHACL validation (when
-configured) but never checked `check_write`/`check_replace`, and did so
-via a fourth independent copy of the validate-then-write pattern rather
-than the shared one. Both problems are fixed together, since the fix for
-one is routing through the function that already solves the other.
+CHANGED 2026-08-29 (first pass): `/ingest` now depends on `AnimusDep` and
+lands its payload through `holonbridge.ingest.write_turtle_to_graph` —
+the same gated path `push_turtle`, `create_holon`, and `create_message`
+already use — instead of its own inline validate-then-write logic. It had
+no ACL check of any kind before this, and did its own fourth independent
+copy of the validate-then-write pattern; both problems are fixed together
+since the fix for one is routing through the function that already solves
+the other.
 
-STILL OPEN, found while making this fix, not touched by it: `POST
-/pipeline` (register_pipeline), `DELETE /pipeline/{id}` (drop_pipeline),
-and `POST /pipeline-run` (pipeline_run) have no `AnimusDep` either —
-completely ungated. `pipeline_run` is arguably the more consequential gap
-of the two: a pipeline can chain into writes via named rules with
-`Sync`/`Replace` write modes, so an unauthenticated caller triggering one
-isn't just an unauthenticated read, it can be an unauthenticated write at
-one remove. Pipeline manifests are meta/infrastructure objects rather
-than domain data, the same way named-queries and named-rules are — they
-may warrant their own grant rather than reusing `check_write` against
-`conn.holons_graph`, the way Toolset-reachability gating was built for
-named-queries/named-rules rather than reusing plain write grants.
-Deliberately not decided here; flagged for a separate pass. `DELETE
-/graph` (drop_graph, in `routes/graphs.py`) remains a separate, previously
-known gap, also untouched by this change.
+CHANGED 2026-08-29 (second pass): `register_pipeline`/`drop_pipeline` now
+require `AnimusDep` and check `check_write`/`check_replace` on the
+pipeline's own manifest graph, the same write gate used everywhere else.
+`get_pipelines`/`get_pipeline`/`pipeline_run` now require `AnimusDep` and
+`PersonasDep`, gated by Toolset-reachability via a shared
+`_load_and_authorise_pipeline` helper — the same pattern PR #9 already
+established for named-queries/named-rules, including the "same 404 shape
+for unknown-vs-unreachable" principle. List and get are gated alongside
+run, not just run — a boundary that hides a pipeline from the list but
+still runs it on request isn't a boundary, same reasoning routes/
+named_queries.py's own docstring already states.
+
+STILL OPEN, found while making this fix, more serious than the entry-gate
+gap it resembles: a pipeline's *internal* rule stages bypass
+Toolset-reachability entirely, and this pass does not touch it.
+`run_pipeline()` -> `_run_rule_stage()` in `holonbridge/pipeline.py` calls
+`execute_named_rule()` directly against a rule pulled from the raw
+registry (`load_named_rules`), never going through
+`routes/named_rules.py`'s `_load_and_authorise` gate. Gating
+`pipeline_run`'s own entry point (this pass) stops an unreachable
+*pipeline* from being triggered at all, but does not stop a *reachable*
+pipeline from invoking a Toolset-*restricted* rule internally — the
+pipeline is a full bypass of rule-level reachability for anyone who can
+reach the pipeline itself. `_run_projection_stage` has the same shape of
+gap for projection hooks. Fixing this properly means threading persona
+identity down through `run_pipeline`/`_run_rule_stage`/
+`_run_projection_stage` — a real change to holonbridge/pipeline.py's core
+execution functions, not a route tweak, and deliberately not attempted
+here without separate sign-off given how many functions it touches.
+
+Also found, unrelated to pipelines specifically: `/graph-op`
+(`routes/named_rules.py`) — CLEAR/DROP/CREATE/COPY/MOVE/ADD on arbitrary
+named graphs — has zero `AnimusDep`, zero ACL check of any kind. Flagged
+here since it is the most severe thing found in this whole pass
+(destructive, arbitrary-graph, no auth at all) even though it sits
+outside the ingest/pipeline surface this work was scoped to.
 """
 
 from __future__ import annotations
@@ -49,9 +69,10 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
+from ..acl import check_replace, check_write
 from ..conn import Conn
 from ..databook import DataBook
-from ..deps import AnimusDep, ClientDep, ConnDep, SettingsDep
+from ..deps import AnimusDep, ClientDep, ConnDep, PersonasDep, SettingsDep
 from ..fetch import SourceFetchError, fetch_source
 from ..fuseki import FusekiClient, FusekiError
 from ..ingest import write_turtle_to_graph
@@ -71,6 +92,7 @@ from ..pipeline import (
     run_pipeline,
     topological_order,
 )
+from ..toolset import resolve_reachable
 from ..turtle import literal
 
 log = logging.getLogger("holonbridge.routes.pipeline")
@@ -102,6 +124,62 @@ def _stringify_detail(detail: Any) -> str:
     return str(detail)
 
 
+def _not_found_pipeline(pipeline_id: str, available_ids: list[str]) -> HTTPException:
+    """Same 404 shape whether the id is genuinely unknown or just outside
+    this caller's reachable set -- see routes/named_queries.py's matching
+    helper; a restricted pipeline shouldn't differentially reveal its own
+    existence either."""
+    return HTTPException(
+        status.HTTP_404_NOT_FOUND,
+        detail={
+            "error": "unknown_pipeline",
+            "id": pipeline_id,
+            "available": available_ids,
+        },
+    )
+
+
+async def _reachable_pipeline_ids(
+    entries: list[dict], conn, client, persona: str | None
+) -> set[str]:
+    """The subset of `entries` (from list_pipelines, by id) this persona
+    can reach. Shared by list/get/run so all three agree on exactly the
+    same set -- same shape as routes/named_queries.py's helper of the
+    same purpose, adapted for list_pipelines' plain dicts rather than a
+    NamedQuery dataclass."""
+
+    async def query_fn(q: str) -> dict:
+        return await client.select(conn, q)
+
+    id_by_iri = {e["graph"]: e["id"] for e in entries}
+    reachable_iris = await resolve_reachable(
+        query_fn, conn, persona=persona, candidate_iris=list(id_by_iri)
+    )
+    return {id_by_iri[iri] for iri in reachable_iris}
+
+
+async def _load_and_authorise_pipeline(
+    pipeline_id: str, conn, client, animus, personas
+) -> tuple[dict, str | None]:
+    """Look up one pipeline's index entry and confirm this caller's persona
+    can reach it -- otherwise raise the shared 404. Centralised so
+    list/get/run can't drift on what "reachable" means, same shape as
+    routes/named_queries.py's helper of the same name."""
+    entries = await list_pipelines(client, conn)
+    entry = next((e for e in entries if e["id"] == pipeline_id), None)
+    available_ids = [e["id"] for e in entries]
+    if entry is None:
+        raise _not_found_pipeline(pipeline_id, available_ids)
+
+    persona, _source = personas.get(person_id=animus.person, dataset=conn.dataset)
+    reachable_ids = await _reachable_pipeline_ids(entries, conn, client, persona)
+
+    if pipeline_id not in reachable_ids:
+        raise _not_found_pipeline(pipeline_id, sorted(reachable_ids))
+
+    return entry, persona
+
+
 # --- registration -------------------------------------------------------------
 
 
@@ -114,17 +192,39 @@ class RegisterPipelineRequest(BaseModel):
 
 @router.post("/pipeline")
 async def register_pipeline(
-    body: RegisterPipelineRequest, conn: ConnDep, client: ClientDep
+    body: RegisterPipelineRequest, conn: ConnDep, client: ClientDep, animus: AnimusDep
 ) -> dict:
     """Register a manifest into its own graph and index it.
 
-    NOT ACL-gated -- see this module's docstring. Left as-is in this pass;
-    pipeline manifests are meta/infrastructure objects, and the right grant
-    shape for them (plain check_write, or something closer to Toolset
-    membership) is an open question, not something to guess at here.
+    Gated the same way any other RDF write is: `replace=True` (the
+    default — registration always fully replaces or creates the manifest
+    graph, never appends into an existing one) requires `check_replace`;
+    `replace=False` requires `check_write`. Gated on the pipeline's own
+    manifest graph, not the shared pipelines index — the index write is
+    bookkeeping intrinsic to a successful registration, not a
+    separately-requested write needing its own grant.
     """
+    if animus.person is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="unresolved identity")
+
     graph = conn.scoped("pipelines", body.id)
     index = conn.graph("pipelines")
+
+    async def _query_fn(q: str) -> dict:
+        return await client.select(conn, q)
+
+    if body.replace:
+        decision = await check_replace(
+            _query_fn, conn.holons_graph, person=animus.person, target=graph
+        )
+    else:
+        decision = await check_write(
+            _query_fn, conn.holons_graph, person=animus.person, target=graph
+        )
+    if not decision.allowed:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, detail=f"{decision.reason} (graph: {graph})"
+        )
 
     try:
         if body.replace:
@@ -170,13 +270,26 @@ WHERE {{ GRAPH <{index}> {{ <{graph}> ?p ?o }} }}""",
 
 
 @router.get("/pipelines")
-async def get_pipelines(conn: ConnDep, client: ClientDep) -> dict:
-    pipelines = await list_pipelines(client, conn)
-    return {"dataset": conn.dataset, "count": len(pipelines), "pipelines": pipelines}
+async def get_pipelines(
+    conn: ConnDep, client: ClientDep, animus: AnimusDep, personas: PersonasDep
+) -> dict:
+    entries = await list_pipelines(client, conn)
+    persona, _source = personas.get(person_id=animus.person, dataset=conn.dataset)
+    reachable_ids = await _reachable_pipeline_ids(entries, conn, client, persona)
+
+    visible = [e for e in entries if e["id"] in reachable_ids]
+    return {"dataset": conn.dataset, "count": len(visible), "pipelines": visible}
 
 
 @router.get("/pipeline/{pipeline_id}")
-async def get_pipeline(pipeline_id: str, conn: ConnDep, client: ClientDep) -> dict:
+async def get_pipeline(
+    pipeline_id: str,
+    conn: ConnDep,
+    client: ClientDep,
+    animus: AnimusDep,
+    personas: PersonasDep,
+) -> dict:
+    await _load_and_authorise_pipeline(pipeline_id, conn, client, animus, personas)
     manifest = await load_manifest(client, conn, pipeline_id)
     if not manifest.nodes:
         raise HTTPException(
@@ -191,10 +304,31 @@ async def get_pipeline(pipeline_id: str, conn: ConnDep, client: ClientDep) -> di
 
 
 @router.delete("/pipeline/{pipeline_id}")
-async def drop_pipeline(pipeline_id: str, conn: ConnDep, client: ClientDep) -> dict:
-    """NOT ACL-gated -- see this module's docstring."""
+async def drop_pipeline(
+    pipeline_id: str, conn: ConnDep, client: ClientDep, animus: AnimusDep
+) -> dict:
+    """Gated by `check_replace` — dropping an existing pipeline is a
+    destructive, wholesale operation on already-registered content, not
+    an append; same reasoning that makes `grantsReplace` the harder-to-get
+    grant everywhere else in this codebase.
+    """
+    if animus.person is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="unresolved identity")
+
     graph = conn.scoped("pipelines", pipeline_id)
     index = conn.graph("pipelines")
+
+    async def _query_fn(q: str) -> dict:
+        return await client.select(conn, q)
+
+    decision = await check_replace(
+        _query_fn, conn.holons_graph, person=animus.person, target=graph
+    )
+    if not decision.allowed:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, detail=f"{decision.reason} (graph: {graph})"
+        )
+
     try:
         await client.drop_graph(conn, graph)
         await client.update(
@@ -221,12 +355,20 @@ class RunPipelineRequest(BaseModel):
 
 @router.post("/pipeline-run")
 async def pipeline_run(
-    body: RunPipelineRequest, request: Request, conn: ConnDep, client: ClientDep
+    body: RunPipelineRequest,
+    request: Request,
+    conn: ConnDep,
+    client: ClientDep,
+    animus: AnimusDep,
+    personas: PersonasDep,
 ) -> dict:
-    """NOT ACL-gated -- see this module's docstring. The more consequential
-    of the two remaining gaps: a pipeline can chain into writes via named
-    rules, so this is not just an unauthenticated read.
+    """Gates the entry point: whether this caller's persona can reach the
+    named *pipeline* at all, same shape as `run_named_rule`. Does NOT gate
+    what the pipeline does internally -- see this module's docstring for
+    why that's a separate, larger, not-yet-attempted fix.
     """
+    await _load_and_authorise_pipeline(body.pipeline, conn, client, animus, personas)
+
     manifest = await load_manifest(client, conn, body.pipeline)
     if not manifest.nodes:
         raise HTTPException(
