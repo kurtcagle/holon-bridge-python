@@ -11,6 +11,32 @@ Background tasks are held in a set on app state. `asyncio` keeps only a weak
 reference to a running task, so a task nobody holds can be collected
 mid-flight; the run would simply stop, leaving a message stuck in `Running`
 with no error to explain it.
+
+CHANGED 2026-08-29: `/ingest` now depends on `AnimusDep` and lands its
+payload through `holonbridge.ingest.write_turtle_to_graph` — the same
+gated path `push_turtle`, `create_holon`, and `create_message` already use
+— instead of its own inline validate-then-write logic. Before this change
+`/ingest` had no ACL check of any kind: it ran SHACL validation (when
+configured) but never checked `check_write`/`check_replace`, and did so
+via a fourth independent copy of the validate-then-write pattern rather
+than the shared one. Both problems are fixed together, since the fix for
+one is routing through the function that already solves the other.
+
+STILL OPEN, found while making this fix, not touched by it: `POST
+/pipeline` (register_pipeline), `DELETE /pipeline/{id}` (drop_pipeline),
+and `POST /pipeline-run` (pipeline_run) have no `AnimusDep` either —
+completely ungated. `pipeline_run` is arguably the more consequential gap
+of the two: a pipeline can chain into writes via named rules with
+`Sync`/`Replace` write modes, so an unauthenticated caller triggering one
+isn't just an unauthenticated read, it can be an unauthenticated write at
+one remove. Pipeline manifests are meta/infrastructure objects rather
+than domain data, the same way named-queries and named-rules are — they
+may warrant their own grant rather than reusing `check_write` against
+`conn.holons_graph`, the way Toolset-reachability gating was built for
+named-queries/named-rules rather than reusing plain write grants.
+Deliberately not decided here; flagged for a separate pass. `DELETE
+/graph` (drop_graph, in `routes/graphs.py`) remains a separate, previously
+known gap, also untouched by this change.
 """
 
 from __future__ import annotations
@@ -18,15 +44,17 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
 from ..conn import Conn
 from ..databook import DataBook
-from ..deps import ClientDep, ConnDep, SettingsDep
+from ..deps import AnimusDep, ClientDep, ConnDep, SettingsDep
 from ..fetch import SourceFetchError, fetch_source
 from ..fuseki import FusekiClient, FusekiError
+from ..ingest import write_turtle_to_graph
 from ..messages import (
     Message,
     MessageStore,
@@ -43,7 +71,6 @@ from ..pipeline import (
     run_pipeline,
     topological_order,
 )
-from ..shacl import validate_delta, validate_full
 from ..turtle import literal
 
 log = logging.getLogger("holonbridge.routes.pipeline")
@@ -57,6 +84,22 @@ def _spawn(request: Request, coro) -> None:  # noqa: ANN001
     task = asyncio.create_task(coro)
     tasks.add(task)
     task.add_done_callback(tasks.discard)
+
+
+def _stringify_detail(detail: Any) -> str:
+    """Render an HTTPException.detail (str or dict) as plain text for a
+    message stage's own `detail` field, which is a string everywhere else
+    in this module. `write_turtle_to_graph` raises with a dict detail for
+    the 422/502 cases (SHACL violation, Fuseki error) and a plain string
+    for 401/403/400 -- this normalises either into one line rather than
+    dumping the raw dict into a field meant for a short human-readable
+    summary.
+    """
+    if isinstance(detail, dict):
+        if detail.get("error") == "shacl_violation":
+            return f"{detail.get('violations', '?')} new violation(s) against the shapes graph"
+        return str(detail.get("message") or detail.get("error") or detail)
+    return str(detail)
 
 
 # --- registration -------------------------------------------------------------
@@ -73,7 +116,13 @@ class RegisterPipelineRequest(BaseModel):
 async def register_pipeline(
     body: RegisterPipelineRequest, conn: ConnDep, client: ClientDep
 ) -> dict:
-    """Register a manifest into its own graph and index it."""
+    """Register a manifest into its own graph and index it.
+
+    NOT ACL-gated -- see this module's docstring. Left as-is in this pass;
+    pipeline manifests are meta/infrastructure objects, and the right grant
+    shape for them (plain check_write, or something closer to Toolset
+    membership) is an open question, not something to guess at here.
+    """
     graph = conn.scoped("pipelines", body.id)
     index = conn.graph("pipelines")
 
@@ -143,6 +192,7 @@ async def get_pipeline(pipeline_id: str, conn: ConnDep, client: ClientDep) -> di
 
 @router.delete("/pipeline/{pipeline_id}")
 async def drop_pipeline(pipeline_id: str, conn: ConnDep, client: ClientDep) -> dict:
+    """NOT ACL-gated -- see this module's docstring."""
     graph = conn.scoped("pipelines", pipeline_id)
     index = conn.graph("pipelines")
     try:
@@ -173,6 +223,10 @@ class RunPipelineRequest(BaseModel):
 async def pipeline_run(
     body: RunPipelineRequest, request: Request, conn: ConnDep, client: ClientDep
 ) -> dict:
+    """NOT ACL-gated -- see this module's docstring. The more consequential
+    of the two remaining gaps: a pipeline can chain into writes via named
+    rules, so this is not just an unauthenticated read.
+    """
     manifest = await load_manifest(client, conn, body.pipeline)
     if not manifest.nodes:
         raise HTTPException(
@@ -301,14 +355,19 @@ async def ingest(
     conn: ConnDep,
     client: ClientDep,
     settings: SettingsDep,
+    animus: AnimusDep,
 ) -> dict:
     """Accept a payload, validate it, land it, and optionally run a pipeline.
 
     Four shapes of inbound signal: an inline `turtle` payload, an inline
     `databook` document, a `source_graph` already in the store, or a
-    `source_url` to fetch. All four land in `graph_iri` under the same
-    validation gate as `/graph/push`, so ingestion cannot become a way
-    around the SHACL gate.
+    `source_url` to fetch. All four land in `graph_iri` through
+    `holonbridge.ingest.write_turtle_to_graph` — the same ACL-checked,
+    SHACL-gated write path `/graph/push`, `create_holon`, and
+    `create_message` use — so ingestion cannot become a way around either
+    gate. `mode="replace"` requires `check_replace`; `mode="merge"`
+    (the default) requires `check_write`, same as everywhere else that
+    calls this function.
 
     A `databook` or `source_url` source may supply its own target graph via
     `graph.named_graph` in its frontmatter, so `graph_iri` is optional for
@@ -373,47 +432,34 @@ async def ingest(
             )
         message.target_graph = graph_iri
 
-        shapes = body.shapes_graph or (conn.shapes_graph if settings.shacl_required else None)
-        if shapes:
-            report = (
-                await validate_delta(
-                    client,
-                    conn,
-                    turtle=turtle,
-                    shapes_graph=shapes,
-                    target_graph=graph_iri,
-                    write_mode=body.mode,
-                    reduction_rule_id=body.reduction_rule_id,
-                )
-                if settings.shacl_delta
-                else await validate_full(
-                    client,
-                    conn,
-                    turtle=turtle,
-                    shapes_graph=shapes,
-                    target_graph=graph_iri,
-                    write_mode=body.mode,
-                    reduction_rule_id=body.reduction_rule_id,
-                )
+        try:
+            await write_turtle_to_graph(
+                turtle=turtle,
+                graph_iri=graph_iri,
+                mode=body.mode,
+                shapes_graph=body.shapes_graph,
+                reduction_rule_id=body.reduction_rule_id,
+                conn=conn,
+                client=client,
+                shacl_required=settings.shacl_required,
+                shacl_delta=settings.shacl_delta,
+                animus=animus,
             )
-            if not report.conforms:
-                landing.status = "Failed"
-                landing.detail = f"{len(report.results)} new violation(s) against <{shapes}>"
-                mark_completed(message, failed=True, error=landing.detail)
-                await store.save(conn, message)
-                raise HTTPException(
-                    422,
-                    detail={
-                        "error": "shacl_violation",
-                        "messageId": message.id,
-                        **report.as_dict(),
-                    },
-                )
-
-        if body.mode == "replace":
-            await client.put_graph(conn, graph_iri, turtle)
-        else:
-            await client.post_graph(conn, graph_iri, turtle)
+        except HTTPException as exc:
+            landing.status = "Failed"
+            landing.detail = _stringify_detail(exc.detail)
+            mark_completed(message, failed=True, error=landing.detail)
+            await store.save(conn, message)
+            detail = exc.detail
+            if isinstance(detail, dict):
+                detail = {**detail, "messageId": message.id}
+            else:
+                detail = {
+                    "error": "ingest_failed",
+                    "messageId": message.id,
+                    "message": str(detail),
+                }
+            raise HTTPException(exc.status_code, detail=detail) from exc
 
         landing.status = "Completed"
         landing.detail = f"{body.mode} into <{graph_iri}>"
