@@ -53,10 +53,12 @@ here without separate sign-off given how many functions it touches.
 
 Also found, unrelated to pipelines specifically: `/graph-op`
 (`routes/named_rules.py`) — CLEAR/DROP/CREATE/COPY/MOVE/ADD on arbitrary
-named graphs — has zero `AnimusDep`, zero ACL check of any kind. Flagged
-here since it is the most severe thing found in this whole pass
-(destructive, arbitrary-graph, no auth at all) even though it sits
-outside the ingest/pipeline surface this work was scoped to.
+named graphs — had zero `AnimusDep`, zero ACL check of any kind, and was
+the most severe thing found in this whole pass (destructive,
+arbitrary-graph, no auth at all) even though it sat outside the
+ingest/pipeline surface this work was scoped to. Fixed 2026-08-31 — see
+that route's own docstring in `routes/named_rules.py`. `DELETE /graph`
+(`routes/graphs.py`) remains ungated; not touched by that fix.
 """
 
 from __future__ import annotations
