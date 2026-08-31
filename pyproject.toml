@@ -4,8 +4,16 @@ build-backend = "hatchling.build"
 
 [project]
 name = "holonbridge"
-version = "0.1.0"
-description = "Python implementation of the HGA Server — REST bridge between the Holon Graph Architecture pipeline and Apache Jena Fuseki."
+version = "3.0.0"
+# Version had never been bumped from the 0.1.0 scaffold default despite
+# substantial feature work landing on main (persona-scoped ACL gating,
+# Toolset-based reachability for named queries/rules/pipelines,
+# create_holon/create_message, pipeline ACL gating). Set to 3.0.0 on
+# 2026-08-31 to reflect actual production maturity rather than continue
+# under-reporting it. No formal semver history exists before this point
+# (no tags, no releases) -- this is a one-time correction, not a claim
+# of two skipped major releases.
+description = "Python implementation of the HGA Server — REST + MCP bridge between the Holon Graph Architecture pipeline and Apache Jena Fuseki, with persona-scoped ACL gating (Animus identity, write/replace grants), Toolset-based reachability gating for named queries/rules/pipelines, and DataBook-native holon/message ingestion."
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = [
