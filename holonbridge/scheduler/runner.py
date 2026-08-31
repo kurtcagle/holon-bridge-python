@@ -393,7 +393,13 @@ class Scheduler:
                 rule = replace(rule, target_graph=task.target_graph)
             run = await execute_named_rule(conn, self._client, rule)
             record.outcome = "committed"
-            record.triples_written = run.triples_constructed
+            # CHANGED: was run.triples_constructed (the pre-copy scratch count,
+            # echoed regardless of write mode) -- run.triples_added is what
+            # Replace/Append/Sync/Supersede each actually measured landed in
+            # the target, and is the same value already surfaced in
+            # record.detail below. Confirmed both fields could silently
+            # disagree by inspecting a real Replace firing's provenance.
+            record.triples_written = run.triples_added
             record.detail = (
                 f"{run.write_mode} into <{run.target_graph}>: "
                 f"+{run.triples_added} / -{run.triples_removed}"

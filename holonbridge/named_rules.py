@@ -173,7 +173,16 @@ class RuleRun:
             "ruleId": self.rule_id,
             "targetGraph": self.target_graph,
             "writeMode": self.write_mode,
-            "triplesWritten": self.triples_constructed,
+            # CHANGED: was self.triples_constructed (the pre-copy scratch
+            # count, identical regardless of write mode or what actually
+            # landed) -- self.triples_added is what Append/Replace/Sync/
+            # Supersede each measured after the write, and is the same value
+            # this dict already reports as triplesAdded. Found while
+            # independently verifying an external report (Ben Wortley, via
+            # his own Claude instance) that flagged the identical mistake in
+            # the scheduler's provenance record, which reads triples_written
+            # from this same RuleRun.
+            "triplesWritten": self.triples_added,
             "triplesAdded": self.triples_added,
             "triplesRemoved": self.triples_removed,
             "note": "non-canonical implementation — pending WG IV alignment",
