@@ -13,8 +13,9 @@ call -- ``mode=merge`` requires ``check_write`` (an explicit
 ACL check of any kind, unlike ``/sparql/*`` (gated since 2026-08-15).
 ``grantsWrite`` does NOT imply ``grantsReplace`` -- appends are the norm,
 wholesale graph overwrite is the deliberately-rare exception; see
-``holonbridge.acl.check_replace`` for the reasoning. ``/graph`` (DROP) and
-``/ingest`` remain ungated, same as before.
+``holonbridge.acl.check_replace`` for the reasoning. ``/ingest`` was gated
+2026-08-29 (see ``routes/pipeline.py``'s docstring); ``/graph`` (DROP) was
+gated 2026-08-31 -- see the CHANGED note below.
 
 CHANGED 2026-08-28: the ACL check, SHACL gate, and GSP write themselves
 moved into ``holonbridge.ingest.write_turtle_to_graph``, shared with
@@ -23,6 +24,16 @@ moved into ``holonbridge.ingest.write_turtle_to_graph``, shared with
 the parts specific to a raw Turtle push: the optional local pre-parse and
 unpacking the request body. Behaviour is unchanged; this is a pure
 extraction.
+
+CHANGED 2026-08-31: ``DELETE /graph`` (``drop_graph``) now depends on
+``AnimusDep`` and requires ``check_replace`` on the graph being dropped --
+the other half of the ``HB_ACL_REMAINING_ENDPOINTS-01`` finding (the
+``/graph-op`` half was fixed the same day; see ``routes/named_rules.py``,
+whose ``clear``/``drop``/``copy`` operations check the identical grant for
+the identical reason: DROP is unambiguously destructive and wholesale, the
+same shape ``drop_pipeline`` and ``check_replace`` everywhere else in this
+codebase already treat that way). Before this, ``drop_graph`` had zero ACL
+check of any kind.
 """
 
 from __future__ import annotations
@@ -31,6 +42,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
+from ..acl import check_replace
 from ..deps import AnimusDep, ClientDep, ConnDep, SettingsDep
 from ..fuseki import FusekiError
 from ..ingest import write_turtle_to_graph
@@ -121,7 +133,35 @@ async def push_turtle(
 
 
 @router.delete("/graph")
-async def drop_graph(conn: ConnDep, client: ClientDep, iri: str = Query(...)) -> dict:
+async def drop_graph(
+    conn: ConnDep, client: ClientDep, animus: AnimusDep, iri: str = Query(...)
+) -> dict:
+    """Drop a named graph entirely.
+
+    Gated by ``check_replace`` -- DROP is unambiguously destructive and
+    wholesale, the same reasoning that makes ``grantsReplace`` (not
+    ``grantsWrite``) the grant every other DROP-shaped operation in this
+    codebase requires: ``drop_pipeline`` (routes/pipeline.py) and the
+    ``drop``/``clear``/``copy`` operations of ``/graph-op``
+    (routes/named_rules.py) all check the identical grant, against the
+    identical kind of target, for the identical reason. Same fail-closed,
+    admin-bypass-only default as ``check_replace`` everywhere else:
+    absence of a matching grant is a 403, never a silent allow.
+    """
+    if animus.person is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="unresolved identity")
+
+    async def _query_fn(q: str) -> dict:
+        return await client.select(conn, q)
+
+    decision = await check_replace(
+        _query_fn, conn.holons_graph, person=animus.person, target=iri
+    )
+    if not decision.allowed:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, detail=f"{decision.reason} (graph: {iri})"
+        )
+
     try:
         await client.drop_graph(conn, iri)
     except FusekiError as exc:
