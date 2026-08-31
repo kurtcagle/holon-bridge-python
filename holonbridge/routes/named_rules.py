@@ -8,8 +8,16 @@ CHANGED 2026-08-18: list/get/run/run-all now require a resolved identity
 (``AnimusDep``) and are gated by Toolset membership, same shape and same
 reasoning as ``routes/named_queries.py``'s matching change — see that
 module's docstring, including the short-name-vs-full-IRI note for
-``bind_persona_param``. ``/graph-op`` is untouched; it isn't part of the
-named-rule registry and this design doesn't reach it.
+``bind_persona_param``.
+
+CHANGED 2026-08-31: ``/graph-op`` is no longer untouched. It had zero ACL
+check of any kind -- the most severe gap found in the 2026-08-29 ACL audit
+(see ``routes/pipeline.py``'s docstring). It now requires ``AnimusDep`` and
+checks ``check_write``/``check_replace`` per operation, same grants used
+everywhere else in this codebase. See ``graph_op``'s own docstring for
+exactly which grant each of the six operations needs and why. ``DELETE
+/graph`` (``routes/graphs.py``) is the other half of that same audit
+finding and remains ungated -- not touched here.
 """
 
 from __future__ import annotations
@@ -17,6 +25,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
+from ..acl import check_replace, check_write
 from ..deps import AnimusDep, ClientDep, ConnDep, PersonasDep, RegistryDep, SettingsDep
 from ..fuseki import FusekiError, FusekiTimeout
 from ..named_rules import (
@@ -319,11 +328,64 @@ class GraphOpRequest(BaseModel):
     silent: bool = True
 
 
+async def _require_graph_grant(grant_check, conn, client, person: str, graph_iri: str) -> None:
+    """Run `grant_check` (check_write or check_replace) against one graph
+    and raise the shared 403 shape on refusal — same detail format every
+    other write-gated route in this codebase uses."""
+
+    async def _query_fn(q: str) -> dict:
+        return await client.select(conn, q)
+
+    decision = await grant_check(
+        _query_fn, conn.holons_graph, person=person, target=graph_iri
+    )
+    if not decision.allowed:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail=f"{decision.reason} (graph: {graph_iri})",
+        )
+
+
 @router.post("/graph-op")
 async def graph_op(
-    body: GraphOpRequest, conn: ConnDep, client: ClientDep, settings: SettingsDep
+    body: GraphOpRequest,
+    conn: ConnDep,
+    client: ClientDep,
+    settings: SettingsDep,
+    animus: AnimusDep,
 ) -> dict:
-    """CLEAR, DROP, CREATE, COPY, MOVE, or ADD a named graph."""
+    """CLEAR, DROP, CREATE, COPY, MOVE, or ADD a named graph.
+
+    Gated by `check_write`/`check_replace`, same grants used everywhere
+    else a write-capable route in this codebase discards or doesn't
+    discard existing content. Per operation:
+
+    - `create`, `add` -> `check_write(target)`. Neither destroys existing
+      content: CREATE makes an (ordinarily empty) graph; SPARQL ADD merges
+      source's triples into target without first clearing it.
+    - `clear`, `drop`, `copy` -> `check_replace(target)`. Each discards
+      whatever target already held: CLEAR empties it, DROP removes the
+      graph outright, and SPARQL COPY is defined as DROP-target-then-
+      ADD-source, not a merge — silently clearing target's prior content
+      even though nothing in the request says "replace".
+    - `move` -> `check_replace(target)` **and** `check_replace(source)`.
+      Target is discarded exactly as with COPY, but SPARQL MOVE also
+      removes the source graph entirely once the move succeeds — the same
+      destructive shape DROP has, applied to source. Both grants are
+      required; holding only one would let a caller destroy a graph they
+      hold no more than write-level access to (e.g. replace-gated target
+      but merely write-gated source, or vice versa).
+
+    Same fail-closed, admin-bypass-only default as `check_write`/
+    `check_replace` everywhere else: absence of a matching grant is a
+    403, never a silent allow. `source` is never itself read-gated here —
+    consistent with every other write path in this codebase, which checks
+    only the destination a write lands in, not where the content
+    originated.
+    """
+    if animus.person is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="unresolved identity")
+
     op = body.operation.lower()
     silent = "SILENT " if body.silent else ""
 
@@ -331,6 +393,14 @@ async def graph_op(
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, detail=f"source is required for {op}"
         )
+
+    if op in {"create", "add"}:
+        await _require_graph_grant(check_write, conn, client, animus.person, body.target)
+    elif op in {"clear", "drop", "copy"}:
+        await _require_graph_grant(check_replace, conn, client, animus.person, body.target)
+    else:  # move
+        await _require_graph_grant(check_replace, conn, client, animus.person, body.target)
+        await _require_graph_grant(check_replace, conn, client, animus.person, body.source)
 
     if op in {"clear", "drop", "create"}:
         keyword = {"clear": "CLEAR", "drop": "DROP", "create": "CREATE"}[op]
