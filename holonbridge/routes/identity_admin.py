@@ -1,7 +1,8 @@
-"""Admin identity routes: creating a Person and assigning a Persona.
+"""Admin identity routes: creating a Person, assigning a Persona, and
+(CHANGED 2026-09-01) admin-only session impersonation for testing.
 
-Both endpoints are admin-only (is_admin bypass -- the same break-glass
-capability acl.py already defines), distinct from persona.py's
+All four endpoints are admin-only (is_admin bypass -- the same
+break-glass capability acl.py already defines), distinct from persona.py's
 switch_persona, which is self-service and membership-gated. Creating a
 new Person or minting someone else's Home is never something a caller
 does to themselves the first time -- there is no bootstrap path around
@@ -22,6 +23,18 @@ Neither route here validates against that shape by default -- pass
 dataset's own ``conn.shapes_graph`` if you want it enforced on every
 write, dataset-wide, the same way fluent.ttl's shapes are meant to be
 deployed.
+
+CHANGED 2026-09-01: added ``act_as``/``cease_acting_as`` (see
+``acting_as.py`` and ``deps.py``'s ``require_animus``). ``_require_admin``
+below now checks ``animus.real_person`` rather than ``animus.person`` --
+the two are equal for every existing caller (nothing before this ever
+populated ``real_person`` differently), so this is a no-op change for
+every route already using it, but it's the specific thing that keeps
+these four admin routes reachable by their real admin caller even while
+that caller is currently acting as someone else. Checking ``.person``
+instead would make ``cease_acting_as`` uncallable the moment it was
+needed: the very first thing ``require_animus`` would resolve the caller
+as, mid-impersonation, is the target -- who by design isn't an admin.
 """
 
 from __future__ import annotations
@@ -32,7 +45,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
 from ..acl import is_admin
-from ..deps import AnimusDep, ClientDep, ConnDep
+from ..deps import ActingAsDep, AnimusDep, ClientDep, ConnDep
 from ..fuseki import FusekiError
 from ..persona import persona_exists
 
@@ -50,10 +63,15 @@ def _literal(value: str) -> str:
 
 
 async def _require_admin(conn: ConnDep, client: ClientDep, animus: AnimusDep) -> None:
+    """Checks the REAL caller's admin role (``animus.real_person``), never
+    the currently-active identity (``animus.person``) -- see the module
+    docstring's 2026-09-01 note for why that distinction matters here
+    specifically."""
+
     async def query_fn(q: str) -> dict:
         return await client.select(conn, q)
 
-    if not await is_admin(query_fn, conn.holons_graph, person=animus.person):
+    if not await is_admin(query_fn, conn.holons_graph, person=animus.real_person):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, detail="admin role required on this dataset"
         )
@@ -201,3 +219,70 @@ PREFIX rdfs: <{RDFS}>
         raise HTTPException(exc.status or 502, detail=exc.as_dict()) from exc
 
     return {"ok": True, "home": home, "graph": graph_iri, "persona": body.persona}
+
+
+class ActAsRequest(BaseModel):
+    target: str = Field(
+        ..., min_length=1,
+        description="Person to impersonate: either a short local slug "
+        "(e.g. 'ctownley-cs'), resolved via conn.person_iri() the same "
+        "way create_person's own slug is, or a full Person IRI.",
+    )
+
+
+@router.post("/act-as")
+async def act_as(
+    body: ActAsRequest,
+    conn: ConnDep,
+    client: ClientDep,
+    animus: AnimusDep,
+    acting_as: ActingAsDep,
+) -> dict:
+    """Admin-only testing tool. Every subsequent request on this same
+    credential resolves as ``target`` instead of the real caller, until
+    ``cease_acting_as`` is called or 30 minutes pass unrenewed.
+
+    The point is to exercise the real, non-bypassed ACL/grant-check code
+    a genuine non-admin caller would hit -- ``target`` should essentially
+    always be someone who does NOT hold the admin role, or this
+    accomplishes nothing. Gated on the REAL caller's admin status
+    (``animus.real_person``, re-checked on every request while the
+    override is active -- see ``require_animus``), never on whatever
+    identity happens to be active when this is called -- so it can never
+    be chained through an existing act_as to reach a target the real
+    caller couldn't reach directly.
+    """
+    await _require_admin(conn, client, animus)
+
+    target_iri = (
+        body.target
+        if body.target.startswith("http") or ":" in body.target
+        else conn.person_iri(body.target)
+    )
+
+    async def query_fn(q: str) -> dict:
+        return await client.select(conn, q)
+
+    exists_query = f"""
+    PREFIX holon: <{HOLON}>
+    ASK {{ GRAPH <{conn.holons_graph}> {{ <{target_iri}> a holon:Person }} }}
+    """
+    result = await query_fn(exists_query)
+    if not result.get("boolean"):
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, detail=f"no holon:Person found: {target_iri}"
+        )
+
+    acting_as.set(real_person=animus.real_person, target_person=target_iri)
+    return {"ok": True, "acting_as": target_iri, "real_person": animus.real_person}
+
+
+@router.post("/cease-acting-as")
+async def cease_acting_as(
+    conn: ConnDep, client: ClientDep, animus: AnimusDep, acting_as: ActingAsDep
+) -> dict:
+    """Clear any active act_as override for the real caller. Safe to call
+    with none active -- always returns ``ok: True``."""
+    await _require_admin(conn, client, animus)
+    acting_as.clear(real_person=animus.real_person)
+    return {"ok": True, "acting_as": None, "real_person": animus.real_person}
