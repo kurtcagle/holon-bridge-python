@@ -22,16 +22,31 @@ persona is this person currently reading as" -- see persona_state.py for
 why it's keyed by Animus.person rather than living in the MCP layer
 alongside the dataset/bank overrides. One ``PersonaStore`` per process,
 same lifetime as ``app.state.fuseki``.
+
+CHANGED 2026-09-01: added :func:`get_acting_as`, and ``require_animus``
+now consults it. An admin who has called ``/admin/act-as`` gets every
+subsequent request on their credential resolved as their chosen target
+instead of themselves -- see ``acting_as.py`` for why that alone is
+enough to route the request through the real (non-bypassed) grant-check
+code, and for why the real identity is always resolved first and checked
+for a still-current admin role before any override is honoured. The
+returned ``Animus`` always carries ``real_person``/``real_person_label``
+alongside ``person`` -- equal to it, with ``acting_as`` False, when no
+override is active -- so any caller (route or MCP tool) that specifically
+needs the authenticated identity rather than the currently-acting-as one
+has a field to read instead of having to know about this store directly.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import secrets
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Request, status
 
-from .acl import Animus, build_animus
+from .acl import Animus, build_animus, build_animus_as, is_admin
+from .acting_as import ActingAsStore
 from .config import BankStore, Settings
 from .conn import DATASET_OVERRIDE_HEADER, Conn, resolve_conn
 from .cache import RegistryCache
@@ -61,6 +76,10 @@ def get_registry(request: Request) -> RegistryCache:
 
 def get_personas(request: Request) -> PersonaStore:
     return request.app.state.personas
+
+
+def get_acting_as(request: Request) -> ActingAsStore:
+    return request.app.state.acting_as
 
 
 def require_auth(
@@ -123,6 +142,7 @@ async def require_animus(
     request: Request,
     conn: Annotated[Conn, Depends(require_conn)],
     client: Annotated[FusekiClient, Depends(get_client)],
+    acting_as: Annotated[ActingAsStore, Depends(get_acting_as)],
 ) -> Animus:
     """Resolve the calling Person (and their Teams) for this request.
 
@@ -132,6 +152,18 @@ async def require_animus(
     callers that need that decision explicitly available should depend on
     :func:`require_conn` alone and skip this dependency, not lean on this
     one failing to resolve.
+
+    Always resolves the REAL presented identity first, in full, before
+    consulting :data:`acting_as` -- an active act_as override is only ever
+    layered on top of that real resolution, never a substitute for it.
+    Two things fall out of doing it in that order: (1) the real identity's
+    admin role is re-checked on every request the override applies to, so
+    a role revoked after ``act_as`` was called drops the override on its
+    very next use rather than leaving it live until someone notices; (2)
+    any caller that needs the authenticated identity regardless of an
+    active override -- see ``real_person`` below, and the
+    ``/admin/act-as``/``/admin/cease-acting-as`` routes themselves -- has
+    it, unconditionally, on every returned ``Animus``.
     """
     external_id = request.headers.get(ANIMUS_ID_HEADER)
     if not external_id:
@@ -144,18 +176,40 @@ async def require_animus(
     async def query_fn(query: str) -> dict:
         return await client.select(conn, query)
 
-    animus = await build_animus(
+    real = await build_animus(
         query_fn,
         conn.holons_graph,
         external_id=external_id,
         external_id_type=external_id_type,
     )
-    if animus.person is None:
+    if real.person is None:
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED,
             detail=f"no Person found for {external_id_type} identifier {external_id!r}",
         )
-    return animus
+
+    target = acting_as.get(real_person=real.person)
+    if target is not None and not await is_admin(
+        query_fn, conn.holons_graph, person=real.person
+    ):
+        # Admin role was revoked (or never held on this dataset) since
+        # act_as was last called -- fail safe and drop the stale override
+        # rather than silently keep honouring it.
+        acting_as.clear(real_person=real.person)
+        target = None
+
+    if target is None:
+        return dataclasses.replace(
+            real, real_person=real.person, real_person_label=real.person_label
+        )
+
+    impersonated = await build_animus_as(query_fn, conn.holons_graph, person=target)
+    return dataclasses.replace(
+        impersonated,
+        real_person=real.person,
+        real_person_label=real.person_label,
+        acting_as=True,
+    )
 
 
 ConnDep = Annotated[Conn, Depends(require_conn)]
@@ -165,3 +219,4 @@ BanksDep = Annotated[BankStore, Depends(get_banks)]
 RegistryDep = Annotated[RegistryCache, Depends(get_registry)]
 AnimusDep = Annotated[Animus, Depends(require_animus)]
 PersonasDep = Annotated[PersonaStore, Depends(get_personas)]
+ActingAsDep = Annotated[ActingAsStore, Depends(get_acting_as)]
