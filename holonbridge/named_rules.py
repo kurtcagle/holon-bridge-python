@@ -412,26 +412,74 @@ async def execute_named_rule(
 
         elif mode == "Replace":
             removed = await _count(client, conn, f"GRAPH <{target}> {{ ?s ?p ?o }}")
+            scratch_now = await _count(client, conn, f"GRAPH <{scratch}> {{ ?s ?p ?o }}")
             log.info(
                 "REPLACE-TRACE scratch=%s turtle_bytes=%d constructed=%d "
                 "scratch_now=%d target_before=%d",
                 scratch,
                 len(turtle or ""),
                 constructed,
-                await _count(client, conn, f"GRAPH <{scratch}> {{ ?s ?p ?o }}"),
+                scratch_now,
                 removed,
             )
-            await client.update(conn, f"COPY SILENT <{scratch}> TO <{target}>")
+            if scratch_now != constructed:
+                log.warning(
+                    "REPLACE-TRACE read-after-write mismatch BEFORE any copy "
+                    "operation: constructed=%d but re-counting the same scratch "
+                    "graph pattern moments later returned %d. If this ever "
+                    "fires, the bug is upstream of COPY entirely -- a write to "
+                    "the scratch graph not yet visible to a subsequent read on "
+                    "the same connection.",
+                    constructed,
+                    scratch_now,
+                )
+
+            # CHANGED: COPY SILENT <scratch> TO <target> was previously one
+            # opaque assembled UPDATE (per SPARQL 1.1: DROP SILENT GRAPH
+            # <target>, then ADD <scratch> TO <target>), so no intermediate
+            # state was ever observable -- if either half silently did less
+            # than expected, nothing in the response could show it. SILENT is
+            # not itself the bug candidate to remove: dropping it entirely
+            # would break the legitimate, common case of a rule's first-ever
+            # run, where the target graph does not exist yet and DROP SILENT
+            # is exactly the "nothing to drop, that's fine" no-op it exists
+            # for. Instrumented instead: run the same two operations SILENT
+            # explicitly outputs a measurement between them, so a partial
+            # failure in either half is now visible rather than folded into
+            # one atomic, opaque step.
+            await client.update(conn, f"DROP SILENT GRAPH <{target}>")
+            target_after_drop = await _count(client, conn, f"GRAPH <{target}> {{ ?s ?p ?o }}")
+            if target_after_drop != 0:
+                log.warning(
+                    "REPLACE-TRACE DROP SILENT did not empty the target graph: "
+                    "%d triple(s) remain in <%s> immediately after DROP.",
+                    target_after_drop,
+                    target,
+                )
+            await client.update(conn, f"ADD SILENT <{scratch}> TO <{target}>")
             # Measured, not assumed. Append and Sync both count what they
             # actually changed; Replace echoed the scratch count, which is
             # how a lost triple went unnoticed -- the report said 3 while 2
             # arrived, and nothing in the response could contradict it.
             added = await _count(client, conn, f"GRAPH <{target}> {{ ?s ?p ?o }}")
             log.info(
-                "REPLACE-TRACE after copy: target_now=%d (scratch reported %d)",
+                "REPLACE-TRACE after drop+add: target_after_drop=%d "
+                "target_now=%d (scratch reported %d)",
+                target_after_drop,
                 added,
                 constructed,
             )
+            if added != scratch_now:
+                log.warning(
+                    "REPLACE-TRACE ADD SILENT did not transfer everything: "
+                    "scratch held %d triple(s) but target now holds %d after "
+                    "ADD. This is the misfire this instrumentation exists to "
+                    "catch -- scratch=%s target=%s",
+                    scratch_now,
+                    added,
+                    scratch,
+                    target,
+                )
 
         elif mode == "Sync":
             added = await _count(

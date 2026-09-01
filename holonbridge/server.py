@@ -125,7 +125,31 @@ app = create_app()
 
 
 def main() -> None:  # pragma: no cover
+    import logging
     import uvicorn
+
+    # Nothing in this codebase ever called logging.basicConfig() (or set up
+    # any handler/level for the holonbridge.* logger hierarchy), so every
+    # logging.getLogger(__name__).info(...)/warning(...) call anywhere in
+    # this package -- including named_rules.py's own "REPLACE-TRACE"
+    # diagnostic logging around the known write_mode=Replace issue -- was
+    # silently invisible in a real server run under Python's default root
+    # logger level (WARNING, no handler). Confirmed empirically: 301 real
+    # Replace-mode firings against a live instance produced zero
+    # REPLACE-TRACE lines in server output, including the always-
+    # unconditional baseline trace line that has no conditional gating it.
+    # This means the existing trace instrumentation -- added specifically
+    # to catch this bug -- likely never actually surfaced in a real
+    # deployment's logs either. Configurable via HOLONBRIDGE_LOG_LEVEL
+    # rather than hardcoded, so an operator can dial it without a code
+    # change; defaults to INFO so REPLACE-TRACE and similar diagnostic
+    # logging is visible out of the box, matching what a reader of
+    # named_rules.py's own docstring would reasonably assume was already
+    # happening.
+    logging.basicConfig(
+        level=os.environ.get("HOLONBRIDGE_LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    )
 
     settings = get_settings()
     uvicorn.run(
