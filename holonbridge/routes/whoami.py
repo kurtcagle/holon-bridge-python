@@ -14,6 +14,15 @@ CHANGED 2026-08-17: added ``persona``/``personaSource``. whoami already
 answers "who am I"; "and under which persona am I reading" is the same
 question one layer out -- see persona_state.py for what the source values
 mean.
+
+CHANGED 2026-09-01: added ``acting_as``/``real_person``/
+``real_person_label``. Same reasoning one layer further out again: while
+an admin act_as override is active, ``person`` answers "who is this
+request being treated as," which is no longer the same question as "who
+actually authenticated" -- see acting_as.py. For an ordinary request
+these fields are redundant with person/person_label (real_person always
+equals person, acting_as is always False); they only diverge, and only
+then matter, mid-impersonation.
 """
 
 from __future__ import annotations
@@ -43,6 +52,13 @@ async def whoami(animus: AnimusDep, conn: ConnDep, personas: PersonasDep) -> dic
     ``HOLONBRIDGE_PERSONA``, only when this person has no stored entry),
     or ``none``.
 
+    ``acting_as`` is True while an admin act_as override is active for
+    this credential -- in which case ``person``/``person_label`` describe
+    the impersonated target, and ``real_person``/``real_person_label``
+    describe who actually authenticated. When no override is active,
+    ``real_person``/``real_person_label`` simply equal ``person``/
+    ``person_label`` and ``acting_as`` is False.
+
     Requires nothing beyond identity resolution -- AnimusDep already 401s
     on a missing or unresolvable identity before this handler runs, so a
     response from here always carries a real, resolved Person.
@@ -56,4 +72,7 @@ async def whoami(animus: AnimusDep, conn: ConnDep, personas: PersonasDep) -> dic
         "teams": sorted(animus.teams),
         "persona": persona,
         "personaSource": persona_source,
+        "acting_as": animus.acting_as,
+        "real_person": animus.real_person,
+        "real_person_label": animus.real_person_label,
     }
