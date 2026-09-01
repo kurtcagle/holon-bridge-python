@@ -15,6 +15,7 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI
 
+from .acting_as import ActingAsStore
 from .config import BankStore, Settings, get_settings
 from .fuseki import FusekiClient
 from .cache import RegistryCache
@@ -57,6 +58,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # rather than as MCP-layer module state like the dataset/bank
         # overrides.
         application.state.personas = PersonaStore()
+        # Admin act_as impersonation state -- see acting_as.py. Same
+        # per-process, held-on-app.state shape as personas above, but
+        # deliberately not persisted to disk: a restart should always
+        # come back to "acting as no one."
+        application.state.acting_as = ActingAsStore()
         # Strong references to background runs. asyncio holds only a weak one,
         # so an unheld task can be collected mid-flight and the run just stops.
         application.state.tasks = set()
