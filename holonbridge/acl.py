@@ -52,13 +52,30 @@ class AclDecision:
 
 @dataclass(frozen=True)
 class Animus:
-    """A resolved caller. Built once per request, passed down like ``Conn``."""
+    """A resolved caller. Built once per request, passed down like ``Conn``.
+
+    CHANGED 2026-09-01: added ``real_person``/``real_person_label``/
+    ``acting_as`` for the admin ``act_as`` impersonation feature (see
+    ``acting_as.py`` and ``deps.py``'s ``require_animus``). ``person`` is
+    who this request should be treated as -- possibly an admin's
+    impersonation target -- while ``real_person`` is always the identity
+    that actually authenticated, whether or not an override is active.
+    For an ordinary, non-impersonated request the two are equal and
+    ``acting_as`` is False; every existing caller that only ever read
+    ``.person`` keeps working unchanged. Code that needs to know "is this
+    caller genuinely an admin, regardless of who they're currently acting
+    as" -- the act_as/cease_acting_as routes themselves -- must check
+    ``real_person``, never ``person``.
+    """
 
     external_id: str
     external_id_type: str
     person: str | None
     person_label: str | None = None
     teams: frozenset[str] = field(default_factory=frozenset)
+    real_person: str | None = None
+    real_person_label: str | None = None
+    acting_as: bool = False
 
 
 async def _run(query_fn: QueryFn, query: str) -> dict:
@@ -137,6 +154,45 @@ async def build_animus(
     person, label = resolved
     teams = await resolve_teams(query_fn, holons_graph, person=person)
     return Animus(external_id, external_id_type, person=person, person_label=label, teams=teams)
+
+
+async def build_animus_as(
+    query_fn: QueryFn, holons_graph: str, *, person: str
+) -> Animus:
+    """Build an Animus for a known Person IRI directly, skipping the
+    external-identity lookup ``build_animus`` normally starts from.
+
+    Used only by the admin ``act_as`` override in ``deps.py``'s
+    ``require_animus``: the caller already authenticated with a real
+    external identity of their own; this substitutes who downstream ACL
+    checks treat them as, not how they got in the door. ``external_id``/
+    ``external_id_type`` deliberately record the impersonation itself
+    (``"act-as:<person>"`` / ``"ActingAs"``) rather than a real external
+    credential, so nothing downstream -- logging, whoami, a future audit
+    query -- can mistake this for a genuine independent login.
+
+    Does not check whether ``person`` actually exists as a ``holon:Person``
+    in ``holons_graph``; the ``/admin/act-as`` route checks that itself
+    before ever calling this, once, at the point an operator sets the
+    override -- re-checking on every subsequent request this override
+    applies to would be redundant, not safer.
+    """
+    query = f"""
+    PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+    SELECT ?label WHERE {{
+      GRAPH <{holons_graph}> {{ <{person}> rdfs:label ?label }}
+    }} LIMIT 1
+    """
+    rows = _bindings(await _run(query_fn, query))
+    label = rows[0]["label"]["value"] if rows else None
+    teams = await resolve_teams(query_fn, holons_graph, person=person)
+    return Animus(
+        external_id=f"act-as:{person}",
+        external_id_type="ActingAs",
+        person=person,
+        person_label=label,
+        teams=teams,
+    )
 
 
 # --------------------------------------------------------------------------
