@@ -40,22 +40,73 @@ get and run applies to the schema as well: a restricted query's parameter
 contract is exactly the kind of thing that would differentially confirm
 its existence to someone who can't reach it, so it gets the same treatment,
 not an exception.
+
+CHANGED 2026-09-02: added ``POST /named-query`` (register_named_query) and
+``DELETE /named-query/{id}`` (delete_named_query). Every route above this
+change is read-only against the registry; nothing in this file, or
+anywhere else in the bridge, could previously *write* one -- named
+queries had to be hand-authored as Turtle and pushed through
+``/graph/push`` or a raw ``sparql_update``, with no gate specific to "may
+this caller install a named query" as distinct from "may this caller
+write to this graph".
+
+There is deliberately no separate "named update" concept or route.
+``sparql_kind.classify`` already tells ``run_named_query`` below whether a
+bound query's body is a read or an update, and dispatches to
+``client.select``/``client.construct`` or ``client.update`` accordingly --
+a registered ``hb:NamedQuery`` whose ``hb:sparql`` happens to be an
+INSERT/DELETE already runs correctly today. What was missing was purely
+the write path, not a second read path for a different body shape. See
+the ``holon-named-queries`` skill for the full design writeup, including
+why this is a *definer's-rights* shape (the sensitive check happens once,
+at registration, not on every invocation) and what that implies for how
+carefully registration itself has to be gated.
+
+Registration is gated more heavily than an ordinary registry write for
+exactly that reason: every registration requires ``check_write`` on the
+named-queries graph itself (installing *something* is an ordinary content
+write), but a body that ``classify()`` calls an update ADDITIONALLY
+requires ``check_write`` on every graph ``extract_graph_refs`` finds
+referenced in the body -- the same gate ``routes/sparql.py``'s
+``_authorize_write`` applies to a raw ``POST /sparql/update``. Once
+installed, ``run_named_query`` gates invocation by Toolset reachability
+alone, not by the invoker's own graph-write grants, so if registration
+didn't check the referenced graphs, any caller who could write so much as
+a label into the named-queries graph could install a query that clears
+someone else's graph, and any Toolset member could then run it. Deletion
+is gated by ``check_replace`` instead, matching ``drop_pipeline``/
+``DELETE /graph``: removing already-registered content is destructive,
+not an append.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
+from ..acl import check_replace, check_write, extract_graph_refs
 from ..deps import AnimusDep, ClientDep, ConnDep, PersonasDep, RegistryDep
 from ..fuseki import FusekiError
 from ..named_queries import apply_query_params, load_named_queries
 from ..params import ParameterError, shacl_shape_for_query
 from ..sparql_kind import classify, form
 from ..toolset import bind_persona_param, resolve_reachable
+from ..turtle import literal
 
 router = APIRouter(tags=["named-queries"])
 KIND = "named-queries"
+
+#: Namespace this route registers new hb: queries under. Matches the
+#: existing hb: scheme's own namespace (holonbridge/named_queries.py's
+#: HB_NAMESPACE) and the per-parameter synthetic path convention
+#: holonbridge/params.py already uses (_PARAM_PATH_NS).
+HB = "https://w3id.org/holonbridge/"
+
+
+def _query_node(query_id: str) -> str:
+    return f"{HB}query/{query_id}"
 
 
 class RunRequest(BaseModel):
@@ -64,6 +115,23 @@ class RunRequest(BaseModel):
         default=False, description="return the bound SPARQL without executing it"
     )
     graph: str | None = None
+
+
+class ParameterSpec(BaseModel):
+    name: str = Field(..., min_length=1)
+    datatype: str | None = None
+    description: str = ""
+    required: bool = False
+    default: str | None = None
+
+
+class RegisterNamedQueryRequest(BaseModel):
+    id: str = Field(..., min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._-]+$")
+    sparql: str = Field(..., min_length=1)
+    label: str | None = None
+    description: str | None = None
+    target_graph: str | None = None
+    params: list[ParameterSpec] = Field(default_factory=list)
 
 
 def _not_found(query_id: str, available_ids: list[str]) -> HTTPException:
@@ -288,3 +356,200 @@ async def reload_named_queries(
         "count": len(result.queries),
         "warnings": result.warnings,
     }
+
+
+# --- registration ---------------------------------------------------------
+
+
+async def _authorize_update_body_refs(
+    sparql: str, conn: ConnDep, client: ClientDep, animus: AnimusDep
+) -> None:
+    """For a body that classifies as an update: require check_write on
+    every graph the body itself references, exactly like
+    routes/sparql.py's _authorize_write does for a raw POST
+    /sparql/update. See this module's docstring for why registration, not
+    just invocation, is where this has to be checked.
+    """
+    refs = extract_graph_refs(sparql)
+    if refs is None:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail=(
+                "sparql could not be parsed for graph references; denied, not "
+                "assumed safe (an update-form named query requires write "
+                "access to every graph it touches, checked at registration)"
+            ),
+        )
+
+    async def query_fn(q: str) -> dict:
+        return await client.select(conn, q)
+
+    for graph_iri in refs:
+        decision = await check_write(
+            query_fn, conn.holons_graph, person=animus.person, target=graph_iri
+        )
+        if not decision.allowed:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"{decision.reason} (graph: {graph_iri}, referenced by "
+                    "the sparql body)"
+                ),
+            )
+
+
+def _render_registration_turtle(body: RegisterNamedQueryRequest, registered_at: str) -> str:
+    """Turtle for one hb:NamedQuery resource plus its hb:parameter blank
+    nodes. Property local names match holonbridge/named_queries.py's
+    _QUERY_FIELDS/_PARAM_FIELDS precedence-first aliases exactly, so the
+    loader reads back exactly what this writes.
+    """
+    node = f"<{_query_node(body.id)}>"
+
+    lines = [
+        f"{node} a <{HB}NamedQuery> ;",
+        f"  <{HB}id> {literal(body.id)} ;",
+        f"  <{HB}sparql> {literal(body.sparql)} ;",
+    ]
+    if body.label:
+        lines.append(f"  <{HB}label> {literal(body.label)} ;")
+    if body.description:
+        lines.append(f"  <{HB}description> {literal(body.description)} ;")
+    if body.target_graph:
+        lines.append(f"  <{HB}targetGraph> <{body.target_graph}> ;")
+    lines.append(
+        "  <" + HB + "registeredAt> "
+        + literal(registered_at, datatype="<http://www.w3.org/2001/XMLSchema#dateTime>")
+        + " ."
+    )
+
+    param_links: list[str] = []
+    param_blocks: list[str] = []
+    for i, p in enumerate(body.params):
+        pnode = f"_:param{i}"
+        param_links.append(f"{node} <{HB}parameter> {pnode} .")
+        fields = [f"{pnode} <{HB}name> {literal(p.name)} ;"]
+        if p.datatype:
+            fields.append(f"  <{HB}datatype> {literal(p.datatype)} ;")
+        if p.description:
+            fields.append(f"  <{HB}description> {literal(p.description)} ;")
+        fields.append(f"  <{HB}required> {'true' if p.required else 'false'} ;")
+        if p.default is not None:
+            fields.append(f"  <{HB}default> {literal(p.default)} ;")
+        fields[-1] = fields[-1][:-1] + "."  # trailing " ;" -> " ."
+        param_blocks.append("\n".join(fields))
+
+    return "\n".join(lines + param_links + param_blocks)
+
+
+@router.post("/named-query")
+async def register_named_query(
+    body: RegisterNamedQueryRequest,
+    conn: ConnDep,
+    client: ClientDep,
+    animus: AnimusDep,
+    cache: RegistryDep,
+) -> dict:
+    """Register (or overwrite) a named query in the hb: vocabulary.
+
+    See this module's docstring for the full ACL reasoning. Short version:
+    check_write on the named-queries graph always; a body that classifies
+    as an update additionally needs check_write on every graph it itself
+    references. hb: only -- an hquery: entry's richer typed-Parameter
+    shape still needs hand-authored Turtle pushed directly (e.g. via
+    /graph/push); see the holon-named-queries skill.
+    """
+    if animus.person is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="unresolved identity")
+
+    registry = conn.graph("named-queries")
+
+    async def query_fn(q: str) -> dict:
+        return await client.select(conn, q)
+
+    decision = await check_write(
+        query_fn, conn.holons_graph, person=animus.person, target=registry
+    )
+    if not decision.allowed:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, detail=f"{decision.reason} (graph: {registry})"
+        )
+
+    if classify(body.sparql) == "update":
+        await _authorize_update_body_refs(body.sparql, conn, client, animus)
+
+    registered_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    insert_body = _render_registration_turtle(body, registered_at)
+    node = f"<{_query_node(body.id)}>"
+
+    update = f"""PREFIX hb: <{HB}>
+DELETE WHERE {{ GRAPH <{registry}> {{ {node} ?p ?o }} }} ;
+DELETE WHERE {{ GRAPH <{registry}> {{ {node} hb:parameter ?param . ?param ?pp ?oo }} }} ;
+INSERT DATA {{ GRAPH <{registry}> {{
+{insert_body}
+}} }}"""
+
+    try:
+        await client.update(conn, update)
+    except FusekiError as exc:
+        raise HTTPException(exc.status or 502, detail=exc.as_dict()) from exc
+
+    cache.invalidate(conn, KIND)
+    return {
+        "ok": True,
+        "id": body.id,
+        "iri": _query_node(body.id),
+        "graph": registry,
+        "kind": classify(body.sparql),
+    }
+
+
+@router.delete("/named-query/{query_id}")
+async def delete_named_query(
+    query_id: str,
+    conn: ConnDep,
+    client: ClientDep,
+    animus: AnimusDep,
+    cache: RegistryDep,
+) -> dict:
+    """Remove a registered named query. check_replace on the registry
+    graph -- removing already-registered content is destructive, wholesale
+    on that entry, the same tier as drop_pipeline / DELETE /graph, not an
+    ordinary append-shaped write.
+    """
+    if animus.person is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="unresolved identity")
+
+    registry = conn.graph("named-queries")
+
+    async def query_fn(q: str) -> dict:
+        return await client.select(conn, q)
+
+    decision = await check_replace(
+        query_fn, conn.holons_graph, person=animus.person, target=registry
+    )
+    if not decision.allowed:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, detail=f"{decision.reason} (graph: {registry})"
+        )
+
+    result = await cache.get(client, conn, kind=KIND, loader=load_named_queries)
+    query = result.by_id(query_id)
+    if query is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail={"error": "unknown_named_query", "id": query_id},
+        )
+
+    node = f"<{query.iri}>"
+    update = f"""PREFIX hb: <{HB}>
+DELETE WHERE {{ GRAPH <{registry}> {{ {node} ?p ?o }} }} ;
+DELETE WHERE {{ GRAPH <{registry}> {{ {node} hb:parameter ?param . ?param ?pp ?oo }} }}"""
+
+    try:
+        await client.update(conn, update)
+    except FusekiError as exc:
+        raise HTTPException(exc.status or 502, detail=exc.as_dict()) from exc
+
+    cache.invalidate(conn, KIND)
+    return {"ok": True, "id": query_id, "graph": registry}
