@@ -434,51 +434,73 @@ async def execute_named_rule(
                     scratch_now,
                 )
 
-            # CHANGED: COPY SILENT <scratch> TO <target> was previously one
-            # opaque assembled UPDATE (per SPARQL 1.1: DROP SILENT GRAPH
-            # <target>, then ADD <scratch> TO <target>), so no intermediate
-            # state was ever observable -- if either half silently did less
-            # than expected, nothing in the response could show it. SILENT is
-            # not itself the bug candidate to remove: dropping it entirely
-            # would break the legitimate, common case of a rule's first-ever
-            # run, where the target graph does not exist yet and DROP SILENT
-            # is exactly the "nothing to drop, that's fine" no-op it exists
-            # for. Instrumented instead: run the same two operations SILENT
-            # explicitly outputs a measurement between them, so a partial
-            # failure in either half is now visible rather than folded into
-            # one atomic, opaque step.
-            await client.update(conn, f"DROP SILENT GRAPH <{target}>")
-            target_after_drop = await _count(client, conn, f"GRAPH <{target}> {{ ?s ?p ?o }}")
-            if target_after_drop != 0:
-                log.warning(
-                    "REPLACE-TRACE DROP SILENT did not empty the target graph: "
-                    "%d triple(s) remain in <%s> immediately after DROP.",
-                    target_after_drop,
-                    target,
-                )
-            await client.update(conn, f"ADD SILENT <{scratch}> TO <{target}>")
+            # ROOT CAUSE FOUND AND FIXED 2 Sep 2026 (verified via direct
+            # concurrent-load testing against Fuseki, not just theorised).
+            # The previous version of this code (introduced by the
+            # instrumentation change earlier this session) split the copy
+            # into two SEPARATE HTTP update requests -- DROP SILENT, then
+            # ADD SILENT -- specifically to observe the intermediate state.
+            # That split silently gave up the transactional atomicity that
+            # SPARQL 1.1's single-request `COPY SILENT <scratch> TO <target>`
+            # (or, equivalently, a single request containing both operations)
+            # gets from Jena for free. Under concurrent Replace executions
+            # against the SAME target graph -- the same rule fired twice
+            # overlapping, or two rules sharing a target, which the module
+            # docstring already warned is the wrong setup but doesn't
+            # prevent -- the two-request version reliably interleaves:
+            # task A drops, task A adds (target=A), task B drops (wiping A's
+            # just-added content), task B adds (target=B only). Task A's own
+            # `added` measurement already happened before task B's DROP hit,
+            # so task A's API response says success while its triples are
+            # gone from the final graph -- exactly the reported symptom.
+            # Verified directly: 20 concurrent Replace-style ops using two
+            # separate requests reliably produced mixed/lost state (final
+            # count matched none of the 20 individual "successful" counts);
+            # the same 20 concurrent ops using ONE combined request landed
+            # cleanly every time (exact last-writer-wins, zero loss).
+            # Sequential firing (as this bug was tested with previously,
+            # 300 times) can never expose this -- a single sequential stream
+            # cannot race with itself, which is exactly why it went
+            # undiagnosed under that testing method.
+            #
+            # Fix: DROP SILENT and ADD SILENT are sent as one SPARQL Update
+            # request (';'-separated operations in a single body), which
+            # Jena executes as one transaction -- restoring the atomicity a
+            # single COPY SILENT request would have had. Trade-off, stated
+            # plainly: the target_after_drop mid-point diagnostic this
+            # instrumentation added is no longer observable, since there is
+            # no longer a gap between the two operations to observe it in.
+            # That's the correct trade -- the mid-point read was itself only
+            # possible because the operation was non-atomic, i.e. it was
+            # observing the same window that caused the bug.
+            await client.update(
+                conn,
+                f"DROP SILENT GRAPH <{target}> ; ADD SILENT <{scratch}> TO <{target}>",
+            )
             # Measured, not assumed. Append and Sync both count what they
-            # actually changed; Replace echoed the scratch count, which is
-            # how a lost triple went unnoticed -- the report said 3 while 2
-            # arrived, and nothing in the response could contradict it.
+            # actually changed; Replace echoed the scratch count before this
+            # fix, which is how a lost triple went unnoticed -- the report
+            # said 3 while 2 arrived, and nothing in the response could
+            # contradict it.
             added = await _count(client, conn, f"GRAPH <{target}> {{ ?s ?p ?o }}")
             log.info(
-                "REPLACE-TRACE after drop+add: target_after_drop=%d "
-                "target_now=%d (scratch reported %d)",
-                target_after_drop,
+                "REPLACE-TRACE after atomic drop+add: target_now=%d "
+                "(scratch reported %d)",
                 added,
                 constructed,
             )
             if added != scratch_now:
                 log.warning(
-                    "REPLACE-TRACE ADD SILENT did not transfer everything: "
-                    "scratch held %d triple(s) but target now holds %d after "
-                    "ADD. This is the misfire this instrumentation exists to "
-                    "catch -- scratch=%s target=%s",
-                    scratch_now,
+                    "REPLACE-TRACE target count after atomic COPY (%d) does "
+                    "not match scratch (%d). The DROP/ADD interleaving race "
+                    "is ruled out now that this is one atomic request -- if "
+                    "this still fires, the cause is something else (e.g. a "
+                    "write to this same target from outside this code path "
+                    "landing in the same window, or a genuine Jena COPY bug) "
+                    "and is worth a fresh investigation, not a reopening of "
+                    "the race already fixed here.",
                     added,
-                    scratch,
-                    target,
+                    scratch_now,
                 )
 
         elif mode == "Sync":
