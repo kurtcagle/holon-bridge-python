@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/causalspark/named-function-architecture-v1
 title: "Named Functions — Algorithmic Tracking Operations and Portable Python Invocation from SPARQL/SHACL"
 type: databook
-version: 1.1.0
+version: 1.3.0
 created: 2026-09-05
 author:
   - name: Kurt Cagle
@@ -59,7 +59,30 @@ process:
     graph, compiled by HolonBridge independently of its own deploy cycle --
     raised by Kurt the same session, alongside the original
     codebase-allow-list candidate. Neither has been chosen; both are
-    recorded as open options.
+    recorded as open options. v1.2.0 adds a systems-viability assessment of
+    the graph-native candidate, given at Kurt's request: execution
+    isolation (recommending a restricted subprocess over raw in-process
+    exec or full WASM sandboxing), versioning discipline, registration-time
+    validation, reload/concurrency policy, an invocation-audit mechanism,
+    and a candidate/registered review-status split modelled on the SCE
+    ingestion pipeline. Net recommendation: ship hb:implementationRef
+    first; treat hb:pythonSource as a second phase once isolation and the
+    review workflow exist as real mechanisms. This is a recommendation
+    captured in the record, not a decision Kurt has made. v1.3.0 adds a
+    third candidate for hb:implementationRef, raised by Kurt the same
+    session: a plugin architecture sourcing implementations from
+    independently-installed Python packages via standard entry points,
+    bypassing admin-graph writes as an installation vector entirely (though
+    not, on this document's recommendation, as an activation vector -- an
+    installed plugin's functions should still require an admin-gated step
+    to go live). Assessed as a genuine refinement of hb:implementationRef
+    rather than a fourth unrelated idea, and as the strongest of the three
+    candidates for anything Kurt or a small deploy-trusted team would
+    write, since it restores a two-gate model without hb:pythonSource's
+    single-gate collapse. Flagged as needing clarification: who "users"
+    refers to in this candidate materially changes the assessment, from a
+    standard extension point (if deploy-trusted operators) to a much
+    harder untrusted-third-party-code problem (if arbitrary end users).
 graph:
   namespace: https://w3id.org/holonbridge/
   named_graph: https://w3id.org/databook/causalspark/named-function-architecture-v1#graph
@@ -71,11 +94,13 @@ graph:
   validator_note: >
     triple_count/subjects above describe the primary vocabulary block only
     (Named Function class and properties, including the v1.1.0
-    hb:pythonSource addition). The three supporting blocks in the technical
-    appendix — worked registry examples, the two SHACL shape variants, and
-    the illustrative pipeline-stage sketch — are counted separately in
-    their own headers, since they extend rather than restate the primary
-    graph.
+    hb:pythonSource addition). The five supporting blocks in the technical
+    appendix — worked registry examples, the two SHACL shape variants, the
+    illustrative pipeline-stage sketch, the v1.2.0 systems-assessment
+    vocabulary sketch (47 triples / 14 subjects), and the v1.3.0
+    plugin-sourced implementation vocabulary sketch (10 triples / 2
+    subjects) — are counted separately in their own headers, since they
+    extend rather than restate the primary graph.
 ---
 
 ## What this document is
@@ -146,9 +171,37 @@ The mechanics of "compile independently" also matter, and aren't yet specified h
 
 Choosing between this and the codebase-allow-list candidate is explicitly not resolved here. Both remain live options for whoever specifies `hb:implementationRef`'s final shape.
 
+## Systems assessment: what graph-native execution would actually require
+
+Evaluated on its own merits, the graph-native candidate is architecturally sound and consistent with the rest of this stack's philosophy -- but it is a materially different kind of change than adding one more graph-native resource type. Named queries, rules, and triggers are all constrained to SPARQL, a language that (even in its UPDATE form) cannot make a syscall, open a socket, read an arbitrary file, or execute at the operating-system level. Python is general-purpose code carrying the full ambient authority of whatever process runs it. Storing Python source in the graph therefore doesn't extend the existing "graph is truth" pattern into a new but similar case -- it introduces a live code-execution surface where none currently exists. That reframing doesn't disqualify the candidate; it does mean viability has to be assessed as a systems problem, not a schema problem, and several pieces of that problem are not yet specified anywhere in this document.
+
+Execution isolation is the piece that matters most. Raw in-process `exec()` of the stored source is the simplest to build and the most dangerous to run: the function executes with HolonBridge's own Fuseki credentials, filesystem access, and network egress, which means a function -- malicious, buggy, or simply unanticipated in its effects -- could rewrite the NamedFunction registry itself, escalating from "one admin-approved function" to "arbitrary future functions," entirely inside the graph, without a second gate ever being crossed. True in-interpreter sandboxing has a long history of escape bugs and isn't a credible substitute for real isolation. Full WASM sandboxing is the principled alternative but is probably premature here specifically: the tracking-operation functions this design exists to serve (Brier scoring, entropy-gain, saturation counting) are numeric and may eventually want `numpy` or `scipy`, and WASM-compiled scientific Python remains genuinely difficult today. The recommended middle path is a restricted subprocess, or small pool of them, supervised and restarted by HolonBridge itself (preserving the liveness-coupling property already established for the SERVICE-endpoint mechanism above), with no filesystem or network capability and a hard allow-list of importable modules -- `math`, `statistics`, cautiously `numpy` -- excluding anything that could import `os`, `subprocess`, or `socket`. This is not sandboxing in the research sense, but it closes the paths that matter (exfiltration, lateral movement, self-escalation) at a cost proportionate to the actual functions this design is meant to carry.
+
+It is worth being honest about what "risk is small while admin is narrowly held to Kurt personally" actually means here: that is a mitigation by policy (who currently holds admin), not by mechanism (what the executed code can actually do once it runs). That is a reasonable interim answer given today's trust model, but the two claims should not be conflated -- the design is not inherently safe, it is currently safe because of a narrow role assignment that could change.
+
+A handful of other pieces need deciding before this is buildable, none of them exotic on their own. Versioning is not automatically free just because the source lives in the graph -- overwriting `hb:pythonSource` in place loses history unless a discipline is chosen: either a new `hb:NamedFunction` IRI per version with a "current" pointer, or RDF 1.2 reification timestamping each version of the literal. Registration needs to do more than accept a write -- at minimum a `compile()` step and, ideally, a dry run against synthetic inputs matching the function's declared `hb:inputVariable`s, so that a broken definition fails the write itself rather than failing silently on its first live invocation, which for anything on the synchronous SHACL-gating path means every write using that shape starts failing before anyone notices why. Hot reload needs a stated concurrency policy, not just a `reload_named_functions` tool: SPARQL queries are stateless per call, so swapping them mid-flight is harmless, but a compiled Python callable is not automatically safe to swap under an in-flight invocation, so the simplest correct rule is that in-flight calls finish on the version they started with and only new calls pick up a reload. And the "free provenance" benefit this candidate is largely justified by has to actually be built: storing source in the graph tells you what could have run, not what did -- a per-invocation audit record (function id, bound inputs, output, and the exact source version that produced it), kept the same append-only way the rest of HGA's event graph already works, is what turns that benefit from an assumption into a fact.
+
+The one gap worth naming as an opportunity rather than only a cost: `hb:implementationRef` functions get code review and CI for free, because they live in an ordinary codebase with an ordinary pull request in front of every change. Graph-native functions bypass that apparatus by construction -- there is no pull request for a graph edit. This stack already has the right shape to reintroduce a review gate without falling back to git, though: the SCE ingestion pipeline's `holon:CandidateStatus`/`holon:RegisteredStatus` split for holon registration is exactly the pattern a NamedFunction's registration could reuse -- draft a function as a candidate, run it through compile-plus-dry-run (and, where warranted, a human look) before promoting it to registered and live. Doing this would mean the graph-native candidate's missing review step is not actually missing, just moved into the graph itself.
+
+Taken together, the recommendation is to treat the graph-native candidate as a second phase rather than a same-release alternative to `hb:implementationRef`. Shipping the codebase-allow-list version first proves out the SERVICE/registry/pipeline-stage mechanics already designed above against real, reviewed functions, without also having to solve process isolation and a graph-native review workflow in the same pass. `hb:pythonSource` becomes viable once the restricted-execution environment and the candidate/registered workflow both exist as real mechanisms, not before.
+
+## Candidate: plugin architecture, bypassing admin-graph installation entirely
+
+Kurt raised a third candidate the same session: instead of choosing between `hb:implementationRef` referencing a callable already shipped in the main HolonBridge codebase, or `hb:pythonSource` storing source in the admin graph, formalize a proper plugin system -- Python packages built and installed independently of HolonBridge's own release cycle, each declaring which NamedFunction ids it implements via a standard extension-point mechanism. Python's own `importlib.metadata` entry points are the mature, nothing-novel way to do this: a plugin's `pyproject.toml` declares an entry point in a HolonBridge-defined group (e.g. `[project.entry-points."holonbridge.named_functions"]` `saturation-check = "causalspark_plugins.tracking:saturation_check"`), and HolonBridge scans installed distributions for that group at startup. New code is added by installing a package into HolonBridge's Python environment -- `pip install`, or baking it into the container image -- not by writing to the admin graph at all.
+
+This is a genuine refinement of `hb:implementationRef`, not a fourth unrelated idea, and it answers directly the open question the allow-list candidate left unresolved above ("how does a method get allow-listed and what prevents registering something off that list"): the allow-list is whatever is actually installed, discovered structurally through entry points, rather than a hand-maintained list inside the main codebase.
+
+It's worth being precise about what "bypasses the admin layer" actually buys, because it's real but narrower than it first sounds. It removes the admin graph-write as a vector for installing new code -- a compromised or malicious admin credential can no longer, by itself, get arbitrary Python running inside HolonBridge, which is exactly the single-gate collapse the graph-native-source candidate couldn't avoid. But it does this by moving the installation gate to deploy/ops access (whoever can get a package into the running environment), not by removing the need for a gate. And it does not, by itself, decide whether a newly installed plugin's functions go live the moment the package is present, or only once something -- ideally still an admin-gated step -- registers or activates them as callable `hb:NamedFunction` resources. The recommendation is to keep that activation step: install should not automatically mean live, the same way a candidate holon isn't automatically registered just by existing. Skipping it trades one single-gate problem for a different one -- dropping a plugin into the environment would itself become an entirely ungated code-execution event.
+
+It's also worth separating two things this idea's phrasing conflates: being a plugin and being isolated are independent properties. A plugin loaded in-process still runs with HolonBridge's full ambient authority once loaded -- the entry-point mechanism controls who can get code onto the machine, not what that code can do once it's there. The restricted-subprocess recommendation from the systems assessment above still applies and composes cleanly with this candidate: load each plugin into its own supervised, privilege-limited worker process rather than into HolonBridge's main process, so the plugin architecture and the isolation strategy solve two different problems at once instead of one problem twice.
+
+One thing worth clarifying rather than assuming: who "users" refers to in this candidate matters enormously to the assessment. If it means Kurt, or whoever operates HolonBridge's deployment pipeline, this is a clean, standard extension-point pattern riding on an already-existing trust boundary -- the same one that already gates every other code change to the system. If it means end users of the platform -- personas, external API callers, or anyone without deploy access -- submitting their own plugins, that is a substantially harder problem, closer to running untrusted third-party native code, and the admin-graph question becomes secondary to a much bigger one: sandboxing arbitrary user-submitted code is a different order of engineering effort than anything else considered in this document, regardless of whether the entry point is a graph write or a plugin install.
+
+Net assessment: of the three candidates now on the table, this is the strongest for anything Kurt or a small, deploy-trusted team would write. It restores a genuine two-gate model -- deploy access, then admin activation -- without `hb:pythonSource`'s single-gate collapse, and it can be built almost entirely on mature, existing Python packaging primitives rather than inventing new mechanics. It is not a replacement for `hb:pythonSource`'s use case, though: graph-native source is still the only candidate here that lets a tracked algorithm change without any deploy step at all, however small. The three candidates now sit on a real, ordered tradeoff: `hb:implementationRef` against the main codebase (safest, requires main-codebase changes), plugin-sourced `hb:implementationRef` (nearly as safe, decouples release cycles via standard packaging), `hb:pythonSource` (fastest to change, weakest gate). Which point on that line is right depends on how often new tracking algorithms are expected to be added and by whom -- a question this document can name but not answer.
+
 ## What's still open
 
-Several things here are explicitly not decided and should not be read as more settled than they are. Whether a registered function's implementation is expressed via `hb:implementationRef` (a reference to a pre-vetted, code-reviewed callable — class methods on an allow-listed registry, per Kurt's original steer) or via `hb:pythonSource` (the source itself stored as graph data, compiled independently of a deploy cycle — Kurt's later same-session addition) is now explicitly a two-candidate open question rather than a single design with mechanics still to fill in; see "Candidate: graph-native Python source" above for the tradeoff. Neither candidate's mechanics are fully worked out: the allow-list path still needs how a method gets allow-listed and what prevents registering something off that list; the graph-native-source path still needs its compilation/isolation strategy (in-process exec vs. a separate privilege-limited process) and its registration-time validation story. The illustrative `hb:PythonComputeStage` pipeline-stage sketch in the appendix has not been checked against the real pipeline manifest vocabulary in `holonbridge/routes/pipeline.py` — that reconciliation is a prerequisite for implementation, not an afterthought, and this document should not be read as claiming that vocabulary already exists in the codebase. Per-shape, per-graph decisions about which SHACL variant (chokepoint vs. federated) applies where haven't been made for any specific graph yet, including David's own census shape — this document lays out the decision criterion, not the decisions themselves. And the entropy-gain formalization of gap-mint prioritisation, while well-defined as a formula, still needs someone to decide what "prior distribution" and "candidate evidence model" concretely mean for a given gap category before it's implementable, not just definable.
+Several things here are explicitly not decided and should not be read as more settled than they are. Whether a registered function's implementation is expressed via `hb:implementationRef` against the main codebase (a reference to a pre-vetted, code-reviewed callable — class methods on an allow-listed registry, per Kurt's original steer), via `hb:implementationRef` sourced from an independently-installed plugin (Kurt's third-candidate refinement, using standard Python entry points), or via `hb:pythonSource` (the source itself stored as graph data, compiled independently of a deploy cycle — Kurt's second-candidate addition) is now explicitly a three-way open question rather than a single design with mechanics still to fill in; see "Candidate: graph-native Python source", "Candidate: plugin architecture", and the "Systems assessment" section above for the tradeoffs and the net recommendation (main-codebase allow-list is safest; plugin-sourced is nearly as safe while decoupling release cycles; graph-native source is fastest to change but weakest-gated). None of the three candidates' mechanics are fully worked out: the main-codebase allow-list path still needs how a method gets allow-listed and what prevents registering something off that list; the plugin path still needs its activation-gate decision (does an installed plugin's function go live automatically, or only once admin-registered) and whether plugins run in-process or in their own isolated worker; the graph-native-source path still needs a chosen isolation strategy (the "Systems assessment" section recommends a restricted, privilege-limited subprocess over raw in-process exec or full WASM sandboxing, but this is a recommendation, not a decision), a versioning discipline for `hb:pythonSource` edits, a registration-time compile-plus-dry-run validation story, a reload/concurrency policy for in-flight invocations, an invocation-audit mechanism, and a candidate/registered review workflow modelled on the SCE ingestion pipeline's status split. The plugin candidate also raises a question none of the others do: who is meant to be able to author a plugin at all — an ops-trusted deployer, or a broader population of "users" — since that changes the plugin path from a standard extension point into a much harder untrusted-code problem; this document does not resolve which population Kurt meant. The illustrative `hb:PythonComputeStage` pipeline-stage sketch in the appendix has not been checked against the real pipeline manifest vocabulary in `holonbridge/routes/pipeline.py` — that reconciliation is a prerequisite for implementation, not an afterthought, and this document should not be read as claiming that vocabulary already exists in the codebase. Per-shape, per-graph decisions about which SHACL variant (chokepoint vs. federated) applies where haven't been made for any specific graph yet, including David's own census shape — this document lays out the decision criterion, not the decisions themselves. And the entropy-gain formalization of gap-mint prioritisation, while well-defined as a formula, still needs someone to decide what "prior distribution" and "candidate evidence model" concretely mean for a given gap category before it's implementable, not just definable.
 
 ## Technical appendix — for whoever builds this
 
@@ -343,4 +396,102 @@ SELECT ?censusStep ?saturated WHERE {
     dct:description "Illustrative sketch only -- reconcile against the actual pipeline manifest vocabulary in holonbridge/routes/pipeline.py before implementing; not checked against that code while drafting this design." ;
     hb:computesWith hb:function-brier-calibration ;
     dct:title "Calibration-report stage: read resolved predictions, score by credence band, write a CalibrationReport"@en .
+```
+
+### Systems-assessment vocabulary sketch (illustrative, not decided — 47 triples / 14 subjects)
+
+Names the concepts the "Systems assessment" section above argues are needed if `hb:pythonSource` is ever chosen over `hb:implementationRef`: a declared isolation strategy per function, a candidate/registered review-status split mirroring the SCE ingestion pipeline, and an append-only invocation-audit event. None of this is a decision — it exists so the shape of the requirement is captured alongside the prose, the same way `hb:PipelineStage` was captured as a placeholder above pending reconciliation with real pipeline code.
+
+```turtle
+@prefix hb:   <https://w3id.org/holonbridge/> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix dct:  <http://purl.org/dc/terms/> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+
+hb:IsolationStrategy a rdfs:Class ;
+    rdfs:label "Isolation Strategy"@en ;
+    dct:description "Illustrative sketch only -- names the execution-isolation options considered for hb:pythonSource, not a decided vocabulary. Applies only to the graph-native-source candidate; hb:implementationRef functions run inside HolonBridge's own already-reviewed codebase and don't need a declared isolation strategy."@en .
+
+hb:InProcessExec a hb:IsolationStrategy ;
+    rdfs:label "in-process exec"@en ;
+    dct:description "Simplest, not recommended: runs with HolonBridge's own Fuseki credentials, filesystem access, and network egress."@en .
+
+hb:RestrictedSubprocess a hb:IsolationStrategy ;
+    rdfs:label "restricted subprocess"@en ;
+    dct:description "Recommended default: a supervised, privilege-limited subprocess (or small pool) with no filesystem or network capability and a hard module allow-list."@en .
+
+hb:WasmSandbox a hb:IsolationStrategy ;
+    rdfs:label "WASM sandbox"@en ;
+    dct:description "Principled but likely premature given current difficulty compiling scientific Python (numpy/scipy) to WASM."@en .
+
+hb:invocationIsolation a rdf:Property ;
+    rdfs:domain hb:NamedFunction ;
+    rdfs:range hb:IsolationStrategy ;
+    rdfs:label "declared isolation strategy"@en ;
+    dct:description "Which isolation strategy backs this function's execution, when hb:pythonSource is used. Not applicable to hb:implementationRef functions."@en .
+
+hb:registrationStatus a rdf:Property ;
+    rdfs:domain hb:NamedFunction ;
+    rdfs:label "registration status"@en ;
+    dct:description "Candidate vs. registered status for a NamedFunction, mirroring the holon:CandidateStatus/holon:RegisteredStatus split the SCE ingestion pipeline already uses for holon registration -- proposed here as the review gate a graph-native function otherwise lacks by construction, since no pull request exists for a graph edit."@en .
+
+hb:CandidateFunction a rdfs:Class ;
+    rdfs:label "candidate function status"@en .
+
+hb:RegisteredFunction a rdfs:Class ;
+    rdfs:label "registered function status"@en .
+
+hb:FunctionInvocationEvent a rdfs:Class ;
+    rdfs:subClassOf prov:Activity ;
+    rdfs:label "Function Invocation Event"@en ;
+    dct:description "An append-only audit record of one NamedFunction invocation, in the same event-graph style as the rest of HGA. Makes the graph-native candidate's provenance benefit an actual fact rather than an assumption: source in the graph records what could have run, this records what did."@en .
+
+hb:invokedFunction a rdf:Property ;
+    rdfs:domain hb:FunctionInvocationEvent ;
+    rdfs:range hb:NamedFunction ;
+    rdfs:label "invoked function"@en .
+
+hb:invocationSourceVersion a rdf:Property ;
+    rdfs:domain hb:FunctionInvocationEvent ;
+    rdfs:range xsd:string ;
+    rdfs:label "source version invoked"@en .
+
+hb:invocationInput a rdf:Property ;
+    rdfs:domain hb:FunctionInvocationEvent ;
+    rdfs:label "invocation input binding"@en .
+
+hb:invocationOutput a rdf:Property ;
+    rdfs:domain hb:FunctionInvocationEvent ;
+    rdfs:label "invocation output binding"@en .
+
+hb:invocationTimestamp a rdf:Property ;
+    rdfs:domain hb:FunctionInvocationEvent ;
+    rdfs:range xsd:dateTime ;
+    rdfs:label "invocation timestamp"@en .
+```
+
+### Plugin-sourced implementation vocabulary sketch (illustrative, not decided — 10 triples / 2 subjects)
+
+Names the two additional fields `hb:implementationRef` would need if sourced from an installed plugin package via a Python entry point (the "Candidate: plugin architecture" section above) rather than a method already living in HolonBridge's main codebase. Not a decision; captured for the same reason every other illustrative block in this appendix is.
+
+```turtle
+@prefix hb:   <https://w3id.org/holonbridge/> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix dct:  <http://purl.org/dc/terms/> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+hb:pluginPackage a rdf:Property ;
+    rdfs:domain hb:NamedFunction ;
+    rdfs:range xsd:string ;
+    rdfs:label "plugin package name"@en ;
+    dct:description "Illustrative sketch only, not decided. Name of the installed Python distribution providing this function's implementation, when hb:implementationRef is plugin-sourced via a standard entry point rather than a method in HolonBridge's own main codebase."@en .
+
+hb:pluginEntryPoint a rdf:Property ;
+    rdfs:domain hb:NamedFunction ;
+    rdfs:range xsd:string ;
+    rdfs:label "plugin entry-point name"@en ;
+    dct:description "Illustrative sketch only, not decided. The entry-point name within the holonbridge.named_functions group (Python importlib.metadata entry points), used to resolve this function's callable from an installed plugin package at startup."@en .
 ```
