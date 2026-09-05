@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/causalspark/named-function-architecture-v1
 title: "Named Functions — Algorithmic Tracking Operations and Portable Python Invocation from SPARQL/SHACL"
 type: databook
-version: 1.0.0
+version: 1.1.0
 created: 2026-09-05
 author:
   - name: Kurt Cagle
@@ -53,22 +53,29 @@ process:
     code. Several details (the Python implementation-reference shape,
     reconciliation with the actual pipeline manifest vocabulary in
     holonbridge/routes/pipeline.py) are explicitly marked open below and
-    were not verified against live code in this session.
+    were not verified against live code in this session. v1.1.0 adds a
+    second candidate for how hb:NamedFunction's implementation is expressed
+    -- storing the Python source itself as graph data in an admin-only
+    graph, compiled by HolonBridge independently of its own deploy cycle --
+    raised by Kurt the same session, alongside the original
+    codebase-allow-list candidate. Neither has been chosen; both are
+    recorded as open options.
 graph:
   namespace: https://w3id.org/holonbridge/
   named_graph: https://w3id.org/databook/causalspark/named-function-architecture-v1#graph
-  triple_count: 36
-  subjects: 10
+  triple_count: 41
+  subjects: 11
   rdf_version: "1.1"
   turtle_version: "1.1"
   reification: false
   validator_note: >
     triple_count/subjects above describe the primary vocabulary block only
-    (Named Function class and properties). The three supporting blocks in
-    the technical appendix — worked registry examples, the two SHACL shape
-    variants, and the illustrative pipeline-stage sketch — are counted
-    separately in their own headers, since they extend rather than restate
-    the primary graph.
+    (Named Function class and properties, including the v1.1.0
+    hb:pythonSource addition). The three supporting blocks in the technical
+    appendix — worked registry examples, the two SHACL shape variants, and
+    the illustrative pipeline-stage sketch — are counted separately in
+    their own headers, since they extend rather than restate the primary
+    graph.
 ---
 
 ## What this document is
@@ -127,13 +134,25 @@ The heavier, federated mechanism earns its cost specifically where the guarantee
 
 Kurt's instruction on this point was unambiguous and is recorded here as a firm requirement, not a recommendation: any Named Function may be defined only by the admin account. The reasoning holds up on its own — registering a named query is "here is some SPARQL that will run when invoked"; registering a named function is "here is code that will execute automatically and unattended, every time a relevant write is attempted." That is a materially larger trust boundary than anything the existing ACL layer gates today, closer in kind to the `admin`/`founder` role split already established for CausalSpark (`admin` kept narrowly held to Kurt specifically, as a break-glass capability, not a routine founder privilege) than to the write/replace grant model that governs ordinary data. The exact implementation shape — Kurt's own suggestion is class methods on a registered, allow-listed set, rather than open dynamic import from an arbitrary path — is deliberately left open below; the principle that governs it is settled.
 
+## Candidate: graph-native Python source, not decided
+
+A second candidate for `hb:implementationRef` surfaced later the same session, worth recording alongside the codebase-allow-list candidate above rather than in place of it. Instead of a function's implementation being a reference to a callable already reviewed and shipped in the HolonBridge codebase, the Python source itself could be stored as literal graph data — in the same admin-only graph a `hb:NamedFunction` resource already lives in — with HolonBridge compiling it independently of its own deploy cycle, the same way named queries, SHACL shapes, and rules are already graph-native rather than baked into code.
+
+This is a genuine, not merely cosmetic, alternative, and it earns its consideration on the same grounds everything else in this stack does: it would make Named Functions consistent with the rest of the architecture's graph-is-truth philosophy, where adding a new tracked algorithm becomes a Turtle write rather than a Python change, a PR, and a redeploy. It also comes with a real, distinct benefit the allow-list candidate doesn't offer as cleanly: automatic provenance and versioning. If the source itself is a graph literal, it is timestamped and history-tracked the same way any other assertion is, so a calibration score computed six months from now can be tied precisely to the exact source text that produced it — durable auditability of exactly the kind Ada's and David's own design already values, obtained here for free rather than by cross-referencing an external git commit against a log timestamp.
+
+The cost is a real shift in the trust boundary, and it deserves to be named plainly rather than discovered later. In the allow-list candidate, admin-only registration means "admin selects among a set of callables a human already code-reviewed and shipped" — two gates, code review and admin approval, in series. In the graph-native-source candidate, admin-only registration is the *only* gate before HolonBridge executes whatever was written — there is no code review step at all, by construction, since the whole point is to skip the deploy cycle. Given admin is already narrowly held to Kurt personally, this mostly narrows to "Kurt no longer gets a second look at his own code before it runs," which is a smaller risk than it would be if admin were a broader role — but it stops being small the moment anything else (an automated agent, a persona, a compromised credential) can write to that graph with admin-equivalent standing, since at that point the single admin-only gate is the entire safety story. Worth deciding deliberately rather than by default.
+
+The mechanics of "compile independently" also matter, and aren't yet specified here. A raw `exec()` of the stored source in HolonBridge's own process would be the simplest to build and the most dangerous, since the function would then run with whatever privileges HolonBridge itself has — its Fuseki credentials, its filesystem access, its network egress. True sandboxing inside a single Python interpreter has a long history of escape bugs and shouldn't be relied on; real isolation would mean compiling and running in a separate, privilege-limited process rather than in-process. Registration should also attempt to compile — and ideally exercise a dry run against the function's declared input/output variables — at write time, so a broken definition fails the write rather than failing silently on the first real invocation, which for anything on the synchronous SHACL-gating path would mean every write attempt using that shape starts failing before anyone notices why. And cache invalidation has an obvious, idiomatic answer already sitting in this codebase: `reload_named_queries`, `reload_named_rules`, and `reload_named_triggers` already exist as the pattern for "recompile from the graph on demand" — a `reload_named_functions` counterpart is the natural fourth, not a new idea.
+
+Choosing between this and the codebase-allow-list candidate is explicitly not resolved here. Both remain live options for whoever specifies `hb:implementationRef`'s final shape.
+
 ## What's still open
 
-Several things here are explicitly not decided and should not be read as more settled than they are. The Python implementation-reference shape for a registered function (`hb:implementationRef` in the appendix below is a placeholder, not a design) needs its own pass — class methods on an allow-listed registry, per Kurt's steer, but the concrete mechanics (how a method gets allow-listed, what prevents registering something not on that list, whether the allow-list itself is code-deployed or graph-stored) haven't been worked out. The illustrative `hb:PythonComputeStage` pipeline-stage sketch in the appendix has not been checked against the real pipeline manifest vocabulary in `holonbridge/routes/pipeline.py` — that reconciliation is a prerequisite for implementation, not an afterthought, and this document should not be read as claiming that vocabulary already exists in the codebase. Per-shape, per-graph decisions about which SHACL variant (chokepoint vs. federated) applies where haven't been made for any specific graph yet, including David's own census shape — this document lays out the decision criterion, not the decisions themselves. And the entropy-gain formalization of gap-mint prioritisation, while well-defined as a formula, still needs someone to decide what "prior distribution" and "candidate evidence model" concretely mean for a given gap category before it's implementable, not just definable.
+Several things here are explicitly not decided and should not be read as more settled than they are. Whether a registered function's implementation is expressed via `hb:implementationRef` (a reference to a pre-vetted, code-reviewed callable — class methods on an allow-listed registry, per Kurt's original steer) or via `hb:pythonSource` (the source itself stored as graph data, compiled independently of a deploy cycle — Kurt's later same-session addition) is now explicitly a two-candidate open question rather than a single design with mechanics still to fill in; see "Candidate: graph-native Python source" above for the tradeoff. Neither candidate's mechanics are fully worked out: the allow-list path still needs how a method gets allow-listed and what prevents registering something off that list; the graph-native-source path still needs its compilation/isolation strategy (in-process exec vs. a separate privilege-limited process) and its registration-time validation story. The illustrative `hb:PythonComputeStage` pipeline-stage sketch in the appendix has not been checked against the real pipeline manifest vocabulary in `holonbridge/routes/pipeline.py` — that reconciliation is a prerequisite for implementation, not an afterthought, and this document should not be read as claiming that vocabulary already exists in the codebase. Per-shape, per-graph decisions about which SHACL variant (chokepoint vs. federated) applies where haven't been made for any specific graph yet, including David's own census shape — this document lays out the decision criterion, not the decisions themselves. And the entropy-gain formalization of gap-mint prioritisation, while well-defined as a formula, still needs someone to decide what "prior distribution" and "candidate evidence model" concretely mean for a given gap category before it's implementable, not just definable.
 
 ## Technical appendix — for whoever builds this
 
-### Named Function vocabulary (primary block, 36 triples / 10 subjects)
+### Named Function vocabulary (primary block, 41 triples / 11 subjects)
 
 ```turtle
 @prefix hb:   <https://w3id.org/holonbridge/> .
@@ -162,7 +181,13 @@ hb:implementationRef a rdf:Property ;
     rdfs:domain hb:NamedFunction ;
     rdfs:range xsd:string ;
     rdfs:label "implementation reference"@en ;
-    dct:description "Opaque reference to the registered Python callable backing this function (exact shape -- dotted import path, class-method reference, or fixed allow-list key -- deliberately left open pending implementation planning)."@en .
+    dct:description "Opaque reference to the registered Python callable backing this function (exact shape -- dotted import path, class-method reference, or fixed allow-list key -- deliberately left open pending implementation planning). One of two candidate ways to express a NamedFunction's implementation -- see hb:pythonSource for the other -- neither chosen yet."@en .
+
+hb:pythonSource a rdf:Property ;
+    rdfs:domain hb:NamedFunction ;
+    rdfs:range xsd:string ;
+    rdfs:label "inline Python source"@en ;
+    dct:description "Alternative to hb:implementationRef: the function's actual Python source, stored as a literal in an admin-only graph and compiled by HolonBridge independently of its own deploy cycle, rather than referencing a pre-vetted callable already shipped in the codebase. A candidate implementation strategy raised 2026-09-05, not yet chosen over hb:implementationRef -- see 'Candidate: graph-native Python source' in the body for the tradeoff (mainly: no code-review gate before execution, versus automatic graph-native provenance/versioning)."@en .
 
 hb:registrationRestriction a rdf:Property ;
     rdfs:domain hb:NamedFunction ;
