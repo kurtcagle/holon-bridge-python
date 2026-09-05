@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/causalspark/named-function-architecture-v1
 title: "Named Functions — Algorithmic Tracking Operations and Portable Python Invocation from SPARQL/SHACL"
 type: databook
-version: 1.3.0
+version: 1.4.0
 created: 2026-09-05
 author:
   - name: Kurt Cagle
@@ -83,6 +83,23 @@ process:
     refers to in this candidate materially changes the assessment, from a
     standard extension point (if deploy-trusted operators) to a much
     harder untrusted-third-party-code problem (if arbitrary end users).
+    v1.4.0 records Kurt's direct resolution of that question: plugin
+    installers are node admins -- whoever compiles and sets up a given
+    HolonBridge instance -- not end users, and different federated nodes
+    are expected to be administered by different people with genuinely
+    different capability needs. This sharpens the plugin candidate's case:
+    it makes capability separation between nodes real at the binary layer
+    (a node simply doesn't have a plugin installed) rather than merely
+    nominal (a permission check sitting on top of a shared codebase where
+    every capability is present everywhere). It also surfaces two new,
+    previously-invisible open items: named-query registration authority
+    has not itself been specified as gated, even though a named query is,
+    per Kurt's description, the only path an ordinary end user has to a
+    Named Function at all; and any named query that embeds a SERVICE call
+    to a Named Function should prefer hquery:'s typed VALUES-append
+    parameter binding over hb:'s raw string substitution, since that is
+    the one seam where user input meets executing code. Both are
+    recommendations captured in the record, not decisions Kurt has made.
 graph:
   namespace: https://w3id.org/holonbridge/
   named_graph: https://w3id.org/databook/causalspark/named-function-architecture-v1#graph
@@ -94,13 +111,14 @@ graph:
   validator_note: >
     triple_count/subjects above describe the primary vocabulary block only
     (Named Function class and properties, including the v1.1.0
-    hb:pythonSource addition). The five supporting blocks in the technical
+    hb:pythonSource addition). The six supporting blocks in the technical
     appendix — worked registry examples, the two SHACL shape variants, the
     illustrative pipeline-stage sketch, the v1.2.0 systems-assessment
-    vocabulary sketch (47 triples / 14 subjects), and the v1.3.0
-    plugin-sourced implementation vocabulary sketch (10 triples / 2
-    subjects) — are counted separately in their own headers, since they
-    extend rather than restate the primary graph.
+    vocabulary sketch (47 triples / 14 subjects), the v1.3.0 plugin-sourced
+    implementation vocabulary sketch (10 triples / 2 subjects), and the
+    v1.4.0 named-query gating vocabulary sketch (4 triples / 1 subject) —
+    are counted separately in their own headers, since they extend rather
+    than restate the primary graph.
 ---
 
 ## What this document is
@@ -199,9 +217,19 @@ One thing worth clarifying rather than assuming: who "users" refers to in this c
 
 Net assessment: of the three candidates now on the table, this is the strongest for anything Kurt or a small, deploy-trusted team would write. It restores a genuine two-gate model -- deploy access, then admin activation -- without `hb:pythonSource`'s single-gate collapse, and it can be built almost entirely on mature, existing Python packaging primitives rather than inventing new mechanics. It is not a replacement for `hb:pythonSource`'s use case, though: graph-native source is still the only candidate here that lets a tracked algorithm change without any deploy step at all, however small. The three candidates now sit on a real, ordered tradeoff: `hb:implementationRef` against the main codebase (safest, requires main-codebase changes), plugin-sourced `hb:implementationRef` (nearly as safe, decouples release cycles via standard packaging), `hb:pythonSource` (fastest to change, weakest gate). Which point on that line is right depends on how often new tracking algorithms are expected to be added and by whom -- a question this document can name but not answer.
 
+## Resolved: what "admin" and "users" mean in a federated deployment
+
+Kurt clarified the ambiguity flagged in the plugin-architecture section directly: "users" who compile and install plugins are admins -- specifically, whoever compiles and sets up a given HolonBridge instance in the first place. This resolves the open question in favour of the safer reading, and it sharpens the plugin architecture's case rather than merely confirming it, because it surfaces a second, distinct benefit the earlier assessment didn't have in view.
+
+HolonBridge is not a single deployment with a single admin -- it is a federated architecture, and different instances are administered by different people for different reasons. Two node administrators can have genuinely different needs: one running a client-facing federated node has no reason to want, and every reason not to want, the capabilities a co-founder's own instance needs for internal architecture work. Under `hb:implementationRef` against the shared main codebase, every deployment ships the same binary, so every capability the codebase has ever accumulated is *present*, whether or not it's *registered*, at every node -- separation between what one admin's node can do and what another's can do exists only at the level of which `hb:NamedFunction` resources happen to be registered in that node's own graph, not at the level of what code is actually on the machine. Under the plugin architecture, that separation becomes real rather than merely nominal: a node administrator installs only the plugin packages their own instance needs, so a node built for federated client work simply does not have a co-founder's internal-analysis plugin installed at all -- not unregistered, absent. That is a materially stronger property than a permission check sitting on top of a shared capability surface, since it holds even against bugs or compromises in the registration/permission layer itself: there is no function to invoke if the code was never on the machine.
+
+This also settles how ordinary end users of the platform -- as distinct from the node administrators just described -- relate to Named Functions at all: they don't, directly. Per Kurt's description, a user never authors a SPARQL `SERVICE` clause or invokes a NamedFunction by id themselves; they only ever reach one indirectly, through a named query a node's own admin has already authored, registered, and (implicitly) vetted, which happens to embed a `SERVICE` call to a sanctioned function inside its own query text. A user calling that named query by id, with its declared parameters, has no path to any Named Function the admin didn't choose to expose this way.
+
+That said, this only holds together end to end if two things are also true, and neither has been nailed down yet in what this document has captured so far. First, named-query *registration* itself needs to be gated at least as tightly as Named Function registration is -- otherwise the model has a hole in it: nothing so far prevents a lower-trust caller from registering their *own* named query, with its own `SERVICE` clause pointing at a Named Function whose id they know or can discover, and thereby self-granting exactly the access this design is meant to withhold from them. The Named Function admin-only gate is airtight on its own terms; the surrounding named-query layer is only as strong as whatever governs who may register a named query at all, and that governance hasn't been specified in any of this document's versions to date. Second, once a named query is safely authored by a trusted admin, its own declared *parameters* are still user-supplied at call time, and the `hb:` vocabulary's parameter binding is raw `{{placeholder}}` string substitution -- exactly the kind of substitution that shouldn't sit directly upstream of a call into compiled, potentially plugin-sourced code. The `hquery:` vocabulary's alternative -- binding via a `VALUES` clause appended after the query, which can't corrupt the query's structure the way string substitution in principle could -- is the safer of the two existing mechanisms for any named query that gates a Named Function specifically, even though `hb:` remains a reasonable default everywhere else. Recommendation, not yet a decision: any named query that embeds a `SERVICE` call to a registered Named Function should be authored in `hquery:`, not `hb:`, precisely because this is the one seam in the whole design where ordinary user input meets code that actually executes.
+
 ## What's still open
 
-Several things here are explicitly not decided and should not be read as more settled than they are. Whether a registered function's implementation is expressed via `hb:implementationRef` against the main codebase (a reference to a pre-vetted, code-reviewed callable — class methods on an allow-listed registry, per Kurt's original steer), via `hb:implementationRef` sourced from an independently-installed plugin (Kurt's third-candidate refinement, using standard Python entry points), or via `hb:pythonSource` (the source itself stored as graph data, compiled independently of a deploy cycle — Kurt's second-candidate addition) is now explicitly a three-way open question rather than a single design with mechanics still to fill in; see "Candidate: graph-native Python source", "Candidate: plugin architecture", and the "Systems assessment" section above for the tradeoffs and the net recommendation (main-codebase allow-list is safest; plugin-sourced is nearly as safe while decoupling release cycles; graph-native source is fastest to change but weakest-gated). None of the three candidates' mechanics are fully worked out: the main-codebase allow-list path still needs how a method gets allow-listed and what prevents registering something off that list; the plugin path still needs its activation-gate decision (does an installed plugin's function go live automatically, or only once admin-registered) and whether plugins run in-process or in their own isolated worker; the graph-native-source path still needs a chosen isolation strategy (the "Systems assessment" section recommends a restricted, privilege-limited subprocess over raw in-process exec or full WASM sandboxing, but this is a recommendation, not a decision), a versioning discipline for `hb:pythonSource` edits, a registration-time compile-plus-dry-run validation story, a reload/concurrency policy for in-flight invocations, an invocation-audit mechanism, and a candidate/registered review workflow modelled on the SCE ingestion pipeline's status split. The plugin candidate also raises a question none of the others do: who is meant to be able to author a plugin at all — an ops-trusted deployer, or a broader population of "users" — since that changes the plugin path from a standard extension point into a much harder untrusted-code problem; this document does not resolve which population Kurt meant. The illustrative `hb:PythonComputeStage` pipeline-stage sketch in the appendix has not been checked against the real pipeline manifest vocabulary in `holonbridge/routes/pipeline.py` — that reconciliation is a prerequisite for implementation, not an afterthought, and this document should not be read as claiming that vocabulary already exists in the codebase. Per-shape, per-graph decisions about which SHACL variant (chokepoint vs. federated) applies where haven't been made for any specific graph yet, including David's own census shape — this document lays out the decision criterion, not the decisions themselves. And the entropy-gain formalization of gap-mint prioritisation, while well-defined as a formula, still needs someone to decide what "prior distribution" and "candidate evidence model" concretely mean for a given gap category before it's implementable, not just definable.
+Several things here are explicitly not decided and should not be read as more settled than they are. Whether a registered function's implementation is expressed via `hb:implementationRef` against the main codebase (a reference to a pre-vetted, code-reviewed callable — class methods on an allow-listed registry, per Kurt's original steer), via `hb:implementationRef` sourced from an independently-installed plugin (Kurt's third-candidate refinement, using standard Python entry points), or via `hb:pythonSource` (the source itself stored as graph data, compiled independently of a deploy cycle — Kurt's second-candidate addition) is now explicitly a three-way open question rather than a single design with mechanics still to fill in; see "Candidate: graph-native Python source", "Candidate: plugin architecture", and the "Systems assessment" section above for the tradeoffs and the net recommendation (main-codebase allow-list is safest; plugin-sourced is nearly as safe while decoupling release cycles; graph-native source is fastest to change but weakest-gated). None of the three candidates' mechanics are fully worked out: the main-codebase allow-list path still needs how a method gets allow-listed and what prevents registering something off that list; the plugin path still needs its activation-gate decision (does an installed plugin's function go live automatically, or only once admin-registered) and whether plugins run in-process or in their own isolated worker; the graph-native-source path still needs a chosen isolation strategy (the "Systems assessment" section recommends a restricted, privilege-limited subprocess over raw in-process exec or full WASM sandboxing, but this is a recommendation, not a decision), a versioning discipline for `hb:pythonSource` edits, a registration-time compile-plus-dry-run validation story, a reload/concurrency policy for in-flight invocations, an invocation-audit mechanism, and a candidate/registered review workflow modelled on the SCE ingestion pipeline's status split. Who is meant to install a plugin is now resolved (per-instance node admins, not end users of the platform — see "Resolved: what 'admin' and 'users' mean in a federated deployment" above), but that resolution opens two further items that were not visible before it: named-query *registration* authority has not itself been specified as gated at all, let alone gated as tightly as Named Function registration, and without that gate a lower-trust caller could self-author a query that reaches a Named Function the admin-only rule was meant to keep them from; and any named query that does embed a `SERVICE` call to a registered Named Function should, on this document's recommendation, use `hquery:`'s typed `VALUES`-append parameter binding rather than `hb:`'s raw string substitution, since that is the one seam in the whole design where ordinary user input meets executing code, but this too is a recommendation captured here, not a decision made. The illustrative `hb:PythonComputeStage` pipeline-stage sketch in the appendix has not been checked against the real pipeline manifest vocabulary in `holonbridge/routes/pipeline.py` — that reconciliation is a prerequisite for implementation, not an afterthought, and this document should not be read as claiming that vocabulary already exists in the codebase. Per-shape, per-graph decisions about which SHACL variant (chokepoint vs. federated) applies where haven't been made for any specific graph yet, including David's own census shape — this document lays out the decision criterion, not the decisions themselves. And the entropy-gain formalization of gap-mint prioritisation, while well-defined as a formula, still needs someone to decide what "prior distribution" and "candidate evidence model" concretely mean for a given gap category before it's implementable, not just definable.
 
 ## Technical appendix — for whoever builds this
 
@@ -494,4 +522,20 @@ hb:pluginEntryPoint a rdf:Property ;
     rdfs:range xsd:string ;
     rdfs:label "plugin entry-point name"@en ;
     dct:description "Illustrative sketch only, not decided. The entry-point name within the holonbridge.named_functions group (Python importlib.metadata entry points), used to resolve this function's callable from an installed plugin package at startup."@en .
+```
+
+### Named-query gating vocabulary sketch (illustrative, not decided — 4 triples / 1 subject)
+
+Names the one property the "Resolved: what 'admin' and 'users' mean" section above recommends: a way to declare, on a registered named query, which Named Function(s) it gates via an embedded `SERVICE` call -- so that the surrounding named-query layer (the only path Kurt describes an ordinary user having to a Named Function at all) is at least auditable, even before its registration-authority question is settled.
+
+```turtle
+@prefix hb:   <https://w3id.org/holonbridge/> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix dct:  <http://purl.org/dc/terms/> .
+
+hb:gatesNamedFunction a rdf:Property ;
+    rdfs:range hb:NamedFunction ;
+    rdfs:label "gates named function"@en ;
+    dct:description "Illustrative sketch only, not decided. Declares that a registered named query (hb:NamedQuery or hquery:NamedQuery) embeds a SERVICE clause invoking the given hb:NamedFunction. Recommended so that a query gating a NamedFunction is discoverable, and so that registering it can be required to carry the same registration authority as the function it gates -- since, per Kurt's clarification, a named query is the only path by which an ordinary user ever reaches a NamedFunction at all."@en .
 ```
