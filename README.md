@@ -368,24 +368,25 @@ Sync deletes before it inserts, and both halves are `FILTER NOT EXISTS`
 against the other graph, so a triple that is still derived is never removed
 and re-added.
 
-**Known issue, open: `Replace` can silently drop a triple.** A rule whose
-CONSTRUCT yields three triples has been observed landing only two under
-`write_mode=Replace`, while reporting `triplesAdded: 3` with no error —
-reproducible, deterministic, same triple missing on repeat runs. `Sync` over
-the identical scratch graph writes all three, including the one `Replace`
-loses, so the CONSTRUCT and the scratch population are not at fault. Seven
-individually-tested components — the CONSTRUCT output, the Turtle reparse
-through GSP POST, `COPY` alone (single transaction, across separate
-requests, and into a target holding overlapping content), `_count`, and
-`Sync` itself — all behave correctly in isolation; only the assembled
-`Replace` sequence fails. Not yet diagnosed. Temporary trace logging is in
-place around the `COPY` (`REPLACE-TRACE` in the logs) to catch it on the
-next occurrence. Full repro and the elimination list:
-[issue #1](https://github.com/kurtcagle/jena-bridge-python/issues/1).
-Fixed alongside, and worth having independently of the root cause: `added`
-used to echo the scratch count rather than measuring what actually reached
-the target, which is what let the discrepancy go unnoticed in the first
-place.
+**`Replace` could silently drop a triple — diagnosed and fixed
+([#12](https://github.com/kurtcagle/holon-bridge-python/pull/12) +
+[#14](https://github.com/kurtcagle/holon-bridge-python/pull/14)).** A rule
+whose CONSTRUCT yields three triples had been observed landing only two under
+`write_mode=Replace`, reporting `triplesAdded: 3` with no error. **Root cause:**
+the `COPY` was assembled as `DROP SILENT` + `ADD SILENT` sent as *two separate
+HTTP update requests* (PR #12's instrumentation split it that way to make the
+intermediate state observable), which gave up the single-transaction atomicity
+a one-request `COPY` gets from Jena. Under **concurrent** `Replace` executions
+against the same target graph, the two requests interleave: one execution's
+`DROP` lands between another's `DROP` and `ADD`, discarding triples the second
+execution had already (correctly, at the time) reported as added. Sequential
+firing — how it was originally tested, 300× — can't race with itself, which is
+why it went undiagnosed. **Fix (#14):** `DROP SILENT` and `ADD SILENT` are sent
+as one `;`-separated SPARQL Update request, executed as one Jena transaction.
+Verified against 20 and 60 concurrent executions: clean last-writer-wins, zero
+loss. Fixed alongside, worth having independently: `added` used to echo the
+scratch count rather than measuring what actually reached the target, which is
+what let the discrepancy go unnoticed in the first place.
 
 **Nothing is parsed in-process.** The CONSTRUCT result is fetched as Turtle
 and pushed straight into a scratch graph — out of Jena and back into Jena,
@@ -957,13 +958,14 @@ against real data.
 
 ## Known issues
 
-Four, all filed with full repro detail. Linked inline above at the point
-each is most relevant; consolidated here for anyone doing a fast pass over
-what's currently open rather than reading the design notes end to end.
+Originally four, all filed with full repro detail; **#1 is now fixed** (see
+below). Linked inline above at the point each is most relevant; consolidated
+here for anyone doing a fast pass over what's currently open rather than
+reading the design notes end to end.
 
 | # | What | Severity |
 |---|---|---|
-| [1](https://github.com/kurtcagle/jena-bridge-python/issues/1) | Named rule `write_mode=Replace` can silently drop a triple while reporting success | High — silent data loss, not yet diagnosed |
+| ~~1~~ | Named rule `write_mode=Replace` could silently drop a triple while reporting success | **Fixed** — [#12](https://github.com/kurtcagle/holon-bridge-python/pull/12) (instrumentation) + [#14](https://github.com/kurtcagle/holon-bridge-python/pull/14) (COPY atomicity restored: the split DROP/ADD, run as two HTTP requests, interleaved under concurrent `Replace`; recombined into one SPARQL transaction) |
 | [2](https://github.com/kurtcagle/jena-bridge-python/issues/2) | Scheduler LLM proposals truncate mid-statement, quarantining as a misleading Turtle syntax error | Medium — misdiagnosable, not data-lossy |
 | [3](https://github.com/kurtcagle/jena-bridge-python/issues/3) | A task with unmeetable preconditions has no way to abstain; fixing #2 alone turns silent failure into silent noise | Design gap |
 | [4](https://github.com/kurtcagle/jena-bridge-python/issues/4) | Scheduler: duplicate provenance per firing, `lastFired` never populated, `triggerType` leaks blank-node labels | Medium — affects ODRL cap accuracy |
@@ -975,10 +977,10 @@ instance these were found on, is suspended pending #2/#3.
 
 In the order that yields the most per unit of work:
 
-1. Diagnose issue #1. Everything else waiting on the write path being fully
-   trustworthy sits behind this — in particular, rule-output SHACL
-   validation would be validating a scratch graph that this bug shows does
-   not always faithfully reach the target.
+1. ~~Diagnose issue #1.~~ **Done (#12 + #14).** The write path being fully
+   trustworthy was the gate on everything below — in particular, rule-output
+   SHACL validation against the scratch graph, which that bug showed did not
+   always faithfully reach the target. That gate is now clear.
 2. A first real target, to test the hook contract against something that
    pushes back. A Postgres subscriber on `pull` would exercise `upsert` and
    `keyPredicate` properly, and the RDF-to-SQL mapping question you logged —
