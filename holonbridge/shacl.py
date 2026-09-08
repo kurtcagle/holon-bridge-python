@@ -15,6 +15,7 @@ Jena is the validator by default so RDF 1.2 payloads are handled correctly.
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -120,6 +121,78 @@ def _fingerprint(result: dict[str, str]) -> tuple[str, ...]:
     )
 
 
+# --- graph-crossing SPARQLConstraint detection --------------------------------
+#
+# Jena's ``/{ds}/shacl?graph=<target>`` service (and, for the identical
+# underlying reason, ``pyshacl`` run over a plain ``rdflib.Graph`` in
+# ``validate_local`` below) validates a single flat graph, never a full
+# dataset. A SPARQLConstraint whose ``sh:select``/``sh:ask`` body contains a
+# ``GRAPH ?g { ... }`` block has no named graphs to iterate over in that
+# context: the pattern matches zero rows and the constraint silently reports
+# conformance instead of firing. Confirmed against raw Fuseki 6.1.0 by Ben
+# Wortley, 2026-09-08 — not a bridge bug, and the same class of failure as
+# the Level1CapabilityNotationConstraint issue on the Node reference
+# implementation. See https://github.com/kurtcagle/holon-bridge-python/issues/2.
+#
+# This is a detection gate, not a fix: neither validator this module calls
+# can actually enforce a graph-crossing constraint today. Failing loud here
+# is a deliberate stopgap until graph-aware constraints can be routed to a
+# validator that sees across named graphs (tracked as a follow-on; see the
+# issue above for the fuller hybrid-architecture discussion). A regex scan
+# for the ``GRAPH`` keyword is a heuristic, not a SPARQL parse — it can in
+# principle mis-flag a body where "graph" only appears in a comment or
+# string literal, but a false-positive rejection prompting a look is a far
+# safer failure than the silent no-op it replaces.
+
+_GRAPH_KEYWORD_RE = re.compile(r"\bGRAPH\b", re.IGNORECASE)
+_SPARQL_CONSTRAINT_PREDICATES = (SH.select, SH.ask)
+
+
+def _graph_crossing_hits(shapes_graph: Graph) -> list[tuple[str, str, list[str]]]:
+    """(constraint node, sh:select-or-sh:ask, owning shape IRIs) for every
+    SPARQL body that references GRAPH — the pattern neither validator below
+    can enforce. ``sh:sparql`` constraints are usually blank nodes, so the
+    owning shape (found via ``?shape sh:sparql <constraint>``) is what a
+    shape author can actually search their Turtle for; it may be empty if
+    the constraint is unreferenced or reached some other way.
+    """
+    hits: list[tuple[str, str, list[str]]] = []
+    for predicate in _SPARQL_CONSTRAINT_PREDICATES:
+        for constraint, _, value in shapes_graph.triples((None, predicate, None)):
+            if _GRAPH_KEYWORD_RE.search(str(value)):
+                owners = [str(s) for s in shapes_graph.subjects(SH.sparql, constraint)]
+                hits.append((str(constraint), str(predicate).rsplit("#", 1)[-1], owners))
+    return hits
+
+
+def _describe_graph_crossing_hit(constraint: str, prop: str, owners: list[str]) -> str:
+    label = ", ".join(owners) if owners else f"<{constraint}>"
+    return f"{label} (sh:{prop})"
+
+
+def _raise_if_graph_crossing(hits: list[tuple[str, str, list[str]]]) -> None:
+    if not hits:
+        return
+    described = "; ".join(_describe_graph_crossing_hit(*hit) for hit in hits)
+    raise ValueError(
+        "shapes graph declares a SPARQLConstraint that references GRAPH "
+        "inside its SPARQL body -- this bridge cannot enforce a "
+        "graph-crossing constraint today (both Jena's dataset-scoped SHACL "
+        "service and pyshacl's local fallback validate a single flat graph "
+        f"with no named graphs to iterate over): {described}. See "
+        "https://github.com/kurtcagle/holon-bridge-python/issues/2."
+    )
+
+
+def _reject_graph_crossing_constraints(shapes_turtle: str) -> None:
+    """Raise ``ValueError`` if ``shapes_turtle`` declares a GRAPH-crossing
+    SPARQLConstraint, rather than let it silently pass every validation.
+    """
+    graph = Graph()
+    graph.parse(data=shapes_turtle, format="turtle")
+    _raise_if_graph_crossing(_graph_crossing_hits(graph))
+
+
 async def validate_full(
     client: FusekiClient,
     conn: Conn,
@@ -149,6 +222,7 @@ async def validate_full(
     shapes = await client.get_graph(conn, shapes_graph)
     if not shapes.strip():
         raise ValueError(f"shapes graph <{shapes_graph}> is empty or absent")
+    _reject_graph_crossing_constraints(shapes)
 
     scratch = _scratch_iri(conn)
     try:
@@ -201,6 +275,7 @@ async def validate_delta(
     shapes = await client.get_graph(conn, shapes_graph)
     if not shapes.strip():
         raise ValueError(f"shapes graph <{shapes_graph}> is empty or absent")
+    _reject_graph_crossing_constraints(shapes)
 
     scratch = _scratch_iri(conn)
     try:
@@ -349,6 +424,7 @@ def validate_local(turtle: str, shapes_turtle: str) -> ValidationReport:
 
     data = Graph().parse(data=turtle, format="turtle")
     shapes = Graph().parse(data=shapes_turtle, format="turtle")
+    _raise_if_graph_crossing(_graph_crossing_hits(shapes))
     conforms, report_graph, _ = pyshacl_validate(
         data, shacl_graph=shapes, inference="none", advanced=True
     )
