@@ -279,6 +279,64 @@ heavier kind of check than everything else here, which is pure local
 validation with no data access) and `sh:minLength`/`sh:maxLength` (trivial
 to add, same shape as `sh:pattern`, just not built yet).
 
+### A FILTER+OPTIONAL gotcha, and the verification habit it implies (2026-09-23)
+
+Confirmed live and reproduced in isolation against this Jena/Fuseki stack —
+a real engine quirk, not a misunderstanding of SPARQL semantics, and not
+specific to either vocabulary above (this bites a query body regardless of
+how its parameters are bound): a `FILTER` placed as a sibling to the
+`OPTIONAL` block whose variables it references, inside the same group, can
+silently match nothing — even when the identical boolean expression,
+computed via `BIND` immediately after that same `OPTIONAL` and then
+checked with a plain `FILTER(?thatVariable)`, evaluates correctly.
+Reproduced with:
+
+```sparql
+{ ?s :hasBeginning ?begin .
+  OPTIONAL { ?s :invalidatedAt ?end }
+  FILTER( ?begin <= ?asOf && (!BOUND(?end) || ?end > ?asOf) )   # matches nothing
+}
+```
+versus the fix:
+```sparql
+{ ?s :hasBeginning ?begin .
+  OPTIONAL { ?s :invalidatedAt ?end }
+}
+BIND( (?begin <= ?asOf) && (!BOUND(?end) || ?end > ?asOf) AS ?valid )
+FILTER(?valid)   # correctly matches
+```
+
+**Why this matters more than an ordinary bug:** the failure mode isn't an
+error, and it isn't an empty result either (which would at least be
+noticeable) — it can instead produce a confidently-wrong, fully-populated
+result set. If the FILTER silently drops every row, any later variable
+that depended on the OPTIONAL's bindings is left genuinely unbound, and if
+that variable is then used as the subject of its own `OPTIONAL { GRAPH
+{ ?thatVar ?p ?o } }` pattern elsewhere in the query (a common idiom for
+"also fetch this entity's label if it resolved to one"), SPARQL treats the
+unbound variable as a free wildcard — a cartesian match against every
+matching subject in the graph, not a narrowing. First caught here only
+because `Player_age-eligibility_as_of` (see Author-supplied SHACL
+parameter shapes above for its sibling `Person_age_as_of`) came back with
+hundreds of rows for what should have been a single-player,
+single-season query: teams, coaches, stadiums, places, even the season
+resource itself all showed up as candidate "evaluated teams", each
+correctly reporting the same (correct) age and eligibility values — a
+result that reads as plausible unless you actually count the rows.
+
+**The resulting habit, worth generalising to every query in this
+registry:** whenever a query combines a `FILTER` with an `OPTIONAL` in
+the same group and the intent is to narrow results — to one row, to
+"current" vs "historical", to a specific match — verify by actually
+running it and counting the rows returned, not by reading the SPARQL and
+confirming it looks correct. Reading the query does not catch this
+failure mode; only a live run with a row count that matches what you
+expect does. If a `FILTER` referencing an `OPTIONAL`-bound variable comes
+back empty, or comes back with far more rows than expected, try isolating
+the computation into a `BIND` immediately after the `OPTIONAL`, then
+`FILTER` on that already-computed variable, before assuming the
+underlying data is at fault.
+
 ### Execution
 
 Confirmed live against `holonbridge/routes/named_queries.py`:
