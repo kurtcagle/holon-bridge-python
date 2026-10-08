@@ -32,8 +32,14 @@
       6. Verifies holonbridge.exe / holonbridge-mcp.exe exist in the venv
 
     -InstallDir defaults to the same path start-holonbridge.ps1 already
-    assumes (C:\ProgramData\jena-bridge-python) so that script's own
+    assumes (C:\ProgramData\holon-bridge-python) so that script's own
     defaults work unmodified afterward.
+
+    Fails loudly: every git and pip command is checked, and an existing
+    checkout whose origin is not the expected repository stops the build
+    (override with -AllowOriginMismatch). A build can no longer report
+    success while installing nothing, or while building a different
+    repository from the one this script names.
 
 .PARAMETER InstallDir
     Where to clone/update the repo. Default matches start-holonbridge.ps1.
@@ -55,6 +61,11 @@
 .PARAMETER ResetVenv
     Remove and recreate the venv even if one already exists.
 
+.PARAMETER AllowOriginMismatch
+    Continue even when the existing checkout's origin is not the repository
+    this script builds. Off by default: building the wrong repository
+    reports success without installing this code.
+
 .EXAMPLE
     .\build-holonbridge-windows.ps1
 
@@ -63,12 +74,13 @@
 #>
 
 param(
-    [string]$InstallDir = "C:\ProgramData\jena-bridge-python",
+    [string]$InstallDir = "C:\ProgramData\holon-bridge-python",
     [string]$VenvFolder = ".venv",
     [string]$Branch     = "main",
     [string]$Extras     = "mcp,shacl,dev",
     [string]$PythonExe  = "python",
-    [switch]$ResetVenv
+    [switch]$ResetVenv,
+    [switch]$AllowOriginMismatch
 )
 
 $ErrorActionPreference = "Stop"
@@ -77,6 +89,21 @@ $MinPyMinor = 10   # pyproject.toml requires-python = ">=3.10"
 
 function Log  { param([string]$Msg) Write-Host "[build-holonbridge] $Msg" }
 function Err  { param([string]$Msg) Write-Host "[build-holonbridge] ERROR: $Msg" -ForegroundColor Red }
+
+# $ErrorActionPreference = "Stop" does not stop on a failing native command
+# (git, pip), so each one is checked explicitly.
+function Assert-Native {
+    param([string]$What)
+    if ($LASTEXITCODE -ne 0) {
+        Err "$What failed (exit code $LASTEXITCODE) -- stopping rather than reporting a build that did not happen."
+        exit 1
+    }
+}
+
+function Get-NormalisedUrl {
+    param([string]$Url)
+    return ($Url.Trim() -replace '\.git$', '').TrimEnd('/').ToLowerInvariant()
+}
 
 # ---------------------------------------------------------------------------
 # 0. Sanity checks
@@ -140,15 +167,33 @@ if (-not (Test-Path $InstallDir)) {
     try {
         New-Item -ItemType Directory -Force -Path (Split-Path $InstallDir -Parent) -ErrorAction Stop | Out-Null
         git clone --branch $Branch $RepoUrl $InstallDir
+        Assert-Native "git clone"
     } catch [System.UnauthorizedAccessException] {
         Err "Access denied creating $InstallDir -- re-run this script from an elevated (Administrator) PowerShell."
         exit 1
     }
 } elseif (Test-Path (Join-Path $InstallDir ".git")) {
+    $origin = (git -C $InstallDir remote get-url origin)
+    Assert-Native "git remote get-url origin"
+    if ((Get-NormalisedUrl $origin) -ne (Get-NormalisedUrl $RepoUrl)) {
+        Err "The existing checkout at $InstallDir has origin"
+        Err "  $origin"
+        Err "but this script builds"
+        Err "  $RepoUrl"
+        Err "Building the wrong repository reports success without installing this code."
+        Err "Repoint it with:  git -C $InstallDir remote set-url origin $RepoUrl"
+        Err "(histories that have diverged need a fresh clone instead), or pass"
+        Err "-AllowOriginMismatch to build it anyway."
+        if (-not $AllowOriginMismatch) { exit 1 }
+        Log "-AllowOriginMismatch passed -- continuing against $origin"
+    }
     Log "Updating existing checkout at $InstallDir..."
     git -C $InstallDir fetch origin $Branch
+    Assert-Native "git fetch"
     git -C $InstallDir checkout $Branch
+    Assert-Native "git checkout"
     git -C $InstallDir pull --ff-only origin $Branch
+    Assert-Native "git pull --ff-only"
 } else {
     Err "$InstallDir exists but isn't a git checkout -- refusing to overwrite it."
     Err "Move it aside or pass a fresh -InstallDir."
@@ -170,6 +215,7 @@ if ($ResetVenv -and (Test-Path $VenvDir)) {
 if (-not (Test-Path $VenvDir)) {
     Log "Creating venv at $VenvDir..."
     & $PythonExe -m venv $VenvDir
+    Assert-Native "venv creation"
 } else {
     Log "Reusing existing venv at $VenvDir"
 }
@@ -182,6 +228,7 @@ if (-not (Test-Path $venvPython)) {
 }
 
 & $venvPython -m pip install --upgrade pip --quiet
+Assert-Native "pip self-upgrade"
 
 # ---------------------------------------------------------------------------
 # 4. Install the package (constrained, matching the repo's own README recipe)
@@ -194,6 +241,12 @@ if (Test-Path $constraintsPath) {
 } else {
     Log "No constraints.txt found -- installing unconstrained"
     & $venvPip install -e ".[$Extras]"
+}
+if ($LASTEXITCODE -ne 0) {
+    Err "pip install failed (exit code $LASTEXITCODE) -- see the pip output above."
+    Err "A pin in constraints.txt with no wheel for Python $pyMajor.$pyMinor is a common cause;"
+    Err "re-run with -PythonExe pointing at a newer Python if so."
+    exit 1
 }
 
 # ---------------------------------------------------------------------------
@@ -247,6 +300,7 @@ Write-Host ""
 Write-Host "  Install dir : $InstallDir"
 Write-Host "  Venv        : $VenvDir"
 Write-Host "  Env file    : $EnvFile"
+Write-Host "  Commit      : $(git -C $InstallDir log --oneline -1)"
 Write-Host ""
 Write-Host "Still manual, by design:"
 Write-Host "  - Fuseki itself (FusekiPath in start-holonbridge.ps1 must point at a"
