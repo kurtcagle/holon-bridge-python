@@ -199,6 +199,10 @@ class CreateHolonRequest(BaseModel):
     )
     shapes_graph: str | None = None
     mode: str = Field(default="merge", pattern="^(merge|replace)$")
+    force_shrink: bool = Field(
+        default=False,
+        description="Allow mode=replace to leave the graph with under 10% of its triples (409 otherwise).",
+    )
     reduction_rule_id: str | None = None
 
 
@@ -272,6 +276,8 @@ async def create_holon(
         shacl_required=settings.shacl_required,
         shacl_delta=settings.shacl_delta,
         animus=animus,
+        guard_shrink=True,
+        force_shrink=body.force_shrink,
     )
     return {**result, "sourceBlock": block.id or "(unlabelled)", "sourceLang": block.lang}
 

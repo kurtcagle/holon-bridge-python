@@ -124,10 +124,14 @@ async def push_turtle(
     shapes_graph: str | None = None,
     mode: str = "merge",
     reduction_rule_id: str | None = None,
+    force_shrink: bool = False,
 ) -> dict:
     """Push Turtle into a named graph.
 
-    ``mode`` is ``merge`` (GSP POST) or ``replace`` (GSP PUT). Supplying
+    ``mode`` is ``merge`` (GSP POST) or ``replace`` (GSP PUT). A ``replace``
+    that would leave the graph with under 10% of its current triples is
+    refused with a 409 (a partial payload emptied a graph on 6 Oct 2026);
+    pass ``force_shrink=True`` only when that is really intended. Supplying
     ``shapes_graph`` validates before the write and rejects on new violations.
 
     ``reduction_rule_id`` names a registered named rule that reduces the
@@ -145,6 +149,7 @@ async def push_turtle(
             "shapes_graph": shapes_graph,
             "mode": mode,
             "reduction_rule_id": reduction_rule_id,
+            "force_shrink": force_shrink,
         },
     )
 
@@ -188,6 +193,7 @@ async def create_holon(
     shapes_graph: str | None = None,
     mode: str = "merge",
     reduction_rule_id: str | None = None,
+    force_shrink: bool = False,
 ) -> dict:
     """Create or merge into a holon from a DataBook message.
 
@@ -215,6 +221,7 @@ async def create_holon(
             "shapes_graph": shapes_graph,
             "mode": mode,
             "reduction_rule_id": reduction_rule_id,
+            "force_shrink": force_shrink,
         },
     )
 

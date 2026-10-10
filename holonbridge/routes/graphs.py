@@ -94,6 +94,14 @@ class PushRequest(BaseModel):
     graph_iri: str = Field(..., min_length=1)
     shapes_graph: str | None = None
     mode: str = Field(default="merge", pattern="^(merge|replace)$")
+    force_shrink: bool = Field(
+        default=False,
+        description=(
+            "Allow mode=replace to leave the graph with under 10% of its current "
+            "triples (refused with a 409 by default, to stop a partial payload "
+            "emptying a graph). Ignored for merge."
+        ),
+    )
     reduction_rule_id: str | None = Field(
         default=None,
         description=(
@@ -241,6 +249,8 @@ async def push_turtle(
         shacl_required=settings.shacl_required,
         shacl_delta=settings.shacl_delta,
         animus=animus,
+        guard_shrink=True,
+        force_shrink=body.force_shrink,
     )
 
 
