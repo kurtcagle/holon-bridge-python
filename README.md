@@ -990,8 +990,14 @@ else before it ever reaches GitHub.
 `sub`=GitHub login, default 12h lifetime (`MCP_JWT_TTL_SECONDS`). Verification
 is signature and expiry only — a login removed from the allowlist mid-session
 is not re-checked until its token expires, which trades a short TTL for not
-needing a lookup on every request. Revocation-on-demand isn't built; shortening
-`MCP_JWT_TTL_SECONDS` is the lever until it is.
+needing a lookup on every request. `/token` also issues a **refresh token**
+(`MCP_REFRESH_TTL_SECONDS`, default 30 days, renewed at each use): opaque,
+stored only as a SHA-256 hash, rotated on every use, and a replayed one revokes
+its whole family. The allowlist is re-checked at every refresh, so a removed
+login stops working within one `MCP_JWT_TTL_SECONDS`, which can therefore be
+kept short. Set `MCP_DATA_DIR` so client registrations and refresh tokens
+survive a restart (SQLite, single host); unset, they live in memory and a
+restart forces re-registration and re-authorisation.
 
 **The well-known/register/authorize/token endpoints are reachable with no
 credential at all**, deliberately — an OAuth authorization server that
