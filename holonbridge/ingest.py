@@ -61,6 +61,7 @@ validated exactly as before. A caller-supplied ``shapes_graph`` means
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -73,6 +74,45 @@ from .conn import Conn
 from .fuseki import FusekiClient, FusekiError
 from .touched import turtle_predicates
 from .trigger_hook import after_write
+
+logger = logging.getLogger(__name__)
+
+#: Replace-shrink guard (second architecture review, 10 Oct 2026, N6). On 6 Oct 2026 a
+#: ``push_turtle mode=replace`` with a partial payload emptied a 167-triple graph to 1
+#: triple and returned ``conforms: true``: replace is a correct operation, so nothing
+#: flagged it. When a caller asks for the guard, a replace whose payload would leave the
+#: graph with fewer than ``REPLACE_SHRINK_FLOOR`` of its current triples is refused with
+#: a 409 unless the caller says ``force_shrink``. Graphs smaller than
+#: ``REPLACE_SHRINK_MIN_EXISTING`` triples are never guarded.
+REPLACE_SHRINK_FLOOR = 0.10
+REPLACE_SHRINK_MIN_EXISTING = 20
+
+
+async def _count_triples(client: FusekiClient, conn: Conn, graph_iri: str) -> int:
+    result = await client.select(
+        conn, f"SELECT (COUNT(*) AS ?n) WHERE {{ GRAPH <{graph_iri}> {{ ?s ?p ?o }} }}"
+    )
+    rows = result.get("results", {}).get("bindings", [])
+    return int(rows[0]["n"]["value"]) if rows else 0
+
+
+async def _replace_sizes(
+    client: FusekiClient, conn: Conn, graph_iri: str, turtle: str
+) -> tuple[int, int]:
+    """(triples now in the target, triples the payload would leave it with).
+
+    The payload is counted by Jena, in a throwaway graph, because Jena is the
+    syntax authority here (rdflib cannot read RDF 1.2) and a text count of
+    statements would be a guess. The throwaway graph is always dropped.
+    """
+    before = await _count_triples(client, conn, graph_iri)
+    scratch = shacl_mod._scratch_iri(conn)
+    try:
+        await client.post_graph(conn, scratch, turtle)
+        after = await _count_triples(client, conn, scratch)
+    finally:
+        await client.drop_graph(conn, scratch)
+    return before, after
 
 
 async def write_turtle_to_graph(
@@ -87,6 +127,8 @@ async def write_turtle_to_graph(
     shacl_required: bool,
     shacl_delta: bool,
     animus: Animus,
+    guard_shrink: bool = False,
+    force_shrink: bool = False,
 ) -> dict[str, Any]:
     """ACL-check, optionally SHACL-validate, then write ``turtle`` into
     ``graph_iri``. Raises :class:`~fastapi.HTTPException` on any refusal —
@@ -194,7 +236,44 @@ async def write_turtle_to_graph(
                     detail={"error": "shacl_violation", **report_payload},
                 )
 
+        triples_before: int | None = None
+        triples_after: int | None = None
         try:
+            if mode == "replace" and guard_shrink:
+                triples_before, triples_after = await _replace_sizes(client, conn, graph_iri, turtle)
+                shrinks = (
+                    triples_before >= REPLACE_SHRINK_MIN_EXISTING
+                    and triples_after < REPLACE_SHRINK_FLOOR * triples_before
+                )
+                if shrinks and not force_shrink:
+                    reason = (
+                        f"replace refused: would shrink the graph from {triples_before} to "
+                        f"{triples_after} triples"
+                    )
+                    audit.annotate(reason=reason)
+                    logger.warning("%s (graph %s)", reason, graph_iri)
+                    raise HTTPException(
+                        status.HTTP_409_CONFLICT,
+                        detail={
+                            "error": "replace_would_shrink_graph",
+                            "graph": graph_iri,
+                            "triples_before": triples_before,
+                            "triples_after": triples_after,
+                            "message": (
+                                f"mode=replace would leave <{graph_iri}> with {triples_after} of its "
+                                f"{triples_before} triples (under {int(REPLACE_SHRINK_FLOOR * 100)}%), "
+                                "which usually means a partial payload. If this is intended, send "
+                                "force_shrink=true; otherwise use mode=merge."
+                            ),
+                        },
+                    )
+                if shrinks:
+                    logger.warning(
+                        "replace forced: %s shrinks from %d to %d triples", graph_iri,
+                        triples_before, triples_after,
+                    )
+                else:
+                    logger.info("replace %s: %d -> %d triples", graph_iri, triples_before, triples_after)
             if mode == "replace":
                 await client.put_graph(conn, graph_iri, turtle)
             else:
@@ -222,4 +301,5 @@ async def write_turtle_to_graph(
         "validation": report_payload,
         "authorisedBy": decision.matched_grant,
         "authorisedReason": decision.reason,
+        **({"triplesBefore": triples_before, "triplesAfter": triples_after} if triples_before is not None else {}),
     }
