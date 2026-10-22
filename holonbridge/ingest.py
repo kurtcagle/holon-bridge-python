@@ -51,7 +51,8 @@ which graph and why. ``annotate`` is a no-op outside a request.
 CHANGED 2026-09-30 (context pack): when the caller did not name a shapes
 graph of their own, the write is also validated against the dataset's
 context shapes graph (``urn:{dataset}:shacl-context``) with the dataset's
-ontology merged into the validation target -- see
+ontology and taxonomy merged into the validation target (CHANGED 2026-10-21:
+the taxonomy graph joined the ontology as read-only context) -- see
 ``shacl.validate_context_pack``. The two results are combined and either
 can refuse the write with a 422. A dataset with no context shapes is
 validated exactly as before. A caller-supplied ``shapes_graph`` means

@@ -69,6 +69,19 @@ shapes graph, holding only shapes that need that context; it is validated
 against the target *merged with* ``validation_context_graphs``. The
 ordinary ``shacl`` graph is unchanged and still validated against the
 target alone. See holonbridge/shacl.py for the mechanism.
+
+CHANGED 2026-10-21: added the ``taxonomy`` graph role and made it a second
+validation context graph beside the ontology. A shape that checks a value
+against a controlled vocabulary (``sh:class skos:Concept``, scheme
+membership, a ``sh:node`` into a concept shape) has the same problem as one
+that needs the ontology: validated against the data graph alone it either
+cannot see the concept or reports a false violation. Taxonomies are kept in
+their own graph, not the ontology graph, because they change at a different
+rate and are edited by different people, so they can be granted, versioned
+and replaced independently of the ontology. Like the ontology, the taxonomy
+is read-only context -- merged into a scratch copy, never written to -- and
+is chosen by the dataset, never by a request. A dataset with no taxonomy
+graph is unaffected (``ADD SILENT`` of an absent graph is a no-op).
 """
 
 from __future__ import annotations
@@ -88,6 +101,7 @@ GRAPH_ROLES: Final = (
     "scene",
     "shacl",
     "shacl-context",
+    "taxonomy",
     "named-queries",
     "named-projections",
     "named-rules",
@@ -278,13 +292,26 @@ class Conn:
         graph is run. Read-only context: their content is added to a scratch
         copy and never written to.
 
-        Deliberately just the ontology graph. Validating the union of every
-        graph in the dataset adds noise (materialised projection graphs hold
-        direct values the shapes do not govern) and pulls in graphs a caller
-        may not be entitled to read. Derived from the dataset, never taken
-        from a request, for the same reason.
+        Deliberately just the two read-only reference graphs: the ontology
+        and the taxonomy (controlled vocabularies). Validating the union of
+        every graph in the dataset adds noise (materialised projection graphs
+        hold direct values the shapes do not govern) and pulls in graphs a
+        caller may not be entitled to read. Derived from the dataset, never
+        taken from a request, for the same reason.
+
+        The taxonomy graph is optional. A dataset that has none is unaffected:
+        the context is merged with ``ADD SILENT``, so an absent graph is a
+        no-op.
         """
-        return (self.ontology_graph,)
+        return (self.ontology_graph, self.taxonomy_graph)
+
+    @property
+    def taxonomy_graph(self) -> str:
+        """Controlled vocabularies (SKOS concept schemes and the like), kept
+        apart from the ontology so they can change, be versioned and be
+        granted separately. Optional -- a dataset with no content here
+        behaves exactly as before."""
+        return self.graph("taxonomy")
 
     @property
     def scene_graph(self) -> str:

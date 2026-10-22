@@ -155,7 +155,11 @@ def test_context_graph_names_follow_bank_scoping():
         bank_scoped_datasets=frozenset({"worldtest"}),
     )
     assert conn.context_shapes_graph == "urn:holongraph:worldtest:shacl-context"
-    assert conn.validation_context_graphs == ("urn:holongraph:worldtest:ontology",)
+    assert conn.taxonomy_graph == "urn:holongraph:worldtest:taxonomy"
+    assert conn.validation_context_graphs == (
+        "urn:holongraph:worldtest:ontology",
+        "urn:holongraph:worldtest:taxonomy",
+    )
 
 
 def test_shacl_context_is_a_declared_role_and_is_described():
@@ -163,9 +167,19 @@ def test_shacl_context_is_a_declared_role_and_is_described():
     assert _conn().describe()["graphs"]["shacl-context"] == "urn:ds:shacl-context"
 
 
-def test_the_validation_context_is_the_ontology_and_nothing_else():
+def test_taxonomy_is_a_declared_role_and_is_described():
+    assert "taxonomy" in GRAPH_ROLES
+    assert _conn().taxonomy_graph == "urn:ds:taxonomy"
+    assert _conn().describe()["graphs"]["taxonomy"] == "urn:ds:taxonomy"
+
+
+def test_the_validation_context_is_the_ontology_and_the_taxonomy_and_nothing_else():
     conn = _conn()
-    assert conn.validation_context_graphs == (conn.ontology_graph,)
+    assert conn.validation_context_graphs == (conn.ontology_graph, conn.taxonomy_graph)
+    # the context pack and every other graph stay out of the context
+    assert conn.shapes_graph not in conn.validation_context_graphs
+    assert conn.context_shapes_graph not in conn.validation_context_graphs
+    assert conn.holons_graph not in conn.validation_context_graphs
 
 
 # --- validate_full ----------------------------------------------------------------
@@ -366,7 +380,50 @@ async def test_the_context_pack_uses_the_context_shapes_with_the_ontology_merged
     )
     assert result is not None and result.conforms
     assert "PositiveBalanceShape" in client.validated[0][1]  # the context shapes, not the ordinary ones
-    assert [g for g, _ in client.adds()] == [conn.ontology_graph]
+    assert [g for g, _ in client.adds()] == [conn.ontology_graph, conn.taxonomy_graph]
+
+
+async def test_a_dataset_with_no_taxonomy_graph_is_validated_as_before():
+    """The taxonomy is optional: ``ADD SILENT`` of an absent graph adds
+    nothing, so a dataset that never created one sees only its ontology."""
+    conn = _conn()
+    client = _client(conn)  # populated: holons, ontology, shacl -- no taxonomy
+    assert conn.taxonomy_graph not in client.populated
+    await shacl_mod.validate_full(
+        client,
+        conn,
+        turtle=PAYLOAD,
+        shapes_graph=conn.shapes_graph,
+        target_graph=conn.holons_graph,
+        context_graphs=conn.validation_context_graphs,
+    )
+    scratch = client.validated[0][0]
+    assert client.adds() == [(conn.ontology_graph, scratch), (conn.taxonomy_graph, scratch)]
+    # the absent taxonomy contributed nothing, and was neither created nor written
+    assert conn.taxonomy_graph not in client.populated
+    assert ("post", conn.taxonomy_graph) not in client.events
+    assert ("put", conn.taxonomy_graph) not in client.events
+
+
+async def test_the_taxonomy_is_read_as_context_and_never_written_or_dropped():
+    conn = _conn()
+    client = _client(conn)
+    client.populated.add(conn.taxonomy_graph)
+    await shacl_mod.validate_delta(
+        client,
+        conn,
+        turtle=PAYLOAD,
+        shapes_graph=conn.shapes_graph,
+        target_graph=conn.holons_graph,
+        context_graphs=conn.validation_context_graphs,
+    )
+    # added to both the baseline and the merged scratch graphs...
+    taxonomy_adds = [scratch for graph, scratch in client.adds() if graph == conn.taxonomy_graph]
+    assert sorted(taxonomy_adds) == sorted(t for t, _ in client.validated)
+    # ...and left exactly as it was
+    assert conn.taxonomy_graph in client.populated
+    assert ("drop", conn.taxonomy_graph) not in client.events
+    assert ("post", conn.taxonomy_graph) not in client.events
 
 
 async def test_delta_validation_of_the_context_pack_requires_a_target():
@@ -487,7 +544,10 @@ async def test_a_conforming_context_pack_lets_the_write_through_and_is_reported(
     result = await _write(client, conn)
     assert ("post", conn.holons_graph) in client.events
     assert result["validation"]["packs"]["context"]["conforms"] is True
-    assert result["validation"]["packs"]["context"]["context_graphs"] == [conn.ontology_graph]
+    assert result["validation"]["packs"]["context"]["context_graphs"] == [
+        conn.ontology_graph,
+        conn.taxonomy_graph,
+    ]
 
 
 async def test_a_context_pack_violation_refuses_the_write_and_nothing_reaches_the_real_graph(allow_writes):

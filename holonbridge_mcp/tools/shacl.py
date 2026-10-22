@@ -23,7 +23,7 @@ async def validate_turtle(
 
     With no ``shapes_graph`` named, the dataset's context shapes graph
     (``urn:{dataset}:shacl-context``), if it has one, is also run against the
-    target merged with the dataset's ontology, as the write path does
+    target merged with the dataset's ontology and taxonomy, as the write path does
     (``context=False`` turns that off). ``merge_context=True`` instead
     validates the named ``shapes_graph`` against the target with the ontology
     merged in -- for trying a context pack before it is installed. Which
