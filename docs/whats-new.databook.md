@@ -65,7 +65,7 @@ process:
   write copies the context graphs into a scratch graph (twice in delta mode),
   so a very large taxonomy makes writes slower; not measured here. Shapes that
   need the taxonomy belong in `shacl-context`.
-  ([PR NUMBER](https://github.com/kurtcagle/holon-bridge-python/pull/NUMBER))
+  ([#54](https://github.com/kurtcagle/holon-bridge-python/pull/54))
 
 ### 2026-10-07
 
@@ -444,5 +444,5 @@ hb:release-2026-10-21-a a hb:ReleaseNote ;
     dcterms:date "2026-10-21"^^xsd:date ;
     rdfs:label "SHACL context: a taxonomy graph role, merged into the validation context beside the ontology" ;
     dcterms:description "New graph role taxonomy (urn:{dataset}:taxonomy) for controlled vocabularies, kept apart from the ontology so they can be granted, versioned and replaced independently. Conn.validation_context_graphs is now (ontology, taxonomy), so shapes in shacl-context that check a value against a concept can see the concept. The taxonomy is read-only context, added to the scratch copy with ADD SILENT and never written to, chosen by the dataset and never by a request. A dataset with no taxonomy graph behaves exactly as before. Every validated write now copies the context graphs into a scratch graph (twice in delta mode), so a very large taxonomy will slow writes; not measured. Tested with the existing fake client, not a live Fuseki run." ;
-    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/NUMBER> .
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/54> .
 ```
