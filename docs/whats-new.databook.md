@@ -2,9 +2,9 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.11
+version: 1.0.12
 created: 2026-09-27
-updated: 2026-10-07
+updated: 2026-10-21
 author:
   - name: Kurt Cagle
     iri: https://holongraph.com/people/kurt-cagle
@@ -45,6 +45,27 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-10-21
+
+- **SHACL context: a `taxonomy` graph role, merged into the validation context beside the ontology.**
+  A shape that checks a value against a controlled vocabulary (`sh:class
+  skos:Concept`, concept-scheme membership, a `sh:node` into a concept shape)
+  has the same problem the context pack was built for: validated against the
+  data graph alone it cannot see the concept. Taxonomies get their own graph,
+  `urn:{dataset}:taxonomy`, rather than living in the ontology graph, because
+  they change at a different rate, are edited by different people, and should
+  be grantable, versionable and replaceable on their own.
+  `Conn.validation_context_graphs` is now `(ontology, taxonomy)`. Like the
+  ontology, the taxonomy is read-only context: `ADD`-ed to the scratch copy,
+  never written to, chosen by the dataset and never by a request.
+  **No behaviour change for a dataset with no taxonomy graph** (`ADD SILENT`
+  of an absent graph is a no-op), and the ordinary `shacl` graph is still
+  validated against the target alone. Cost to be aware of: every validated
+  write copies the context graphs into a scratch graph (twice in delta mode),
+  so a very large taxonomy makes writes slower; not measured here. Shapes that
+  need the taxonomy belong in `shacl-context`.
+  ([#54](https://github.com/kurtcagle/holon-bridge-python/pull/54))
 
 ### 2026-10-07
 
@@ -418,4 +439,10 @@ hb:release-2026-10-04-a a hb:ReleaseNote ;
     rdfs:label "find_delegation: fixed a Jena ARQ crash on the common zero-delegations case" ;
     dcterms:description "find_delegation 500'd against real Fuseki with ARQInternalErrorException: Peek iterator is already empty, on any dataset with no matching Delegation triples for the bound pattern -- the common case, hit via check_write/authorize_query for any identity with no grantsWrite. The rdflib test harness in tests/test_delegation*.py cannot see this; it's a Jena ARQ optimizer bug. Three independent SPARQL-level rewrites (merging two FILTER NOT EXISTS into one via UNION, merging delegatedGraph into the main predicate chain, VALUES instead of a FILTER equality on ?delegator) each fixed their own isolated case live against Fuseki but still crashed combined -- none composed. Fixed by replacing the one correlated query with the simplest possible candidate query (delegate + permission only) plus validity-window, revocation, delegator-status and target/delegator narrowing in Python instead of SPARQL. Verified against the real running service: an unprivileged write now returns a clean 403, not a 500; a real delegation lets the write through with correct attribution. Full test suite unchanged." ;
     rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/43> .
+
+hb:release-2026-10-21-a a hb:ReleaseNote ;
+    dcterms:date "2026-10-21"^^xsd:date ;
+    rdfs:label "SHACL context: a taxonomy graph role, merged into the validation context beside the ontology" ;
+    dcterms:description "New graph role taxonomy (urn:{dataset}:taxonomy) for controlled vocabularies, kept apart from the ontology so they can be granted, versioned and replaced independently. Conn.validation_context_graphs is now (ontology, taxonomy), so shapes in shacl-context that check a value against a concept can see the concept. The taxonomy is read-only context, added to the scratch copy with ADD SILENT and never written to, chosen by the dataset and never by a request. A dataset with no taxonomy graph behaves exactly as before. Every validated write now copies the context graphs into a scratch graph (twice in delta mode), so a very large taxonomy will slow writes; not measured. Tested with the existing fake client, not a live Fuseki run." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/54> .
 ```
