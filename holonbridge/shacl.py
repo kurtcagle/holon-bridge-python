@@ -24,6 +24,11 @@ dataset's second shapes graph (``urn:{dataset}:shacl-context``) that way, and
 ``combine_reports`` folds its result into the ordinary one. No ``GRAPH``
 keyword is involved, so the graph-crossing guard below is unaffected; a
 context pack is ordinary flat SPARQL evaluated over a merged graph.
+
+CHANGED 2026-10-23: for a Conn with ``store_kind == "fluree"`` the three entry
+points above take a read-only path (``fluree_shacl``): read the graphs over GET,
+merge in memory, validate offline with the Fluree CLI. No scratch graph, no
+write. The Fuseki code below is untouched.
 """
 
 from __future__ import annotations
@@ -37,6 +42,7 @@ from typing import Any
 from rdflib import Graph, Namespace, URIRef
 from rdflib.namespace import RDF
 
+from . import fluree_shacl
 from .conn import Conn
 from .fuseki import FusekiClient, FusekiError
 from .params import is_iri_datatype
@@ -279,11 +285,22 @@ async def validate_full(
     that needs them visible -- the ontology, typically -- can see them. They
     are copied, never modified. Each IRI is checked before any Fuseki call.
     """
+    if fluree_shacl.is_fluree(conn):
+        fluree_shacl.reject_reduction(reduction_rule_id)
     shapes = await client.get_graph(conn, shapes_graph)
     if not shapes.strip():
         raise ValueError(f"shapes graph <{shapes_graph}> is empty or absent")
     _reject_graph_crossing_constraints(shapes, shapes_graph)
     context_graphs = _checked_context_graphs(context_graphs)
+
+    if fluree_shacl.is_fluree(conn):
+        return parse_report(
+            await fluree_shacl.full_report(
+                client, conn, turtle=turtle, shapes=shapes, target_graph=target_graph,
+                write_mode=write_mode, context_graphs=context_graphs,
+            ),
+            mode="full",
+        )
 
     scratch = _scratch_iri(conn)
     try:
@@ -347,11 +364,25 @@ async def validate_delta(
     as the merged state is. Without context the baseline is validated in
     place, as before.
     """
+    if fluree_shacl.is_fluree(conn):
+        fluree_shacl.reject_reduction(reduction_rule_id)
     shapes = await client.get_graph(conn, shapes_graph)
     if not shapes.strip():
         raise ValueError(f"shapes graph <{shapes_graph}> is empty or absent")
     _reject_graph_crossing_constraints(shapes, shapes_graph)
     context_graphs = _checked_context_graphs(context_graphs)
+
+    if fluree_shacl.is_fluree(conn):
+        baseline_ttl, merged_turtle = await fluree_shacl.delta_reports(
+            client, conn, turtle=turtle, shapes=shapes, target_graph=target_graph,
+            write_mode=write_mode, context_graphs=context_graphs,
+        )
+        baseline = (
+            parse_report(baseline_ttl)
+            if baseline_ttl is not None
+            else ValidationReport(conforms=True, mode="delta")
+        )
+        return _delta_result(baseline, parse_report(merged_turtle), merged_turtle)
 
     scratch = _scratch_iri(conn)
     baseline_scratch = _scratch_iri(conn) if context_graphs else None
@@ -404,6 +435,12 @@ async def validate_delta(
         if baseline_scratch is not None:
             await client.drop_graph(conn, baseline_scratch)
 
+    return _delta_result(baseline, merged, merged_turtle)
+
+
+def _delta_result(
+    baseline: ValidationReport, merged: ValidationReport, merged_turtle: str
+) -> ValidationReport:
     known = {_fingerprint(r) for r in baseline.results}
     introduced = [r for r in merged.results if _fingerprint(r) not in known]
 
@@ -479,7 +516,13 @@ async def validate_context_pack(
     introduces, like :func:`validate_delta`; otherwise the merged state is
     validated in full, like :func:`validate_full`.
     """
-    if not await _graph_has_content(client, conn, conn.context_shapes_graph):
+    if fluree_shacl.is_fluree(conn):
+        # Read-only: a GET, not an ASK, and no reduction rules (refused below).
+        fluree_shacl.reject_reduction(reduction_rule_id)
+        has_pack = bool((await client.get_graph(conn, conn.context_shapes_graph)).strip())
+    else:
+        has_pack = await _graph_has_content(client, conn, conn.context_shapes_graph)
+    if not has_pack:
         return None
     common: dict[str, Any] = {
         "turtle": turtle,
