@@ -39,7 +39,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from rdflib import Graph, Namespace, URIRef
+from rdflib import BNode, Graph, Namespace, URIRef
 from rdflib.namespace import RDF
 
 from . import fluree_shacl
@@ -125,7 +125,9 @@ def parse_report(turtle: str, *, mode: str = "full") -> ValidationReport:
             value = graph.value(node, predicate)
             if value is not None:
                 key = str(predicate).rsplit("#", 1)[-1]
-                entry[key] = str(value)
+                # A blank node has no stable name: the engine invents a fresh label on
+                # every run. Mark it so _fingerprint can leave it out when diffing.
+                entry[key] = f"_:{value}" if isinstance(value, BNode) else str(value)
         results.append(entry)
 
     blocking = [r for r in results if is_blocking(r)]
@@ -136,9 +138,12 @@ def parse_report(turtle: str, *, mode: str = "full") -> ValidationReport:
 
 def _fingerprint(result: dict[str, str]) -> tuple[str, ...]:
     """Stable identity for a validation result, used to diff two reports."""
-    return tuple(
-        result.get(str(field).rsplit("#", 1)[-1], "") for field in _RESULT_FIELDS
-    )
+    # Blank-node values (an anonymous sh:property shape as sourceShape, an anonymous
+    # focus node or value) are labelled afresh on every validation run, so they cannot
+    # take part in the comparison; the rest of the tuple (path, component, message,
+    # severity, focus node when named) still identifies the result.
+    values = (result.get(str(field).rsplit("#", 1)[-1], "") for field in _RESULT_FIELDS)
+    return tuple("" if v.startswith("_:") else v for v in values)
 
 
 # --- graph-crossing SPARQLConstraint detection --------------------------------
