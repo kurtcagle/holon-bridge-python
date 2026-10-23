@@ -213,6 +213,7 @@ def _build_conn(*, bank_name: str, dataset: str | None, settings: Settings) -> C
         bank_name=bank.name,
         token=bank.auth_token,
         bank_scoped_datasets=bank.bank_scoped_datasets,
+        store_kind=settings.store_kind,
     )
 
 

@@ -34,14 +34,15 @@ def pytest_collection_modifyitems(config, items):
     The default run is unchanged: those tests collect, report as skipped, and
     never start a server. See ``tests/jena_support.py`` to enable the lane.
     """
-    from . import jena_support
+    from . import fluree_support, jena_support
 
-    if jena_support.configured():
-        return
-    skip = pytest.mark.skip(reason=jena_support.skip_reason())
-    for item in items:
-        if "jena" in item.keywords:
-            item.add_marker(skip)
+    for marker, support in (("jena", jena_support), ("fluree", fluree_support)):
+        if support.configured():
+            continue
+        skip = pytest.mark.skip(reason=support.skip_reason())
+        for item in items:
+            if marker in item.keywords:
+                item.add_marker(skip)
 
 
 @pytest.fixture(autouse=True)
