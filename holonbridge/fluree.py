@@ -11,7 +11,9 @@ Differences from Fuseki that this class owns:
 * end-user identity is forwarded per request (``fluree-identity`` and optional
   ``fluree-policy-class``) from ``Conn.identity`` / ``Conn.policy_class``; the
   bearer token is the backend's policy-authority token;
-* ``shacl_validate`` raises until phase 2.
+* ``shacl_validate`` raises: Fluree has no SHACL endpoint over a graph. The
+  write gate is the read-only merge check in ``fluree_shacl`` (chosen by
+  ``shacl.py`` from ``conn.store_kind``).
 
 A 200 from update or Graph Store writes does NOT prove the write applied (a
 policy-filtered DELETE and a lost compare-and-set both return 200 with no
@@ -50,7 +52,9 @@ class FlureeClient(FusekiClient):
     async def shacl_validate(
         self, conn: Conn, *, target_graph: str, shapes_turtle: str
     ) -> str:
-        raise NotImplementedError("phase 2")
+        raise NotImplementedError(
+            "phase 2: no SHACL endpoint on Fluree; shacl.py uses the read-only merge gate (fluree_shacl)"
+        )
 
     async def list_datasets(self, conn: Conn) -> list[dict[str, Any]]:
         """Ledgers, in the same shape as Fuseki's datasets.
