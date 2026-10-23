@@ -22,6 +22,7 @@ import pytest
 
 from holonbridge import fluree_shacl, shacl
 from holonbridge.conn import Conn
+from holonbridge.fluree import FlureeClient
 
 from . import fluree_support as fs
 
@@ -121,7 +122,7 @@ async def env(request, flavour):
         server.reset()
         ds = fs.FlureeDataset(server)
         conn = fs.conn_for(ds)
-        client = fs.FlureeClient()
+        client = FlureeClient()
         e = Env(conn, client, lambda g, t: ds.get_context(g).parse(t))
         closer = client.aclose
     e.shape_style = request.param
