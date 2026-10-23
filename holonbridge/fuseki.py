@@ -64,6 +64,10 @@ class FusekiClient:
             headers["Authorization"] = f"Bearer {conn.token}"
         return headers
 
+    @staticmethod
+    def _gsp_url(conn: Conn, graph_iri: str) -> str:
+        return f"{conn.gsp_endpoint}?{urlencode({'graph': graph_iri})}"
+
     async def _post(
         self,
         url: str,
@@ -153,7 +157,7 @@ class FusekiClient:
         await self._gsp(conn, graph_iri, turtle, method="POST")
 
     async def get_graph(self, conn: Conn, graph_iri: str) -> str:
-        url = f"{conn.gsp_endpoint}?{urlencode({'graph': graph_iri})}"
+        url = self._gsp_url(conn, graph_iri)
         response = await self._client.get(
             url, headers=self._headers(conn, {"Accept": TURTLE})
         )
@@ -169,7 +173,7 @@ class FusekiClient:
     async def _gsp(
         self, conn: Conn, graph_iri: str, turtle: str, *, method: str
     ) -> None:
-        url = f"{conn.gsp_endpoint}?{urlencode({'graph': graph_iri})}"
+        url = self._gsp_url(conn, graph_iri)
         response = await self._client.request(
             method,
             url,
