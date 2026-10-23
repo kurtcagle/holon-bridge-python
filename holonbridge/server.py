@@ -18,7 +18,7 @@ from fastapi import FastAPI
 from .acting_as import ActingAsStore
 from .audit import AuditMiddleware
 from .config import BankStore, Settings, get_settings
-from .fuseki import FusekiClient
+from .store import make_client
 from .cache import RegistryCache
 from .conn import resolve_conn
 from .persona_state import PersonaStore
@@ -60,7 +60,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         application.state.settings = settings
         application.state.banks = BankStore(settings)
-        application.state.fuseki = FusekiClient(timeout=settings.request_timeout)
+        application.state.fuseki = make_client(settings.store_kind, timeout=settings.request_timeout)
         application.state.registry = RegistryCache(ttl=settings.named_query_ttl)
         # Per-person persona session state -- see persona_state.py for why
         # this lives here (one per process, keyed by resolved Person)
