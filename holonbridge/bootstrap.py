@@ -100,6 +100,20 @@ ASK {{
     return bool(result.get("boolean"))
 
 
+async def find_person(client: FusekiClient, conn: Conn, *, external_id: str) -> str | None:
+    """The Person IRI carrying this external id, or ``None``."""
+    query = f"""PREFIX holon: <{HOLON}>
+SELECT ?person WHERE {{
+  GRAPH <{conn.holons_graph}> {{
+    ?person holon:hasExternalIdentity ?identity .
+    ?identity holon:identifier {_literal(external_id)} .
+  }}
+}} LIMIT 1"""
+    result = await client.select(conn, query)
+    bindings = result.get("results", {}).get("bindings", [])
+    return bindings[0]["person"]["value"] if bindings else None
+
+
 async def ensure_admin_person(
     client: FusekiClient,
     conn: Conn,
@@ -108,7 +122,8 @@ async def ensure_admin_person(
     full_name: str,
     external_id: str,
     external_id_type: str = "GitHubIdentity",
-    role: str | None = "admin",
+    role: str | None = "owner",
+    grant_existing: bool = False,
 ) -> dict[str, object]:
     """Mint a Person + external identity (+ optional Role grant) directly
     against Fuseki, bypassing AnimusDep entirely -- see module docstring.
@@ -121,6 +136,31 @@ async def ensure_admin_person(
     ordinary way is unblocked.
     """
     if await person_exists(client, conn, external_id=external_id):
+        if grant_existing and role:
+            # Opt-in and additive only: adds the role, never removes or
+            # changes anything. This is how a dataset that predates the owner
+            # role (admins, no owner) gets its first owner -- the REST API
+            # deliberately has no route that mints one.
+            existing = await find_person(client, conn, external_id=external_id)
+            if existing:
+                role_iri = conn.role_iri(role)
+                turtle = (
+                    f"PREFIX holon: <{HOLON}>\nPREFIX rdfs: <{RDFS}>\n\n"
+                    f"<{role_iri}> a holon:Role ;\n"
+                    f'    rdfs:label {_literal(role.replace("-", " ").title())} .\n'
+                    f"<{existing}> holon:hasRole <{role_iri}> .\n"
+                )
+                try:
+                    await client.post_graph(conn, conn.holons_graph, turtle)
+                except FusekiError as exc:
+                    return {"ok": False, "detail": exc.as_dict()}
+                return {
+                    "ok": True,
+                    "created": False,
+                    "granted": True,
+                    "person": existing,
+                    "role": role_iri,
+                }
         return {"ok": True, "created": False, "reason": "external_id already present"}
 
     person = conn.person_iri(slug)
@@ -201,8 +241,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--role",
-        default="admin",
-        help='Role slug to grant, e.g. "admin". Pass "" for no role.',
+        default="owner",
+        help='Role slug to grant. Default "owner" (the first identity on a dataset '
+        'is its owner; owner implies admin). Pass "admin" for a plain admin, or "" for no role.',
+    )
+    parser.add_argument(
+        "--grant-existing",
+        action="store_true",
+        help="If this identity already has a Person, ADD --role to it instead of doing nothing. "
+        "Additive only. Use it to give a dataset that predates the owner role its first owner.",
     )
     parser.add_argument(
         "--dataset",
@@ -258,6 +305,7 @@ async def _bootstrap_one(
             external_id=args.external_id,
             external_id_type=args.external_id_type,
             role=args.role or None,
+            grant_existing=getattr(args, "grant_existing", False),
         )
     except FusekiError as exc:
         # ensure_admin_person already catches the write's own FusekiError
@@ -270,7 +318,12 @@ async def _bootstrap_one(
     if not result.get("ok"):
         print(f"error: dataset {conn.dataset!r}: {result.get('detail')}", file=sys.stderr)
         return False
-    if result.get("created"):
+    if result.get("granted"):
+        print(
+            f"[bootstrap-admin] granted {result['role']} to existing {result['person']} "
+            f"in dataset {conn.dataset!r}"
+        )
+    elif result.get("created"):
         print(
             f"[bootstrap-admin] created {result['person']} "
             f"(role: {result.get('role') or 'none'}) in dataset {conn.dataset!r}"

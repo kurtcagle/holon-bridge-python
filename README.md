@@ -369,6 +369,27 @@ payload in isolation is a different question and will flag cross-references
 the target graph would have satisfied. `/validate` with `mode=auto` picks
 delta whenever a target is supplied.
 
+**Writing a constraint that is "one per graph".** Delta mode validates the
+target graph as one flat graph, so a SPARQLConstraint should be written
+against that graph and not reach for `GRAPH ?g`:
+
+```sparql
+SELECT $this ?other
+WHERE { ?other a holon:Home . FILTER (?other != $this) }
+```
+
+This enforces "at most one `holon:Home` in the graph being written to" — the
+usual per-persona or per-user singleton — and it is what a write is checked
+against. Homes in other graphs do not conflict, which is deliberate. A
+constraint that genuinely spans graphs (uniqueness across the whole dataset,
+say) cannot be enforced by Jena's SHACL service, so a shapes graph containing
+a `GRAPH` inside any `sh:select` or `sh:ask` is refused outright, with the
+offending shape named, on every gated path: `push_turtle`, `/validate`,
+pipeline and scheduler validation, and fluent transitions. The check is a
+keyword scan, so it also fires on a deactivated shape, or one that only
+mentions `GRAPH` in a comment. See
+[#2](https://github.com/kurtcagle/holon-bridge-python/issues/2).
+
 **Three bugs found live against real shapes, none reachable from the unit
 suite, all fixed.** Worth stating plainly rather than folding quietly into
 the design description above, because each one changed what "the gate is
@@ -990,8 +1011,14 @@ else before it ever reaches GitHub.
 `sub`=GitHub login, default 12h lifetime (`MCP_JWT_TTL_SECONDS`). Verification
 is signature and expiry only — a login removed from the allowlist mid-session
 is not re-checked until its token expires, which trades a short TTL for not
-needing a lookup on every request. Revocation-on-demand isn't built; shortening
-`MCP_JWT_TTL_SECONDS` is the lever until it is.
+needing a lookup on every request. `/token` also issues a **refresh token**
+(`MCP_REFRESH_TTL_SECONDS`, default 30 days, renewed at each use): opaque,
+stored only as a SHA-256 hash, rotated on every use, and a replayed one revokes
+its whole family. The allowlist is re-checked at every refresh, so a removed
+login stops working within one `MCP_JWT_TTL_SECONDS`, which can therefore be
+kept short. Set `MCP_DATA_DIR` so client registrations and refresh tokens
+survive a restart (SQLite, single host); unset, they live in memory and a
+restart forces re-registration and re-authorisation.
 
 **The well-known/register/authorize/token endpoints are reachable with no
 credential at all**, deliberately — an OAuth authorization server that

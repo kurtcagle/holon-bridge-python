@@ -62,6 +62,7 @@ from .acting_as import ActingAsStore
 from .config import BankStore, Settings
 from .conn import DATASET_OVERRIDE_HEADER, Conn, resolve_conn
 from .cache import RegistryCache
+from .claim import claimant as claim_eligibility, is_unclaimed
 from .fuseki import FusekiClient
 from .persona_state import PersonaStore
 
@@ -214,6 +215,7 @@ async def require_animus(
     client: Annotated[FusekiClient, Depends(get_client)],
     acting_as: Annotated[ActingAsStore, Depends(get_acting_as)],
     token_auth: Annotated[TokenAuth, Depends(require_auth)],
+    settings: Annotated[Settings, Depends(get_settings_dep)],
 ) -> Animus:
     """Resolve the calling Person (and their Teams) for this request.
 
@@ -277,6 +279,31 @@ async def require_animus(
         external_id_type=external_id_type,
     )
     if real.person is None:
+        # An unprovisioned dataset looks identical to "you are not allowed" unless
+        # we say otherwise -- but only to a caller who could act on it. Anyone else
+        # gets the plain 401, so this cannot be used to ask which datasets are open.
+        if claim_eligibility(
+            settings,
+            token_auth,
+            header_id=header_id,
+            header_type=request.headers.get(ANIMUS_TYPE_HEADER),
+            default_type=DEFAULT_ANIMUS_TYPE,
+        ) is not None and await is_unclaimed(query_fn, conn.holons_graph):
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "code": "dataset_unclaimed",
+                    "message": (
+                        f"dataset {conn.dataset!r} has no owner or admin, and "
+                        f"{external_id!r} is permitted to initialise it"
+                    ),
+                    "remedy": "POST /admin/dataset/initialise (MCP tool: initialise_dataset)",
+                    "ask_the_person": (
+                        "Initialising makes the caller the dataset's owner. Confirm with the "
+                        "person you are acting for, in chat, before calling it."
+                    ),
+                },
+            )
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED,
             detail=f"no Person found for {external_id_type} identifier {external_id!r}",

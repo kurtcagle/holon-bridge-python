@@ -152,8 +152,14 @@ def _fingerprint(result: dict[str, str]) -> tuple[str, ...]:
 # can actually enforce a graph-crossing constraint today. Failing loud here
 # is a deliberate stopgap until graph-aware constraints can be routed to a
 # validator that sees across named graphs (tracked as a follow-on; see the
-# issue above for the fuller hybrid-architecture discussion). A regex scan
-# for the ``GRAPH`` keyword is a heuristic, not a SPARQL parse — it can in
+# issue above for the fuller hybrid-architecture discussion).
+#
+# Correction, 2026-10-25: pyshacl 0.40.1 over a plain ``rdflib.Graph`` does not
+# silently conform -- it raises ("requires a dataset"). For ``validate_local``
+# this guard is therefore a clearer error; it is Jena's service that silently
+# conforms. (pyshacl over an ``rdflib.Dataset`` does enforce such a constraint.)
+#
+# A regex scan for the ``GRAPH`` keyword is a heuristic, not a SPARQL parse — it can in
 # principle mis-flag a body where "graph" only appears in a comment or
 # string literal, but a false-positive rejection prompting a look is a far
 # safer failure than the silent no-op it replaces.
@@ -196,6 +202,13 @@ def _raise_if_graph_crossing(hits: list[tuple[str, str, list[str]]]) -> None:
         f"with no named graphs to iterate over): {described}. See "
         "https://github.com/kurtcagle/holon-bridge-python/issues/2."
     )
+
+
+def ensure_enforceable(shapes_turtle: str) -> None:
+    """Public name for the graph-crossing guard, for gates outside this module
+    (the fluent pre-commit check validates through the client directly, so it
+    must call this itself). Raises ``ValueError`` naming the offending shape."""
+    _reject_graph_crossing_constraints(shapes_turtle)
 
 
 def _reject_graph_crossing_constraints(shapes_turtle: str) -> None:

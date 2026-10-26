@@ -370,7 +370,7 @@ def build_app(mcp, transport: str):  # noqa: ANN001 - FastMCP instance
     app = Starlette(routes=routes, lifespan=lifespan_app.router.lifespan_context)
     if oauth_config is not None:
         app.state.github_oauth_config = oauth_config
-        app.state.oauth_state = github_oauth.OAuthState()
+        app.state.oauth_state = github_oauth.OAuthState(oauth_config.data_dir)
 
     return BearerGate(
         app,

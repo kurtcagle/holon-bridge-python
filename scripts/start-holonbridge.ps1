@@ -83,7 +83,7 @@
     Display name (rdfs:label) for the bootstrap identity.
 
 .PARAMETER BootstrapAdminRole
-    Role slug to grant the bootstrap identity. Default "admin".
+    Role slug to grant the bootstrap identity. Default "owner" (implies admin).
 
 .PARAMETER BootstrapAdminDataset
     Dataset to bootstrap into. Defaults to the bank's own dataset when
@@ -133,7 +133,7 @@ param(
     [string]$BootstrapAdminGithubUser = "",
     [string]$BootstrapAdminSlug       = "",
     [string]$BootstrapAdminName       = "",
-    [string]$BootstrapAdminRole       = "admin",
+    [string]$BootstrapAdminRole       = "owner",
     [string]$BootstrapAdminDataset    = "",
     [string]$BootstrapAdminBank       = "local"
 )

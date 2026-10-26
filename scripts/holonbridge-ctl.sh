@@ -70,7 +70,7 @@ HOLONBRIDGE_PORT="${HOLONBRIDGE_PORT:-3031}"
 BOOTSTRAP_ADMIN_GITHUB_USER="${BOOTSTRAP_ADMIN_GITHUB_USER:-}"
 BOOTSTRAP_ADMIN_SLUG="${BOOTSTRAP_ADMIN_SLUG:-}"
 BOOTSTRAP_ADMIN_NAME="${BOOTSTRAP_ADMIN_NAME:-}"
-BOOTSTRAP_ADMIN_ROLE="${BOOTSTRAP_ADMIN_ROLE:-admin}"
+BOOTSTRAP_ADMIN_ROLE="${BOOTSTRAP_ADMIN_ROLE:-owner}"
 BOOTSTRAP_ADMIN_DATASET="${BOOTSTRAP_ADMIN_DATASET:-}"   # default: the bank's own dataset
                                                           # comma-separated for more than one,
                                                           # e.g. "hcg,crm,datavid,ggsc" -- passed

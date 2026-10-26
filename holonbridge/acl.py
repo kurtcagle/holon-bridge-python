@@ -239,6 +239,22 @@ def _admin_role(holons_graph: str) -> str:
     return holons_graph[: -len(suffix)] + ":role:admin"
 
 
+def _owner_role(holons_graph: str) -> str:
+    """The reserved owner Role IRI for this dataset, derived exactly as
+    :func:`_admin_role` derives the admin Role.
+
+    Owner sits above admin: an owner is an admin (every admin check passes
+    for one) and is additionally the only standing that may grant or revoke
+    ``admin`` or ``owner`` once the dataset has an owner -- see
+    ``routes/identity_admin.py``. It is a hierarchy of one extra tier, not a
+    second bypass: nothing in this module treats owner differently from admin.
+    """
+    suffix = ":holons"
+    if not holons_graph.endswith(suffix):
+        raise ValueError(f"expected holons_graph to end with {suffix!r}, got {holons_graph!r}")
+    return holons_graph[: -len(suffix)] + ":role:owner"
+
+
 def _scratch_area(holons_graph: str) -> str:
     """The reserved scratch-area IRI for this dataset, derived the same way
     ``_admin_role`` derives the admin role: swap the trailing ``:holons``
@@ -281,10 +297,35 @@ def is_scratch_graph(target: str, holons_graph: str) -> bool:
 
 
 async def is_admin(query_fn: QueryFn, holons_graph: str, *, person: str) -> bool:
-    """Whether ``person`` holds the reserved admin Role for this dataset."""
+    """Whether ``person`` holds the reserved admin Role for this dataset --
+    or the owner Role, which implies it, so no call site had to change when
+    the owner tier was added."""
     query = f"""
     PREFIX holon: <{HOLON}>
-    ASK {{ GRAPH <{holons_graph}> {{ <{person}> holon:hasRole <{_admin_role(holons_graph)}> . }} }}
+    ASK {{ GRAPH <{holons_graph}> {{
+        <{person}> holon:hasRole ?role .
+        FILTER (?role IN (<{_admin_role(holons_graph)}>, <{_owner_role(holons_graph)}>))
+    }} }}
+    """
+    result = await _run(query_fn, query)
+    return bool(result.get("boolean"))
+
+
+async def is_owner(query_fn: QueryFn, holons_graph: str, *, person: str) -> bool:
+    """Whether ``person`` holds the reserved owner Role for this dataset."""
+    query = f"""
+    PREFIX holon: <{HOLON}>
+    ASK {{ GRAPH <{holons_graph}> {{ <{person}> holon:hasRole <{_owner_role(holons_graph)}> . }} }}
+    """
+    result = await _run(query_fn, query)
+    return bool(result.get("boolean"))
+
+
+async def owner_exists(query_fn: QueryFn, holons_graph: str) -> bool:
+    """Whether anyone at all holds the owner Role on this dataset."""
+    query = f"""
+    PREFIX holon: <{HOLON}>
+    ASK {{ GRAPH <{holons_graph}> {{ ?anyone holon:hasRole <{_owner_role(holons_graph)}> . }} }}
     """
     result = await _run(query_fn, query)
     return bool(result.get("boolean"))

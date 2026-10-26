@@ -53,13 +53,22 @@ holon:FluentPropertyLinkRangeShape a sh:NodeShape ;
     sh:targetObjectsOf holon:fluentProperty ;
     sh:class holon:FluentProperty .
 
-## Verified correct as originally written -- both a positive case (a clean
-## supersession chain conforms) and a negative case (a deliberately
-## inserted rogue StateAssertion that neither supersedes the prior current
-## assertion nor is invalidated) were run against a live SHACL endpoint.
-## The negative case correctly flagged both sides of the overlapping pair.
+## Scalar fluents only. A scalar fluent's ledger is a chain: each Set supersedes the
+## previous one, so at most one assertion is current. List-mode entries (ListInsert,
+## ListRemove) never supersede one another -- membership is a set, with no single current
+## assertion -- so every list entry is "current" by this definition. Counting them made any
+## list fluent with two entries a violation, and a gated dataset refused the second
+## ListInsert. List entries are excluded here, on the entry's own hevt:operation (the
+## pre-commit scope sees only the events graph, so the fluent's mode is not available to
+## look up); holon:ListRemoveHasInsertShape below keeps an integrity check on them.
+##
+## Verified correct as originally written for scalar fluents -- both a positive case (a
+## clean supersession chain conforms) and a negative case (a deliberately inserted rogue
+## StateAssertion that neither supersedes the prior current assertion nor is invalidated)
+## were run against a live SHACL endpoint. The negative case correctly flagged both sides
+## of the overlapping pair.
 holon:StateAssertionNonOverlapShape a sh:NodeShape ;
-    rdfs:comment "For a given hevt:forFluent, at most one non-invalidated hevt:StateAssertion may exist without being superseded by another non-invalidated one."@en ;
+    rdfs:comment "For a given hevt:forFluent, at most one non-invalidated hevt:StateAssertion may exist without being superseded by another non-invalidated one. Applies to scalar fluents; list-mode entries (hevt:ListInsert, hevt:ListRemove) are never superseded and are excluded."@en ;
     sh:targetClass hevt:StateAssertion ;
     sh:sparql [
         sh:message "This StateAssertion's fluent has more than one current (non-invalidated, non-superseded) assertion." ;
@@ -67,13 +76,43 @@ holon:StateAssertionNonOverlapShape a sh:NodeShape ;
             PREFIX hevt: <https://w3id.org/holon/event/>
             SELECT $this WHERE {
                 $this hevt:forFluent ?fluent .
+                FILTER NOT EXISTS { $this hevt:operation ?thisOp . FILTER (?thisOp IN (hevt:ListInsert, hevt:ListRemove)) }
                 FILTER NOT EXISTS { $this hevt:invalidatedAt ?anyInvalidation }
                 FILTER NOT EXISTS { ?later hevt:supersedes $this }
                 FILTER EXISTS {
                     ?other hevt:forFluent ?fluent .
                     FILTER (?other != $this)
+                    FILTER NOT EXISTS { ?other hevt:operation ?otherOp . FILTER (?otherOp IN (hevt:ListInsert, hevt:ListRemove)) }
                     FILTER NOT EXISTS { ?other hevt:invalidatedAt ?anyOtherInvalidation }
                     FILTER NOT EXISTS { ?laterOther hevt:supersedes ?other }
+                }
+            }
+        """ ;
+    ] .
+
+## The integrity check list fluents keep: a ListRemove must follow a ListInsert of the same
+## member on the same fluent (at the same instant or earlier). update_fluent already refuses
+## removing a non-member at write time; this catches an orphaned or hand-written ledger entry.
+## It does not count inserts against removes, so a double remove after one insert is not
+## flagged here -- the write-time membership guard covers that case.
+holon:ListRemoveHasInsertShape a sh:NodeShape ;
+    rdfs:comment "A hevt:ListRemove must have an earlier (or simultaneous) hevt:ListInsert of the same value on the same fluent."@en ;
+    sh:targetClass hevt:StateAssertion ;
+    sh:sparql [
+        sh:message "This ListRemove has no earlier ListInsert of the same member on the same fluent." ;
+        sh:select """
+            PREFIX hevt: <https://w3id.org/holon/event/>
+            SELECT $this WHERE {
+                $this hevt:operation hevt:ListRemove ;
+                      hevt:forFluent ?fluent ;
+                      hevt:hasValue ?member ;
+                      hevt:assertedDateTime ?removedAt .
+                FILTER NOT EXISTS {
+                    ?insert hevt:operation hevt:ListInsert ;
+                            hevt:forFluent ?fluent ;
+                            hevt:hasValue ?member ;
+                            hevt:assertedDateTime ?insertedAt .
+                    FILTER (?insertedAt <= ?removedAt)
                 }
             }
         """ ;

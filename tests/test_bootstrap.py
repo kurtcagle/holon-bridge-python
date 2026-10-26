@@ -130,10 +130,17 @@ class PersonExistsAndEnsureAdminPersonTests(unittest.IsolatedAsyncioTestCase):
                 "created": True,
                 "person": "urn:example:person:kurt",
                 "identity": "urn:example:person:kurt:identity:github",
-                "role": "urn:example:role:admin",
+                "role": "urn:example:role:owner",  # the default: the first identity owns the dataset
             },
         )
         self.assertEqual(len(client.writes), 1)
+
+    async def test_an_explicit_admin_role_is_still_honoured(self) -> None:
+        client = FakeFusekiClient()
+        result = await ensure_admin_person(
+            client, _conn(), slug="kurt", full_name="Kurt Cagle", external_id="kurtcagle", role="admin"
+        )
+        self.assertEqual(result["role"], "urn:example:role:admin")
 
     async def test_ensure_admin_person_is_a_no_op_when_identity_already_exists(self) -> None:
         client = FakeFusekiClient()

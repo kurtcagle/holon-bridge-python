@@ -26,6 +26,7 @@ from .routes import (
     audit as audit_routes,
     banks,
     dataset_admin,
+    dataset_claim,
     delegation,
     events,
     fluent,
@@ -123,6 +124,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(events.router)
     app.include_router(fluent.router)
     app.include_router(identity_admin.router)
+    app.include_router(dataset_claim.router)
     app.include_router(delegation.router)
     app.include_router(audit_routes.router)
     app.include_router(named_queries.router)

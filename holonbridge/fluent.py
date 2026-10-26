@@ -318,6 +318,16 @@ SELECT ?value ?assertion WHERE {{
     return value, assertion
 
 
+class _CandidateDidNotFire(Exception):
+    """The guarded transition matched nothing on the scratch copy."""
+
+
+def _has_triples(turtle: str) -> bool:
+    from .turtle import parse as _parse
+
+    return len(_parse(turtle)) > 0
+
+
 async def _precommit_check(
     client: FusekiClient,
     conn: Conn,
@@ -372,6 +382,13 @@ WHERE {{
   }}
 }}"""
         scoped_turtle = await client.construct(conn, scope_query)
+        if not scoped_turtle.strip() or not _has_triples(scoped_turtle):
+            # The candidate did not fire on the scratch copy, so there is
+            # nothing to validate. Passing it through would be fail-open, and
+            # posting an empty graph makes the validator answer 404 "No data
+            # graph". It only happens when the copy's state moved on from what
+            # this attempt read, i.e. a lost race -- the caller retries.
+            raise _CandidateDidNotFire(fluent)
 
         validate_scratch = f"urn:{conn.dataset}:scratch:fluent-validate-{token}"
         try:
@@ -386,6 +403,20 @@ WHERE {{
     finally:
         await client.drop_graph(conn, scratch_events)
         await client.drop_graph(conn, scratch_scene)
+
+
+def _where(scene_graph: str, guard_clause: str) -> str:
+    """The WHERE clause for a guarded transition.
+
+    A guard that tests the scene graph is wrapped in ``GRAPH <scene_graph>``
+    (see the module docstring on why it must be). An EMPTY guard is not
+    wrapped: ``GRAPH <g> { }`` matches nothing when ``<g>`` has no triples, on
+    Jena, so wrapping it would make an unconditional transition conditional
+    on the scene graph already existing.
+    """
+    if not guard_clause.strip():
+        return "WHERE { }"
+    return f"WHERE {{\n  GRAPH <{scene_graph}> {{\n    {guard_clause}\n  }}\n}}"
 
 
 async def _confirm_own_assertion(
@@ -475,6 +506,15 @@ async def update_fluent(
 
     shapes_turtle = await client.get_graph(conn, conn.shapes_graph)
     gated = bool(shapes_turtle.strip())
+    if gated:
+        # The pre-commit check below validates through the client directly, so
+        # it does not pass through shacl.validate_full/validate_delta where this
+        # guard normally lives. Without it a SPARQLConstraint that references
+        # GRAPH silently conforms here (issue #2) and the gate is armed in name only.
+        try:
+            shacl_mod.ensure_enforceable(shapes_turtle)
+        except ValueError as exc:
+            raise FluentError(str(exc)) from exc
 
     for _ in range(attempts):
         current, current_assertion = await _read_current(client, conn, fluent=fluent)
@@ -533,11 +573,7 @@ async def update_fluent(
     {clause_body} .
   }}
 }}
-WHERE {{
-  GRAPH <{scene_graph}> {{
-    {guard_clause}
-  }}
-}}"""
+{_where(scene_graph, guard_clause)}"""
 
         # The guard pattern is scoped to scene_graph explicitly -- never
         # rely on a default-graph query implicitly seeing named-graph
@@ -553,23 +589,22 @@ INSERT {{
     {scene_insert}
   }}
 }}
-WHERE {{
-  GRAPH <{scene_graph}> {{
-    {guard_clause}
-  }}
-}}"""
+{_where(scene_graph, guard_clause)}"""
 
         if gated:
-            report = await _precommit_check(
-                client,
-                conn,
-                fluent=fluent,
-                events_graph=events_graph,
-                scene_graph=scene_graph,
-                ledger_insert=ledger_insert,
-                scene_update=scene_update,
-                shapes_turtle=shapes_turtle,
-            )
+            try:
+                report = await _precommit_check(
+                    client,
+                    conn,
+                    fluent=fluent,
+                    events_graph=events_graph,
+                    scene_graph=scene_graph,
+                    ledger_insert=ledger_insert,
+                    scene_update=scene_update,
+                    shapes_turtle=shapes_turtle,
+                )
+            except _CandidateDidNotFire:
+                continue  # lost a race before the live commit; retry from a fresh read
             if report.blocking:
                 raise FluentError(
                     f"<{fluent}> {operation.value} rejected by shapes graph "
@@ -656,8 +691,12 @@ def _plan(
             kind="uri" if is_iri else "literal", lexical=str(value)
         )
         if operation is Operation.LIST_INSERT:
-            guard = "# adding a member never conflicts with another add"
-            return member_typed, guard, "", f"<{fluent}> holon:hasListItem {member_term} ."
+            # Adding a member never conflicts with another add, so there is no
+            # guard. It must be genuinely empty -- not an empty group wrapped
+            # in GRAPH <scene>, which Jena evaluates to NO solutions when the
+            # scene graph does not exist yet (checked live), so the first
+            # insert into a fresh dataset silently never fired. See _where().
+            return member_typed, "", "", f"<{fluent}> holon:hasListItem {member_term} ."
         else:
             guard = f"<{fluent}> holon:hasListItem {member_term} ."
             return member_typed, guard, f"<{fluent}> holon:hasListItem {member_term} .", ""

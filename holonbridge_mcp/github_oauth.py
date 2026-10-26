@@ -24,10 +24,19 @@ its own.
 Each flow has its own ``client_id``, and conflating them is the single most
 likely setup mistake — see ``authorize`` below, which detects it explicitly.
 
-State is in-memory with short TTLs — this is a single-process bridge, and
-the whole handshake takes seconds. A restart mid-handshake drops it; a
-completed session survives as a signed JWT and needs nothing further from
-this process to verify.
+The handshake state (pending requests, one-time codes) is in-memory with
+short TTLs — the whole handshake takes seconds, and a restart mid-handshake
+just drops it. A completed session survives as a signed JWT and needs nothing
+further from this process to verify.
+
+Two things are durable, in a small SQLite file under ``MCP_DATA_DIR`` when
+that is set (in memory, lost on restart, when it is not): client registrations
+(RFC 7591), so a restart does not force every client to re-register, and
+refresh tokens, so a client can renew its short-lived access token without a
+person re-authorising. Refresh tokens are stored only as SHA-256 hashes,
+rotate on every use, and a replayed one revokes its whole family. The
+allowlist is re-checked at every refresh, which is what bounds revocation to
+one access-token lifetime without a per-request lookup.
 
 Only ``S256`` PKCE is accepted. ``plain`` is legal per spec for constrained
 clients but weaker, and every MCP client encountered so far uses S256, so
@@ -38,10 +47,15 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import logging
+import os
 import secrets
+import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
@@ -58,11 +72,14 @@ GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 GITHUB_USER_URL = "https://api.github.com/user"
 GITHUB_SCOPE = "read:user"
 
-REGISTRATION_TTL = 24 * 3600 * 365  # client registrations persist for process life
+REGISTRATION_TTL = 24 * 3600 * 365  # client registrations: long-lived, one year
 PENDING_AUTH_TTL = 600  # time allowed to complete the GitHub consent screen
 ISSUED_CODE_TTL = 60  # standard-length authorization code lifetime
 
 JWT_ALGORITHM = "HS256"
+
+DEFAULT_REFRESH_TTL_SECONDS = 30 * 24 * 3600  # 30 days, sliding (renewed at each use)
+DB_FILENAME = "oauth.sqlite3"
 
 #: Prefixes GitHub uses for its own OAuth App / GitHub App client IDs. Only
 #: used to make a misconfiguration diagnose itself — see ``authorize``.
@@ -88,6 +105,8 @@ class GitHubOAuthConfig:
     jwt_secret: str
     allowed_logins: frozenset[str]  # lowercased GitHub logins
     token_ttl_seconds: int = 43_200  # 12h
+    refresh_ttl_seconds: int = DEFAULT_REFRESH_TTL_SECONDS
+    data_dir: str | None = None  # where registrations/refresh tokens persist; None = in memory
 
     @property
     def callback_url(self) -> str:
@@ -144,6 +163,7 @@ class PendingAuthorization:
     mcp_redirect_uri: str
     mcp_state: str
     code_challenge: str
+    client_id: str = ""
 
 
 @dataclass
@@ -153,24 +173,219 @@ class IssuedCode:
     redirect_uri: str
     code_challenge: str
     github_login: str
+    client_id: str = ""
+
+
+def hash_refresh_token(raw: str) -> str:
+    """SHA-256 of an opaque refresh token. The raw value is never stored.
+
+    A fast hash is right here: the token is 256 bits of randomness, so there
+    is nothing to brute-force and no need for a slow password hash.
+    """
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS clients (
+    client_id     TEXT PRIMARY KEY,
+    redirect_uris TEXT NOT NULL,
+    expires_at    REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+    token_hash   TEXT PRIMARY KEY,
+    family_id    TEXT NOT NULL,
+    client_id    TEXT NOT NULL,
+    github_login TEXT NOT NULL,
+    expires_at   REAL NOT NULL,
+    used_at      REAL,
+    revoked      INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS refresh_tokens_family ON refresh_tokens (family_id);
+"""
+
+
+class _Db:
+    """Client registrations and refresh tokens, in SQLite.
+
+    With a directory the file persists (mode 0600, directory 0700); with
+    ``None`` it is an in-memory database, so behaviour without configuration
+    is the old one: everything is lost on restart. SQLite's own locking makes a
+    second process on the same file safe; the rotation below is a single
+    ``BEGIN IMMEDIATE`` transaction so two racing refreshes cannot both win.
+    """
+
+    def __init__(self, data_dir: str | os.PathLike[str] | None) -> None:
+        self._lock = threading.Lock()
+        if data_dir is None:
+            target = ":memory:"
+        else:
+            directory = Path(data_dir)
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path = directory / DB_FILENAME
+            # Create the file 0600 before SQLite does, never briefly wider.
+            os.close(os.open(path, os.O_RDWR | os.O_CREAT, 0o600))
+            os.chmod(path, 0o600)
+            target = str(path)
+        self._conn = sqlite3.connect(
+            target, check_same_thread=False, isolation_level=None, timeout=5.0
+        )
+        self._conn.executescript(_SCHEMA)
+
+    # -- clients
+
+    def put_client(self, client_id: str, redirect_uris: list[str], ttl: float) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO clients VALUES (?, ?, ?)",
+                (client_id, json.dumps(redirect_uris), time.time() + ttl),
+            )
+
+    def get_client(self, client_id: str) -> ClientRegistration | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT redirect_uris, expires_at FROM clients WHERE client_id = ?",
+                (client_id,),
+            ).fetchone()
+        if row is None or row[1] < time.time():
+            return None
+        return ClientRegistration(client_id=client_id, redirect_uris=json.loads(row[0]))
+
+    # -- refresh tokens
+
+    def put_refresh(
+        self, raw: str, *, family_id: str, client_id: str, github_login: str, ttl: float
+    ) -> None:
+        now = time.time()
+        with self._lock:
+            # Expired rows are useless for reuse detection too; drop them here.
+            self._conn.execute("DELETE FROM refresh_tokens WHERE expires_at < ?", (now,))
+            self._conn.execute(
+                "INSERT INTO refresh_tokens VALUES (?, ?, ?, ?, ?, NULL, 0)",
+                (hash_refresh_token(raw), family_id, client_id, github_login, now + ttl),
+            )
+
+    def revoke_family(self, family_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE refresh_tokens SET revoked = 1 WHERE family_id = ?", (family_id,)
+            )
+
+    def rotate_refresh(
+        self,
+        raw: str,
+        *,
+        client_id: str,
+        is_allowed: Any,
+        new_raw: str,
+        ttl: float,
+    ) -> str:
+        """Atomically redeem ``raw`` and store its successor; return the login.
+
+        Raises :class:`OAuthError` (``invalid_grant``) for anything wrong with
+        the token. A replay of an already-used or revoked token revokes the
+        whole family before raising.
+        """
+        digest = hash_refresh_token(raw)
+        now = time.time()
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._conn.execute(
+                    "SELECT family_id, client_id, github_login, expires_at, used_at, revoked "
+                    "FROM refresh_tokens WHERE token_hash = ?",
+                    (digest,),
+                ).fetchone()
+                if row is None:
+                    raise OAuthError("invalid_grant", "unknown refresh token")
+                family_id, token_client, login, expires_at, used_at, revoked = row
+                if token_client != client_id:
+                    # client_id is public, so this is not proof of theft and does
+                    # not revoke; it just must not work.
+                    raise OAuthError("invalid_grant", "refresh token was issued to another client")
+                if used_at is not None or revoked:
+                    self._conn.execute(
+                        "UPDATE refresh_tokens SET revoked = 1 WHERE family_id = ?", (family_id,)
+                    )
+                    self._conn.execute("COMMIT")
+                    log.warning(
+                        "refresh token reuse for %r (client %r): family revoked", login, client_id
+                    )
+                    raise OAuthError("invalid_grant", "refresh token already used")
+                if expires_at < now:
+                    raise OAuthError("invalid_grant", "refresh token expired")
+                if not is_allowed(login):
+                    self._conn.execute(
+                        "UPDATE refresh_tokens SET revoked = 1 WHERE family_id = ?", (family_id,)
+                    )
+                    self._conn.execute("COMMIT")
+                    log.info("refresh refused: %r is no longer on the allowlist", login)
+                    raise OAuthError("invalid_grant", "login is no longer authorized")
+                self._conn.execute(
+                    "UPDATE refresh_tokens SET used_at = ? WHERE token_hash = ?", (now, digest)
+                )
+                self._conn.execute(
+                    "INSERT INTO refresh_tokens VALUES (?, ?, ?, ?, ?, NULL, 0)",
+                    (hash_refresh_token(new_raw), family_id, client_id, login, now + ttl),
+                )
+                self._conn.execute("COMMIT")
+                return login
+            except OAuthError:
+                if self._conn.in_transaction:
+                    self._conn.execute("ROLLBACK")
+                raise
+            except BaseException:
+                if self._conn.in_transaction:
+                    self._conn.execute("ROLLBACK")
+                raise
 
 
 class OAuthState:
-    """All the in-memory bookkeeping the flow needs, in one place."""
+    """The bookkeeping the flow needs.
 
-    def __init__(self) -> None:
-        self.clients = _TtlStore()
+    ``pending`` and ``codes`` are ephemeral, in memory. Client registrations and
+    refresh tokens live in :class:`_Db`: durable when ``data_dir`` is given.
+    """
+
+    def __init__(self, data_dir: str | os.PathLike[str] | None = None) -> None:
+        self.db = _Db(data_dir)
         self.pending = _TtlStore()
         self.codes = _TtlStore()
 
     def register_client(self, redirect_uris: list[str]) -> ClientRegistration:
         client_id = secrets.token_urlsafe(16)
-        registration = ClientRegistration(client_id=client_id, redirect_uris=redirect_uris)
-        self.clients.put(client_id, registration, REGISTRATION_TTL)
-        return registration
+        self.db.put_client(client_id, redirect_uris, REGISTRATION_TTL)
+        return ClientRegistration(client_id=client_id, redirect_uris=redirect_uris)
 
     def get_client(self, client_id: str) -> ClientRegistration | None:
-        return self.clients.peek(client_id)
+        return self.db.get_client(client_id)
+
+    def issue_refresh_token(
+        self, config: GitHubOAuthConfig, *, client_id: str, github_login: str
+    ) -> str:
+        """Start a new refresh-token family (a fresh authorization)."""
+        raw = secrets.token_urlsafe(32)
+        self.db.put_refresh(
+            raw,
+            family_id=secrets.token_urlsafe(12),
+            client_id=client_id,
+            github_login=github_login,
+            ttl=config.refresh_ttl_seconds,
+        )
+        return raw
+
+    def redeem_refresh_token(
+        self, config: GitHubOAuthConfig, raw: str, client_id: str
+    ) -> tuple[str, str]:
+        """Rotate a refresh token. Returns ``(github_login, new_refresh_token)``."""
+        new_raw = secrets.token_urlsafe(32)
+        login = self.db.rotate_refresh(
+            raw,
+            client_id=client_id,
+            is_allowed=config.allows,
+            new_raw=new_raw,
+            ttl=config.refresh_ttl_seconds,
+        )
+        return login, new_raw
 
 
 # --- PKCE and JWT -----------------------------------------------------------
@@ -201,6 +416,8 @@ def verify_session_token(config: GitHubOAuthConfig, token: str) -> str | None:
     Verification is fully stateless — signature and expiry only. A login
     revoked from the allowlist mid-session is not re-checked until the token
     expires; the tradeoff is a short TTL rather than a per-request lookup.
+    The allowlist *is* re-checked each time a refresh token is redeemed, so
+    revocation takes effect within one access-token lifetime.
     """
     try:
         payload = jwt.decode(token, config.jwt_secret, algorithms=[JWT_ALGORITHM])
@@ -276,7 +493,7 @@ async def metadata(request: Request) -> JSONResponse:
             "token_endpoint": f"{base}/token",
             "registration_endpoint": f"{base}/register",
             "response_types_supported": ["code"],
-            "grant_types_supported": ["authorization_code"],
+            "grant_types_supported": ["authorization_code", "refresh_token"],
             "code_challenge_methods_supported": ["S256"],
             "token_endpoint_auth_methods_supported": ["none"],
         }
@@ -329,7 +546,7 @@ async def register(request: Request) -> JSONResponse:
             "client_id_issued_at": int(time.time()),
             "redirect_uris": registration.redirect_uris,
             "token_endpoint_auth_method": "none",
-            "grant_types": ["authorization_code"],
+            "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
         },
         status_code=201,
@@ -412,7 +629,10 @@ async def authorize(request: Request) -> Any:
     state.pending.put(
         req_id,
         PendingAuthorization(
-            mcp_redirect_uri=redirect_uri, mcp_state=mcp_state, code_challenge=code_challenge
+            mcp_redirect_uri=redirect_uri,
+            mcp_state=mcp_state,
+            code_challenge=code_challenge,
+            client_id=client_id,
         ),
         PENDING_AUTH_TTL,
     )
@@ -479,6 +699,7 @@ async def github_callback(request: Request) -> Any:
             redirect_uri=pending.mcp_redirect_uri,
             code_challenge=pending.code_challenge,
             github_login=login,
+            client_id=pending.client_id,
         ),
         ISSUED_CODE_TTL,
     )
@@ -486,29 +707,85 @@ async def github_callback(request: Request) -> Any:
     return RedirectResponse(f"{pending.mcp_redirect_uri}?{query}", status_code=302)
 
 
+def _token_response(body: dict[str, Any], status_code: int = 200) -> JSONResponse:
+    # RFC 6749 §5.1: token responses must not be cached.
+    return JSONResponse(
+        body, status_code=status_code, headers={"Cache-Control": "no-store", "Pragma": "no-cache"}
+    )
+
+
+def _grant_error(code: str, description: str | None = None) -> JSONResponse:
+    body = {"error": code}
+    if description:
+        body["error_description"] = description
+    return _token_response(body, 400)
+
+
 async def token(request: Request) -> JSONResponse:
-    """Flow 1's final leg. Verifies PKCE, issues a signed session token."""
+    """Flow 1's final leg: the authorization-code and refresh-token grants."""
     state = _oauth_state(request)
     config = _config(request)
     form = await request.form()
+    grant_type = form.get("grant_type")
 
-    if form.get("grant_type") != "authorization_code":
-        return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
+    if grant_type == "refresh_token":
+        return _refresh_grant(state, config, form)
+    if grant_type != "authorization_code":
+        return _grant_error("unsupported_grant_type")
 
     code = str(form.get("code", ""))
     issued: IssuedCode | None = state.codes.pop(code)
     if issued is None:
-        return JSONResponse({"error": "invalid_grant"}, status_code=400)
+        return _grant_error("invalid_grant")
 
     if str(form.get("redirect_uri", "")) != issued.redirect_uri:
-        return JSONResponse({"error": "invalid_grant"}, status_code=400)
+        return _grant_error("invalid_grant")
+
+    # Public clients may send client_id; when they do it must be the one the
+    # code was issued to. Not required, so existing clients keep working.
+    presented = str(form.get("client_id", ""))
+    if presented and presented != issued.client_id:
+        return _grant_error("invalid_grant")
 
     verifier = str(form.get("code_verifier", ""))
     if not verifier or not verify_pkce(verifier, issued.code_challenge):
-        return JSONResponse({"error": "invalid_grant"}, status_code=400)
+        return _grant_error("invalid_grant")
 
     access_token, ttl = issue_session_token(config, issued.github_login)
-    return JSONResponse({"access_token": access_token, "token_type": "Bearer", "expires_in": ttl})
+    refresh_token = state.issue_refresh_token(
+        config, client_id=issued.client_id, github_login=issued.github_login
+    )
+    return _token_response(
+        {
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": ttl,
+            "refresh_token": refresh_token,
+        }
+    )
+
+
+def _refresh_grant(state: OAuthState, config: GitHubOAuthConfig, form: Any) -> JSONResponse:
+    """RFC 6749 §6, with rotation and family revocation (OAuth 2.1)."""
+    raw = str(form.get("refresh_token", ""))
+    client_id = str(form.get("client_id", ""))
+    if not raw or not client_id:
+        return _grant_error("invalid_request", "refresh_token and client_id are required")
+    if state.get_client(client_id) is None:
+        return _grant_error("invalid_client", "client_id was not issued by this server")
+    try:
+        login, new_refresh = state.redeem_refresh_token(config, raw, client_id)
+    except OAuthError as exc:
+        return _grant_error(exc.code, exc.description)
+    access_token, ttl = issue_session_token(config, login)
+    return _token_response(
+        {
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": ttl,
+            "refresh_token": new_refresh,
+        }
+    )
 
 
 # --- wiring -------------------------------------------------------------------
@@ -599,6 +876,10 @@ def config_from_env() -> GitHubOAuthConfig | None:
         )
 
     ttl = int(os.getenv("MCP_JWT_TTL_SECONDS", "43200"))
+    refresh_ttl = int(os.getenv("MCP_REFRESH_TTL_SECONDS", str(DEFAULT_REFRESH_TTL_SECONDS)))
+    if refresh_ttl <= 0:
+        raise SystemExit("MCP_REFRESH_TTL_SECONDS must be a positive number of seconds.")
+    data_dir = os.getenv("MCP_DATA_DIR", "").strip() or None
 
     return GitHubOAuthConfig(
         client_id=client_id,
@@ -607,4 +888,6 @@ def config_from_env() -> GitHubOAuthConfig | None:
         jwt_secret=required["MCP_JWT_SECRET"],
         allowed_logins=allowed,
         token_ttl_seconds=ttl,
+        refresh_ttl_seconds=refresh_ttl,
+        data_dir=data_dir,
     )

@@ -116,6 +116,22 @@ def parse_proxy_tokens(raw: str | None) -> tuple[str, ...]:
     return tokens
 
 
+def parse_dataset_claimants(raw: str | None) -> tuple[str, ...]:
+    """``DATASET_CLAIMANTS="login-a,login-b"`` -> the external identifiers that
+    may initialise an unclaimed dataset (become its first owner).
+
+    Identifiers only, no tokens: authority to claim comes from who the caller
+    IS (see ``claim.claimant``), and this list says which of those identities
+    the operator has chosen to trust with it. Empty by default, which turns the
+    in-band claim off entirely -- ``holonbridge-bootstrap-admin`` is then the
+    only way in, exactly as before.
+    """
+    items = tuple(i.strip() for i in (raw or "").split(",") if i.strip())
+    if len(set(items)) != len(items):
+        raise ValueError("DATASET_CLAIMANTS: duplicate identifier")
+    return items
+
+
 @dataclass
 class Settings:
     """Process-level settings, all overridable by environment variable."""
@@ -143,6 +159,9 @@ class Settings:
     #     every caller has moved to one of the two kinds above.
     identity_tokens: dict[str, str] = field(default_factory=dict)
     proxy_tokens: tuple[str, ...] = ()
+    # External identifiers permitted to initialise a dataset that has no owner
+    # or admin yet. See claim.py and parse_dataset_claimants.
+    dataset_claimants: tuple[str, ...] = ()
     allow_legacy_bearer: bool = True
 
     # Turtle handling. ``passthrough`` sends payloads to Jena unparsed, which
@@ -221,6 +240,7 @@ class Settings:
             bearer_token=os.getenv("BEARER_TOKEN") or None,
             identity_tokens=parse_identity_tokens(os.getenv("IDENTITY_TOKENS")),
             proxy_tokens=parse_proxy_tokens(os.getenv("PROXY_TOKENS")),
+            dataset_claimants=parse_dataset_claimants(os.getenv("DATASET_CLAIMANTS")),
             allow_legacy_bearer=_flag("ALLOW_LEGACY_BEARER", True),
             parse_mode=os.getenv("PARSE_MODE", "passthrough").strip().lower(),
             shacl_required=_flag("SHACL_REQUIRED", False),

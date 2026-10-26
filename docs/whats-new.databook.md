@@ -2,9 +2,9 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.12
+version: 1.0.14
 created: 2026-09-27
-updated: 2026-10-21
+updated: 2026-10-25
 author:
   - name: Kurt Cagle
     iri: https://holongraph.com/people/kurt-cagle
@@ -45,6 +45,43 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-10-25
+
+- **Fluent transitions now refuse a shapes graph with a graph-crossing constraint.**
+  The guard from issue #2 (a `sh:select`/`sh:ask` that references `GRAPH` is
+  refused, because Jena validates one flat graph and would silently conform)
+  covered `push_turtle`, `/validate`, the pipeline stage and the scheduler, but
+  not the fluent pre-commit check, which validates through the client directly.
+  On a gated dataset such a constraint passed every fluent transition silently;
+  `update_fluent` now raises a `FluentError` naming the shape. The README
+  documents the flat form for a per-graph singleton constraint, which is what
+  the original use case needed. Follow-on for constraints that genuinely span
+  graphs: #60
+  ([#59](https://github.com/kurtcagle/holon-bridge-python/pull/59)).
+
+- **Owner role, and an in-band, allowlisted dataset claim.**
+  A new reserved `owner` role sits above `admin`: owner implies admin (every
+  admin check passes for one), and once a dataset has an owner **only an owner
+  may grant, revoke or deactivate `admin` or `owner`** -- an admin keeps every
+  other power. This is a behaviour change: before, any admin could create or
+  remove any other admin. A dataset with no owner behaves as before, and
+  `owner` is never grantable by a non-owner. The last owner cannot be removed;
+  ownership moves by granting a second owner and revoking the first. The gate
+  checks the real caller, so an admin cannot climb by `act_as`-ing the owner.
+  New `POST /admin/dataset/initialise` (MCP tool `initialise_dataset`) makes
+  the caller the first owner of a dataset with no owner or admin, and creates
+  its Home if absent. Only an identity-bound token, or a trusted proxy's
+  asserted identity, that is also listed in the new `DATASET_CLAIMANTS` setting
+  may use it; a legacy shared token or an open deployment never can, and an
+  empty list (the default) turns it off. The check and the grant are one SPARQL
+  update, so two concurrent claims cannot both win, and the claim is always
+  audited. A caller with no Person on an unclaimed dataset now gets
+  `code: dataset_unclaimed` (a cue for the client to ask the person), but only
+  if they could act on it. `holonbridge-bootstrap-admin` and the start scripts
+  now default to `--role owner`; the new `--grant-existing` flag gives a dataset
+  that predates the owner role its first owner. Closes #57
+  ([#58](https://github.com/kurtcagle/holon-bridge-python/pull/58)).
 
 ### 2026-10-21
 
@@ -320,6 +357,24 @@ process:
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
 
+hb:release-2026-10-25-b a hb:ReleaseNote ;
+    dcterms:date "2026-10-25"^^xsd:date ;
+    rdfs:label "Fluent gate applies the graph-crossing SHACL guard" ;
+    dcterms:description "The fluent pre-commit check validates through the client directly and so skipped the guard that refuses a SPARQLConstraint referencing GRAPH. On a gated dataset such a constraint silently passed every fluent transition; update_fluent now raises a FluentError naming the shape. Documented the flat form for a per-graph singleton constraint. Constraints that genuinely span graphs remain unenforceable, tracked in #60." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/59> .
+
+hb:release-2026-10-25-a a hb:ReleaseNote ;
+    dcterms:date "2026-10-25"^^xsd:date ;
+    rdfs:label "Owner role and allowlisted dataset claim" ;
+    dcterms:description "Added a reserved owner role above admin (owner implies admin; once an owner exists only an owner may grant, revoke or deactivate admin or owner) and POST /admin/dataset/initialise, which makes an allowlisted, identity-established caller the first owner of a dataset with no owner or admin. New setting DATASET_CLAIMANTS; empty by default, which disables the in-band claim. Legacy shared tokens and open deployments can never claim. A caller with no Person on an unclaimed dataset gets a typed dataset_unclaimed error, shown only if they could act on it. holonbridge-bootstrap-admin now defaults to --role owner and gains --grant-existing." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/58> .
+
+hb:release-2026-10-21-a a hb:ReleaseNote ;
+    dcterms:date "2026-10-21"^^xsd:date ;
+    rdfs:label "SHACL context: a taxonomy graph role, merged into the validation context beside the ontology" ;
+    dcterms:description "New graph role taxonomy (urn:{dataset}:taxonomy) for controlled vocabularies, kept apart from the ontology so they can be granted, versioned and replaced independently. Conn.validation_context_graphs is now (ontology, taxonomy), so shapes in shacl-context that check a value against a concept can see the concept. The taxonomy is read-only context, added to the scratch copy with ADD SILENT and never written to, chosen by the dataset and never by a request. A dataset with no taxonomy graph behaves exactly as before. Every validated write now copies the context graphs into a scratch graph (twice in delta mode), so a very large taxonomy will slow writes; not measured. Tested with the existing fake client, not a live Fuseki run." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/54> .
+
 hb:release-2026-10-07-a a hb:ReleaseNote ;
     dcterms:date "2026-10-07"^^xsd:date ;
     rdfs:label "Identity-bound bearer tokens" ;
@@ -439,10 +494,4 @@ hb:release-2026-10-04-a a hb:ReleaseNote ;
     rdfs:label "find_delegation: fixed a Jena ARQ crash on the common zero-delegations case" ;
     dcterms:description "find_delegation 500'd against real Fuseki with ARQInternalErrorException: Peek iterator is already empty, on any dataset with no matching Delegation triples for the bound pattern -- the common case, hit via check_write/authorize_query for any identity with no grantsWrite. The rdflib test harness in tests/test_delegation*.py cannot see this; it's a Jena ARQ optimizer bug. Three independent SPARQL-level rewrites (merging two FILTER NOT EXISTS into one via UNION, merging delegatedGraph into the main predicate chain, VALUES instead of a FILTER equality on ?delegator) each fixed their own isolated case live against Fuseki but still crashed combined -- none composed. Fixed by replacing the one correlated query with the simplest possible candidate query (delegate + permission only) plus validity-window, revocation, delegator-status and target/delegator narrowing in Python instead of SPARQL. Verified against the real running service: an unprivileged write now returns a clean 403, not a 500; a real delegation lets the write through with correct attribution. Full test suite unchanged." ;
     rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/43> .
-
-hb:release-2026-10-21-a a hb:ReleaseNote ;
-    dcterms:date "2026-10-21"^^xsd:date ;
-    rdfs:label "SHACL context: a taxonomy graph role, merged into the validation context beside the ontology" ;
-    dcterms:description "New graph role taxonomy (urn:{dataset}:taxonomy) for controlled vocabularies, kept apart from the ontology so they can be granted, versioned and replaced independently. Conn.validation_context_graphs is now (ontology, taxonomy), so shapes in shacl-context that check a value against a concept can see the concept. The taxonomy is read-only context, added to the scratch copy with ADD SILENT and never written to, chosen by the dataset and never by a request. A dataset with no taxonomy graph behaves exactly as before. Every validated write now copies the context graphs into a scratch graph (twice in delta mode), so a very large taxonomy will slow writes; not measured. Tested with the existing fake client, not a live Fuseki run." ;
-    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/54> .
 ```

@@ -80,7 +80,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
 from .. import delegation as dg
-from ..acl import is_admin
+from ..acl import is_admin, is_owner, owner_exists
 from ..conn import Conn
 from ..deps import ActingAsDep, AnimusDep, ClientDep, ConnDep
 from ..fuseki import FusekiError
@@ -125,6 +125,44 @@ async def _require_admin(conn: ConnDep, client: ClientDep, animus: AnimusDep) ->
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, detail="admin role required on this dataset"
         )
+
+
+async def _require_owner_for(
+    conn: ConnDep, client: ClientDep, animus: AnimusDep, *, role_iris
+) -> None:
+    """Granting, revoking or stripping ``admin`` / ``owner`` is an owner's act.
+
+    The hierarchy, once a dataset has an owner: an owner may create and remove
+    admins and other owners; an admin may not touch either, so an admin can
+    never promote themselves or a friend, or remove the owner. Everything else
+    an admin does is unchanged.
+
+    Two rules keep existing datasets working. (1) A dataset with NO owner keeps
+    today's flat behaviour for ``admin`` -- admins may still manage admins --
+    until an owner is established from the operator side
+    (``holonbridge-bootstrap-admin --role owner``). (2) ``owner`` itself is
+    never grantable by a non-owner, ever: with no owner there is no route that
+    mints one through the REST API, by design.
+
+    Checks the REAL caller (``animus.real_person``), like ``_require_admin``, so
+    an admin cannot climb by ``act_as``-ing the owner.
+    """
+    admin_iri, owner_iri = conn.role_iri("admin"), conn.role_iri("owner")
+    touched = {r for r in role_iris if r in (admin_iri, owner_iri)}
+    if not touched:
+        return
+
+    async def query_fn(q: str) -> dict:
+        return await client.select(conn, q)
+
+    if await is_owner(query_fn, conn.holons_graph, person=animus.real_person):
+        return
+    if owner_iri not in touched and not await owner_exists(query_fn, conn.holons_graph):
+        return  # no owner yet: the flat admin model still applies
+    raise HTTPException(
+        status.HTTP_403_FORBIDDEN,
+        detail="owner role required to grant or revoke admin or owner on this dataset",
+    )
 
 
 async def _require_person_exists(query_fn, holons_graph: str, *, person: str) -> None:
@@ -201,15 +239,47 @@ SELECT ?target ?mode WHERE {{
 
 
 async def _sole_remaining_admin(query_fn, conn: Conn, *, exclude: str) -> bool:
-    """Whether ``exclude`` is the only Person currently holding the admin
-    Role on this dataset -- the guard ``revoke_role`` and
-    ``deactivate_person`` both need before removing an admin's standing,
-    since acl.py's admin bypass has no ordinary-Role fallback beneath it."""
-    admin_role = conn.role_iri("admin")
+    """Whether ``exclude`` is the only Person who can still act as an admin on
+    this dataset -- holding the admin Role or the owner Role, which implies it.
+    The guard ``revoke_role`` and ``deactivate_person`` both need before
+    removing someone's standing, since acl.py's admin bypass has no
+    ordinary-Role fallback beneath it."""
     query = f"""PREFIX holon: <{HOLON}>
 ASK {{
   GRAPH <{conn.holons_graph}> {{
-    ?other holon:hasRole <{admin_role}> .
+    ?other holon:hasRole ?role .
+    FILTER (?role IN (<{conn.role_iri("admin")}>, <{conn.role_iri("owner")}>))
+    FILTER(?other != <{exclude}>)
+  }}
+}}"""
+    result = await query_fn(query)
+    return not result.get("boolean")
+
+
+async def _admin_capacity_survives(query_fn, conn: Conn, *, person: str, removing: str) -> bool:
+    """Whether someone can still act as an admin once the single grant
+    (``person`` holds ``removing``) is gone. Finer than
+    ``_sole_remaining_admin``: an owner who also holds admin keeps admin
+    capacity when only the admin grant is revoked."""
+    query = f"""PREFIX holon: <{HOLON}>
+ASK {{
+  GRAPH <{conn.holons_graph}> {{
+    ?holder holon:hasRole ?role .
+    FILTER (?role IN (<{conn.role_iri("admin")}>, <{conn.role_iri("owner")}>))
+    FILTER (?holder != <{person}> || ?role != <{removing}>)
+  }}
+}}"""
+    return bool((await query_fn(query)).get("boolean"))
+
+
+async def _sole_remaining_owner(query_fn, conn: Conn, *, exclude: str) -> bool:
+    """Whether ``exclude`` is the only Person holding the owner Role. A dataset
+    that has had an owner never drops to none through the REST API -- ownership
+    moves by granting a second owner and then revoking the first."""
+    query = f"""PREFIX holon: <{HOLON}>
+ASK {{
+  GRAPH <{conn.holons_graph}> {{
+    ?other holon:hasRole <{conn.role_iri("owner")}> .
     FILTER(?other != <{exclude}>)
   }}
 }}"""
@@ -259,6 +329,8 @@ async def create_person(
     full_name/metadata adds to what's there rather than replacing it.
     """
     await _require_admin(conn, client, animus)
+    if body.role:
+        await _require_owner_for(conn, client, animus, role_iris=[conn.role_iri(body.role)])
 
     for key in body.metadata:
         if not _METADATA_KEY.match(key):
@@ -529,6 +601,7 @@ async def grant_role(
     indistinguishable from one minted at person-creation time.
     """
     await _require_admin(conn, client, animus)
+    await _require_owner_for(conn, client, animus, role_iris=[conn.role_iri(body.role)])
 
     person_iri = _resolve_person(conn, body.person)
 
@@ -583,6 +656,7 @@ async def revoke_role(
     for. Refusing here is cheaper than needing that.
     """
     await _require_admin(conn, client, animus)
+    await _require_owner_for(conn, client, animus, role_iris=[conn.role_iri(body.role)])
 
     person_iri = _resolve_person(conn, body.person)
     role_iri = conn.role_iri(body.role)
@@ -604,8 +678,18 @@ ASK {{ GRAPH <{conn.holons_graph}> {{ <{person_iri}> holon:hasRole <{role_iri}> 
             "note": "not_found: this person does not currently hold that role",
         }
 
-    if role_iri == conn.role_iri("admin") and await _sole_remaining_admin(
+    if role_iri == conn.role_iri("owner") and await _sole_remaining_owner(
         query_fn, conn, exclude=person_iri
+    ):
+        return {
+            "ok": False,
+            "person": person_iri,
+            "role": role_iri,
+            "note": "refused: this is the only owner of this dataset -- grant owner to "
+            "someone else first, then revoke this one",
+        }
+    if role_iri in (conn.role_iri("admin"), conn.role_iri("owner")) and not await _admin_capacity_survives(
+        query_fn, conn, person=person_iri, removing=role_iri
     ):
         return {
             "ok": False,
@@ -837,8 +921,19 @@ async def deactivate_person(
 
     roles = await _person_roles(query_fn, conn, person=person_iri)
     role_iris = {r["role"] for r in roles}
+    await _require_owner_for(conn, client, animus, role_iris=role_iris)
     admin_role = conn.role_iri("admin")
-    if admin_role in role_iris and await _sole_remaining_admin(
+    owner_role = conn.role_iri("owner")
+    if owner_role in role_iris and await _sole_remaining_owner(
+        query_fn, conn, exclude=person_iri
+    ):
+        return {
+            "ok": False,
+            "person": person_iri,
+            "note": "refused: this is the only owner of this dataset -- grant owner to "
+            "someone else first, then deactivate this one",
+        }
+    if (admin_role in role_iris or owner_role in role_iris) and await _sole_remaining_admin(
         query_fn, conn, exclude=person_iri
     ):
         return {
