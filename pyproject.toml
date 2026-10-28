@@ -45,6 +45,9 @@ packages = ["holonbridge", "holonbridge_mcp"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "jena: needs a real Jena Fuseki (skipped unless HOLONBRIDGE_TEST_FUSEKI_HOME or HOLONBRIDGE_TEST_JENA_URL is set; see tests/jena_support.py)",
+]
 
 [tool.ruff]
 line-length = 100

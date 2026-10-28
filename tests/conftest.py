@@ -26,3 +26,19 @@ def _scrub_mcp_and_oauth_env(monkeypatch):
     for key in list(os.environ):
         if key.startswith(_SCRUBBED_PREFIXES):
             monkeypatch.delenv(key, raising=False)
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip ``@pytest.mark.jena`` tests unless a real Jena is configured.
+
+    The default run is unchanged: those tests collect, report as skipped, and
+    never start a server. See ``tests/jena_support.py`` to enable the lane.
+    """
+    from . import jena_support
+
+    if jena_support.configured():
+        return
+    skip = pytest.mark.skip(reason=jena_support.skip_reason())
+    for item in items:
+        if "jena" in item.keywords:
+            item.add_marker(skip)
