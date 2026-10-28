@@ -12,7 +12,6 @@ from urllib.parse import urlencode
 
 import httpx
 
-from .assembler import build_dataset_assembler
 from .conn import Conn
 
 SPARQL_JSON = "application/sparql-results+json"
@@ -244,21 +243,19 @@ class FusekiClient:
         out.sort(key=lambda d: d["name"])
         return out
 
-    async def create_dataset(
-        self, conn: Conn, name: str, *, persistent: bool, location: str | None = None
-    ) -> None:
-        """Create an empty dataset, with a SHACL endpoint, through Fuseki's admin API.
+    async def create_dataset(self, conn: Conn, name: str, *, persistent: bool) -> None:
+        """Create an empty dataset through Fuseki's admin API.
 
-        ``persistent=True`` makes a TDB2 dataset at ``location`` (an absolute
-        directory, required then); ``False`` makes an in-memory one. Raises
+        ``persistent=True`` asks for a TDB2 dataset (on disk, survives a
+        restart); ``False`` asks for an in-memory one. Raises
         :class:`FusekiError` -- status 409 when the name is taken.
 
-        The bridge uploads an assembler it *generates* (see
-        :mod:`holonbridge.assembler`) rather than using the simpler
-        ``dbName``/``dbType`` form, because a dataset made by the form has no
-        ``/shacl`` endpoint. The assembler is never taken from a caller: it can
-        name arbitrary filesystem locations and Java classes, so only a
-        validated name and an operator-configured directory go into it.
+        Takes only a name and a kind, and that is all Fuseki will accept: it
+        removed support for uploading a service configuration through this API
+        (it could read any file on the server), so a dataset made here comes
+        from Fuseki's fixed template, which has no ``/shacl`` endpoint. Adding
+        one is a separate step, :mod:`holonbridge.service_config`, that takes
+        effect when Fuseki next restarts.
 
         There is intentionally no ``drop_dataset`` beside this. See
         ``tests/test_dataset_create.py``, which fails if one appears.
@@ -267,8 +264,8 @@ class FusekiClient:
         await self._post(
             url,
             conn=conn,
-            content=build_dataset_assembler(name, persistent=persistent, location=location),
-            content_type=TURTLE,
+            content=urlencode({"dbName": name, "dbType": "tdb2" if persistent else "mem"}),
+            content_type="application/x-www-form-urlencoded",
             accept="*/*",
         )
 

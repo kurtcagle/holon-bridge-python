@@ -12,14 +12,18 @@ rules are written down here rather than left to the route:
 * **Create only. There is no drop.** Nothing in the bridge can remove a dataset
   once made; that stays a deliberate manual step in Fuseki. The cost is that
   datasets accumulate, hence ``MAX_DATASETS``.
-* **Name and kind only.** No assembler file is accepted or relayed: the bridge
-  generates the assembler itself (see :mod:`holonbridge.assembler`).
-* **SHACL is always on.** Every dataset gets Fuseki's ``/shacl`` endpoint, and
-  (unless ``shapes=false``) the bundled shapes -- identity, delegation, fluent --
-  are seeded into its shapes graph. A dataset made through Fuseki's own admin
-  form has neither, so on a bridge that gates writes with SHACL it would reject
-  every write, and the shapes could not be pushed through the gated routes to
-  fix it. Persistent datasets live under ``FUSEKI_DATABASES_DIR``.
+* **Name and kind only.** That is all Fuseki's admin API accepts: it removed
+  support for uploading a service configuration (such a file could read any
+  file on the server), so the dataset comes from Fuseki's fixed template.
+* **SHACL is meant to be on, but only a restart can do it.** The template has
+  no ``/shacl`` endpoint, and on a bridge that gates writes with SHACL a
+  dataset without one rejects every write. The only route left is editing the
+  configuration file Fuseki wrote, which Fuseki reads at startup. So, when
+  ``FUSEKI_CONFIG_DIR`` is set, the bridge appends a shacl endpoint to that file
+  (:mod:`holonbridge.service_config`) and reports ``restartRequired``; until
+  Fuseki restarts the dataset has no ``/shacl`` and the response says so. The
+  bundled shapes -- identity, delegation, fluent -- are seeded into the shapes
+  graph at once (unless ``shapes=false``), so they are ready when it does.
 * **Strict names.** Lower-case, letters/digits/hyphen/underscore, starting with
   a letter, no dots. The name becomes a URL segment, a directory and a
   configuration file name, and Windows folds case, so two names differing only
@@ -49,6 +53,7 @@ from .claim import Claimant, ClaimError, claim
 from .config import Settings
 from .conn import GRAPH_ROLES, Conn
 from .fuseki import FusekiClient, FusekiError
+from .service_config import ServiceConfigError, enable_shacl
 from .turtle import TurtleSyntaxError
 from .turtle import parse as parse_turtle
 
@@ -86,8 +91,11 @@ class Created:
     conn: Conn
     claim: dict[str, Any] | None
     claim_error: dict[str, Any] | None
-    #: Whether Fuseki reports a ``shacl`` service on the new dataset (read back).
+    #: Whether Fuseki reports a ``shacl`` service on the new dataset right now (read back).
     shacl_enabled: bool = False
+    #: The configuration file was edited so the endpoint exists after a restart.
+    shacl_configured: bool = False
+    shacl_config_error: str | None = None
     #: Shapes graph the bundled shapes were written to, or ``None`` if not seeded.
     shapes_seeded: str | None = None
     shapes_error: dict[str, Any] | None = None
@@ -153,20 +161,6 @@ def bundled_shapes() -> str:
     return text
 
 
-def database_location(settings: Settings, name: str) -> str:
-    """Absolute TDB2 directory for a new persistent dataset, or :class:`CreateError`."""
-    root = settings.databases_dir()
-    if root is None:
-        raise CreateError(
-            503,
-            "databases_dir_unset",
-            "persistent datasets need an absolute directory on the Fuseki host to live in: "
-            "set FUSEKI_DATABASES_DIR (or FUSEKI_CONFIG_DIR, whose sibling 'databases' "
-            "directory is then used). A memory dataset does not need it.",
-        )
-    return (root / name).as_posix()
-
-
 async def create(
     client: FusekiClient,
     conn: Conn,
@@ -186,8 +180,6 @@ async def create(
     optionally seeds the bundled shapes and makes ``who`` its owner.
     """
     validate_name(name, settings)
-    # Before any call to Fuseki: a missing setting is not worth a round trip.
-    location = database_location(settings, name) if kind == "persistent" else None
 
     try:
         hosted = await client.list_datasets(conn)
@@ -212,7 +204,7 @@ async def create(
         )
 
     try:
-        await client.create_dataset(conn, name, persistent=kind == "persistent", location=location)
+        await client.create_dataset(conn, name, persistent=kind == "persistent")
     except FusekiError as exc:
         if exc.status == 409:  # lost a race with another creator
             raise CreateError(409, "dataset_exists", f"dataset {name!r} already exists") from exc
@@ -233,6 +225,24 @@ async def create(
                 break
     except FusekiError:
         pass
+
+    # A dataset made through the admin API has no shacl endpoint. Add one to its
+    # configuration so it exists once Fuseki restarts. Not an error if this
+    # cannot be done: the dataset exists and the response says what is missing.
+    shacl_configured = False
+    shacl_config_error: str | None = None
+    if not shacl_enabled:
+        if settings.fuseki_config_dir is None:
+            shacl_config_error = (
+                "FUSEKI_CONFIG_DIR is not set, so the bridge cannot add a shacl endpoint to "
+                "the dataset's configuration"
+            )
+        else:
+            try:
+                enable_shacl(settings.fuseki_config_dir, name)
+                shacl_configured = True
+            except ServiceConfigError as exc:
+                shacl_config_error = str(exc)
 
     shapes_seeded: str | None = None
     shapes_error: dict[str, Any] | None = None
@@ -262,6 +272,8 @@ async def create(
         claim=claimed,
         claim_error=claim_error,
         shacl_enabled=shacl_enabled,
+        shacl_configured=shacl_configured,
+        shacl_config_error=shacl_config_error,
         shapes_seeded=shapes_seeded,
         shapes_error=shapes_error,
     )

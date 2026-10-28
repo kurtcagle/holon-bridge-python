@@ -166,10 +166,14 @@ async def create_dataset(
     the very first write. The result reports ``bankScoped`` and the graph IRIs
     the dataset will use.
 
-    Every dataset is created with SHACL enabled (``shaclEndpoint`` in the result)
-    and, unless ``shapes=false``, with the bundled identity/delegation/fluent
-    shapes already in its shapes graph, so validation works from the first write.
-    Pass ``shapes=false`` too when you want a completely untouched dataset.
+    Fuseki cannot create a dataset with a SHACL endpoint through its API, so
+    the bridge adds one to the dataset's configuration file, and it only
+    exists after Fuseki is RESTARTED (``restartRequired`` in the result;
+    ``shaclEnabled`` is true once it is live). Until then a SHACL-gated bridge
+    cannot write to the dataset -- tell the person to restart Fuseki. Unless
+    ``shapes=false``, the bundled identity/delegation/fluent shapes are
+    seeded into the shapes graph at once. Pass ``shapes=false`` too when you
+    want a completely untouched dataset.
 
     Does not switch you to the new dataset; call ``switch_dataset`` for that.
     """
