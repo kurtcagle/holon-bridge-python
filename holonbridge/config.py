@@ -187,6 +187,13 @@ class Settings:
     # the backstop against a runaway loop (or a mistaken script) filling the
     # server. Counts what Fuseki reports, not just what the bridge created.
     max_datasets: int = 50
+
+    # Where ``snapshot_dataset`` writes (and ``restore_dataset`` reads): a
+    # directory on the bridge's own host, one subdirectory per dataset. Unset
+    # turns both off. ``snapshot_max_bytes`` caps what one snapshot may hold,
+    # since the bridge reads the whole dataset into memory to write it.
+    snapshot_dir: Path | None = None
+    snapshot_max_bytes: int = 50_000_000
     allow_legacy_bearer: bool = True
 
     # Turtle handling. ``passthrough`` sends payloads to Jena unparsed, which
@@ -268,6 +275,8 @@ class Settings:
             dataset_claimants=parse_dataset_claimants(os.getenv("DATASET_CLAIMANTS")),
             dataset_creators=parse_dataset_creators(os.getenv("DATASET_CREATORS")),
             max_datasets=int(os.getenv("MAX_DATASETS", "50")),
+            snapshot_dir=Path(os.environ["SNAPSHOT_DIR"]) if os.getenv("SNAPSHOT_DIR") else None,
+            snapshot_max_bytes=int(os.getenv("SNAPSHOT_MAX_BYTES", "50000000")),
             allow_legacy_bearer=_flag("ALLOW_LEGACY_BEARER", True),
             parse_mode=os.getenv("PARSE_MODE", "passthrough").strip().lower(),
             shacl_required=_flag("SHACL_REQUIRED", False),

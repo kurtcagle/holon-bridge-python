@@ -19,6 +19,8 @@ any one dataset.
 
 CHANGED 2026-10-27: added ``seed_dataset_shapes``, for a dataset that came back
 empty (an in-memory one after a Fuseki restart). Same gate as ``create_dataset``.
+Also ``snapshot_dataset`` / ``restore_dataset``: checkpoint a dataset's graphs to
+files before a restart and put them back after.
 """
 
 from __future__ import annotations
@@ -205,3 +207,36 @@ async def seed_dataset_shapes(claim: bool = False) -> dict:
     Acts on the active dataset -- ``switch_dataset`` first.
     """
     return await _call("POST", "/admin/dataset/shapes", json_body={"claim": claim})
+
+
+@mcp.tool()
+async def snapshot_dataset() -> dict:
+    """Save the ACTIVE dataset's graphs to files on the bridge's host. Do this BEFORE restarting Fuseki.
+
+    An in-memory dataset comes back from a Fuseki restart empty. A snapshot lets
+    ``restore_dataset`` put everything back as it was, shapes, ownership and
+    data included. It is a checkpoint, not a backup system: it only helps if it
+    is taken before the restart, and anything that must not be lost belongs in
+    a persistent dataset.
+
+    Needs admin on the dataset. Keeps one snapshot per dataset and replaces it
+    atomically. Refuses an empty dataset so a snapshot taken AFTER a restart
+    cannot replace a good one with nothing, and one larger than the operator's
+    ``SNAPSHOT_MAX_BYTES``. Off unless the operator set ``SNAPSHOT_DIR``.
+    Acts on the active dataset -- ``switch_dataset`` first.
+    """
+    return await _call("POST", "/admin/dataset/snapshot", json_body={})
+
+
+@mcp.tool()
+async def restore_dataset() -> dict:
+    """Put the ACTIVE dataset's snapshot back into it. Use after Fuseki lost it.
+
+    Only fills an EMPTY dataset and never overwrites: a dataset with any content
+    is refused. Restores exactly what ``snapshot_dataset`` saved, ownership
+    included, so the ownership comes from the snapshot, not from the caller.
+    Same gate as ``create_dataset`` (``DATASET_CREATORS``), because an empty
+    dataset has no admin to ask. If no snapshot exists, ``seed_dataset_shapes``
+    can at least restore the shapes. Acts on the active dataset.
+    """
+    return await _call("POST", "/admin/dataset/restore", json_body={})
