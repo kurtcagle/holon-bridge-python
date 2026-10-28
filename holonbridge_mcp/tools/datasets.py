@@ -141,7 +141,9 @@ async def provision_text_index(
 
 
 @mcp.tool()
-async def create_dataset(name: str, kind: str, claim: bool = True) -> dict:
+async def create_dataset(
+    name: str, kind: str, claim: bool = True, shapes: bool = True
+) -> dict:
     """Create a new, empty dataset on the backend. There is no drop tool.
 
     ``kind`` is required and is either ``persistent`` (a TDB2 dataset on disk,
@@ -164,8 +166,13 @@ async def create_dataset(name: str, kind: str, claim: bool = True) -> dict:
     the very first write. The result reports ``bankScoped`` and the graph IRIs
     the dataset will use.
 
+    Every dataset is created with SHACL enabled (``shaclEndpoint`` in the result)
+    and, unless ``shapes=false``, with the bundled identity/delegation/fluent
+    shapes already in its shapes graph, so validation works from the first write.
+    Pass ``shapes=false`` too when you want a completely untouched dataset.
+
     Does not switch you to the new dataset; call ``switch_dataset`` for that.
     """
     return await _call(
-        "POST", "/datasets", json_body={"name": name, "kind": kind, "claim": claim}
+        "POST", "/datasets", json_body={"name": name, "kind": kind, "claim": claim, "shapes": shapes}
     )

@@ -226,6 +226,21 @@ class Settings:
     # whether this process can see that host's disk.
     fuseki_config_dir: Path | None = None
 
+    # Where persistent (TDB2) datasets the bridge creates are stored: an
+    # absolute directory on the Fuseki host. Defaults to ``databases`` beside
+    # ``fuseki_config_dir`` (Fuseki's ``run/configuration`` and ``run/databases``
+    # are siblings), so setting FUSEKI_CONFIG_DIR is normally enough. Never
+    # guessed from fuseki_url, for the same reason fuseki_config_dir isn't.
+    fuseki_databases_dir: Path | None = None
+
+    def databases_dir(self) -> Path | None:
+        """The directory persistent datasets are created under, or ``None``."""
+        if self.fuseki_databases_dir is not None:
+            return self.fuseki_databases_dir
+        if self.fuseki_config_dir is not None:
+            return self.fuseki_config_dir.parent / "databases"
+        return None
+
     def __post_init__(self) -> None:
         # One token, one role. A token that is both the shared legacy token and
         # an identity token (or a proxy token) would be ambiguous about whether
@@ -256,6 +271,7 @@ class Settings:
             return raw.strip().lower() in {"1", "true", "yes", "on"}
 
         fuseki_config_dir_raw = os.getenv("FUSEKI_CONFIG_DIR")
+        fuseki_databases_dir_raw = os.getenv("FUSEKI_DATABASES_DIR")
 
         return cls(
             host=os.getenv("HOLONBRIDGE_HOST", "127.0.0.1"),
@@ -281,6 +297,9 @@ class Settings:
             scheduler_max_firing_depth=int(os.getenv("SCHEDULER_MAX_FIRING_DEPTH", "3")),
             config_path=Path(os.getenv("HOLONBRIDGE_CONFIG", str(DEFAULT_CONFIG_PATH))),
             fuseki_config_dir=Path(fuseki_config_dir_raw) if fuseki_config_dir_raw else None,
+            fuseki_databases_dir=(
+                Path(fuseki_databases_dir_raw) if fuseki_databases_dir_raw else None
+            ),
         )
 
 

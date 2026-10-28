@@ -12,8 +12,14 @@ rules are written down here rather than left to the route:
 * **Create only. There is no drop.** Nothing in the bridge can remove a dataset
   once made; that stays a deliberate manual step in Fuseki. The cost is that
   datasets accumulate, hence ``MAX_DATASETS``.
-* **Name and kind only.** No assembler file is accepted or relayed (see
-  :meth:`FusekiClient.create_dataset`).
+* **Name and kind only.** No assembler file is accepted or relayed: the bridge
+  generates the assembler itself (see :mod:`holonbridge.assembler`).
+* **SHACL is always on.** Every dataset gets Fuseki's ``/shacl`` endpoint, and
+  (unless ``shapes=false``) the bundled shapes -- identity, delegation, fluent --
+  are seeded into its shapes graph. A dataset made through Fuseki's own admin
+  form has neither, so on a bridge that gates writes with SHACL it would reject
+  every write, and the shapes could not be pushed through the gated routes to
+  fix it. Persistent datasets live under ``FUSEKI_DATABASES_DIR``.
 * **Strict names.** Lower-case, letters/digits/hyphen/underscore, starting with
   a letter, no dots. The name becomes a URL segment, a directory and a
   configuration file name, and Windows folds case, so two names differing only
@@ -36,16 +42,23 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Literal
 
 from .claim import Claimant, ClaimError, claim
 from .config import Settings
 from .conn import GRAPH_ROLES, Conn
 from .fuseki import FusekiClient, FusekiError
+from .turtle import TurtleSyntaxError
+from .turtle import parse as parse_turtle
 
 Kind = Literal["persistent", "memory"]
 
 _NAME = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+
+#: Shapes seeded into every new dataset's shapes graph, in this order.
+BUNDLED_SHAPES: tuple[str, ...] = ("identity.ttl", "delegation.ttl", "fluent.ttl")
+SHAPES_DIR = Path(__file__).parent / "shapes"
 
 #: Names the bridge itself relies on. ``settings.scheduler_dataset`` is added at
 #: call time because it is configurable.
@@ -73,6 +86,11 @@ class Created:
     conn: Conn
     claim: dict[str, Any] | None
     claim_error: dict[str, Any] | None
+    #: Whether Fuseki reports a ``shacl`` service on the new dataset (read back).
+    shacl_enabled: bool = False
+    #: Shapes graph the bundled shapes were written to, or ``None`` if not seeded.
+    shapes_seeded: str | None = None
+    shapes_error: dict[str, Any] | None = None
 
 
 def validate_name(name: str, settings: Settings) -> str:
@@ -113,12 +131,40 @@ def describe_new(conn: Conn, name: str, kind: Kind) -> dict[str, Any]:
             f"graphs follow urn:{{dataset}}:{{role}}. To use urn:{conn.bank_name}:{{dataset}}:{{role}} "
             "instead, add the dataset to this bank's bankScopedDatasets in config.json and "
             "reload BEFORE its first write -- identity written under the other convention is "
-            "orphaned when the setting changes. (Pass claim=false to create without writing "
-            "an owner yet.)"
+            "orphaned when the setting changes. (Pass claim=false and shapes=false to create "
+            "without writing anything yet.)"
         )
     if notes:
         out["notes"] = notes
     return out
+
+
+def bundled_shapes() -> str:
+    """The bundled shapes as one Turtle document (prefix redeclaration is legal Turtle).
+
+    Parsed before it is returned: a broken packaged file should fail loudly in
+    the bridge's own tests, not as a half-seeded dataset.
+    """
+    text = "\n".join((SHAPES_DIR / name).read_text(encoding="utf-8") for name in BUNDLED_SHAPES)
+    try:
+        parse_turtle(text)
+    except TurtleSyntaxError as exc:
+        raise RuntimeError(f"bundled shapes do not parse: {exc}") from exc
+    return text
+
+
+def database_location(settings: Settings, name: str) -> str:
+    """Absolute TDB2 directory for a new persistent dataset, or :class:`CreateError`."""
+    root = settings.databases_dir()
+    if root is None:
+        raise CreateError(
+            503,
+            "databases_dir_unset",
+            "persistent datasets need an absolute directory on the Fuseki host to live in: "
+            "set FUSEKI_DATABASES_DIR (or FUSEKI_CONFIG_DIR, whose sibling 'databases' "
+            "directory is then used). A memory dataset does not need it.",
+        )
+    return (root / name).as_posix()
 
 
 async def create(
@@ -130,15 +176,18 @@ async def create(
     name: str,
     kind: Kind,
     claim_for_creator: bool = True,
+    seed_shapes: bool = True,
 ) -> Created:
     """Create ``name`` as an empty dataset. Raises :class:`CreateError`.
 
     The caller has already been authorised as a creator (see
     :func:`holonbridge.claim.creator`); this validates the request, checks the
     server has room and does not already host the name, creates the dataset, and
-    optionally makes ``who`` its owner.
+    optionally seeds the bundled shapes and makes ``who`` its owner.
     """
     validate_name(name, settings)
+    # Before any call to Fuseki: a missing setting is not worth a round trip.
+    location = database_location(settings, name) if kind == "persistent" else None
 
     try:
         hosted = await client.list_datasets(conn)
@@ -163,7 +212,7 @@ async def create(
         )
 
     try:
-        await client.create_dataset(conn, name, persistent=kind == "persistent")
+        await client.create_dataset(conn, name, persistent=kind == "persistent", location=location)
     except FusekiError as exc:
         if exc.status == 409:  # lost a race with another creator
             raise CreateError(409, "dataset_exists", f"dataset {name!r} already exists") from exc
@@ -172,6 +221,28 @@ async def create(
         ) from exc
 
     new_conn = replace(conn, dataset=name, overridden=True)
+
+    # Read back what Fuseki actually built rather than trusting that the
+    # assembler was honoured. Failure here changes nothing about the dataset, so
+    # it is a warning (``shaclEnabled: false``), not an error.
+    shacl_enabled = False
+    try:
+        for entry in await client.list_datasets(conn):
+            if entry.get("name", "").lower() == name:
+                shacl_enabled = "shacl" in entry.get("services", [])
+                break
+    except FusekiError:
+        pass
+
+    shapes_seeded: str | None = None
+    shapes_error: dict[str, Any] | None = None
+    if seed_shapes:
+        try:
+            await client.put_graph(new_conn, new_conn.shapes_graph, bundled_shapes())
+            shapes_seeded = new_conn.shapes_graph
+        except FusekiError as exc:
+            shapes_error = {"code": "shapes_seed_failed", "message": exc.message, "status": exc.status}
+
     claimed: dict[str, Any] | None = None
     claim_error: dict[str, Any] | None = None
     if claim_for_creator:
@@ -184,4 +255,13 @@ async def create(
         except FusekiError as exc:
             claim_error = {"code": "claim_failed", "message": exc.message, "status": exc.status}
 
-    return Created(dataset=name, kind=kind, conn=new_conn, claim=claimed, claim_error=claim_error)
+    return Created(
+        dataset=name,
+        kind=kind,
+        conn=new_conn,
+        claim=claimed,
+        claim_error=claim_error,
+        shacl_enabled=shacl_enabled,
+        shapes_seeded=shapes_seeded,
+        shapes_error=shapes_error,
+    )

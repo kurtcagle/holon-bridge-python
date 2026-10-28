@@ -905,8 +905,17 @@ no way to drop a dataset, so removing one stays a deliberate step in Fuseki.
   restart; `memory` loses its contents when Fuseki restarts), and `claim`
   (default true: the caller becomes the owner, so nobody can take the dataset in
   the gap; false creates it and writes nothing, for instance to set up bank
-  scoping first). The bridge sends only a name and a type to Fuseki — never an
-  assembler file, which could name arbitrary paths and classes.
+  scoping first), and `shapes` (default true: seed the bundled identity,
+  delegation and fluent shapes into the new dataset's shapes graph).
+- **SHACL is always on.** Fuseki's own admin form makes datasets with no `/shacl`
+  endpoint, which would leave a SHACL-gated bridge rejecting every write (and
+  unable to be given shapes through the gated routes). So the bridge uploads an
+  assembler it **generates** — the standard query/update/graph-store endpoints
+  plus `shacl` — from a validated name and, for `persistent`, a directory under
+  `FUSEKI_DATABASES_DIR` (default: `databases` beside `FUSEKI_CONFIG_DIR`). It
+  never accepts or relays an assembler from a caller, which could name arbitrary
+  paths and classes. After creating, the bridge reads back the services Fuseki
+  actually reports and returns `shaclEnabled` / `shaclEndpoint`.
 - Gate: `DATASET_CREATORS`, a comma-separated list, empty by default (which
   turns creation off). Same standard as claiming — an identity token, or a
   proxy asserting an identity, that is on the list; never the legacy token or an
@@ -918,7 +927,8 @@ no way to drop a dataset, so removing one stays a deliberate step in Fuseki.
   `reserved_dataset_name` (`admin` and the scheduler dataset); **409**
   `dataset_exists` (compared case-insensitively, since Windows folds case) or
   `dataset_limit_reached` (`MAX_DATASETS`, default 50, counted from what Fuseki
-  reports); **502** `admin_api_unavailable` or `create_failed`. A successful
+  reports); **503** `databases_dir_unset` (persistent, no directory configured);
+  **502** `admin_api_unavailable` or `create_failed`. A successful
   creation is always audited, like initialising a dataset, whatever the audit
   level.
 - Fuseki's default rule admits `/$/` admin requests only from the same machine,

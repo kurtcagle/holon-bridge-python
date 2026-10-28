@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 
 import httpx
 
+from .assembler import build_dataset_assembler
 from .conn import Conn
 
 SPARQL_JSON = "application/sparql-results+json"
@@ -243,18 +244,21 @@ class FusekiClient:
         out.sort(key=lambda d: d["name"])
         return out
 
-    async def create_dataset(self, conn: Conn, name: str, *, persistent: bool) -> None:
-        """Create an empty dataset through Fuseki's admin API.
+    async def create_dataset(
+        self, conn: Conn, name: str, *, persistent: bool, location: str | None = None
+    ) -> None:
+        """Create an empty dataset, with a SHACL endpoint, through Fuseki's admin API.
 
-        ``persistent=True`` asks for a TDB2 dataset (on disk, survives a
-        restart); ``False`` asks for an in-memory one. Raises
+        ``persistent=True`` makes a TDB2 dataset at ``location`` (an absolute
+        directory, required then); ``False`` makes an in-memory one. Raises
         :class:`FusekiError` -- status 409 when the name is taken.
 
-        Deliberately takes only a name and a kind. Fuseki's admin API will also
-        accept a whole assembler file in the request body, but an assembler can
-        name arbitrary filesystem locations and Java classes, so that variant is
-        never exposed here: if a richer dataset is ever wanted, the bridge
-        should generate the assembler itself from a template, not relay one.
+        The bridge uploads an assembler it *generates* (see
+        :mod:`holonbridge.assembler`) rather than using the simpler
+        ``dbName``/``dbType`` form, because a dataset made by the form has no
+        ``/shacl`` endpoint. The assembler is never taken from a caller: it can
+        name arbitrary filesystem locations and Java classes, so only a
+        validated name and an operator-configured directory go into it.
 
         There is intentionally no ``drop_dataset`` beside this. See
         ``tests/test_dataset_create.py``, which fails if one appears.
@@ -263,8 +267,8 @@ class FusekiClient:
         await self._post(
             url,
             conn=conn,
-            content=urlencode({"dbName": name, "dbType": "tdb2" if persistent else "mem"}),
-            content_type="application/x-www-form-urlencoded",
+            content=build_dataset_assembler(name, persistent=persistent, location=location),
+            content_type=TURTLE,
             accept="*/*",
         )
 

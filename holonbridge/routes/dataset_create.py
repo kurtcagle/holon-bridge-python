@@ -43,6 +43,13 @@ class CreateDatasetRequest(BaseModel):
         "(contents lost on restart). Required: there is no default, so a volatile "
         "dataset is never created by omission."
     )
+    shapes: bool = Field(
+        default=True,
+        description="Seed the bundled shapes (identity, delegation, fluent) into the new "
+        "dataset's shapes graph. On by default, because every created dataset has SHACL "
+        "enabled and a gated bridge rejects writes to a dataset with no shapes. Set false "
+        "to leave the shapes graph empty, e.g. to configure bank scoping first.",
+    )
     claim: bool = Field(
         default=True,
         description="Make the caller the new dataset's owner. Set false to create it "
@@ -69,7 +76,8 @@ async def create_dataset(
 
     Refusals: 400 ``bad_dataset_name`` / ``reserved_dataset_name``; 409
     ``dataset_exists`` or ``dataset_limit_reached``; 502 ``admin_api_unavailable``
-    or ``create_failed`` when Fuseki would not do it.
+    or ``create_failed`` when Fuseki would not do it; 503 ``databases_dir_unset`` for a
+    persistent dataset when no database directory is configured.
     """
     who = creator(
         settings,
@@ -85,7 +93,8 @@ async def create_dataset(
 
     try:
         created = await create(
-            client, conn, settings, who, name=body.name, kind=body.kind, claim_for_creator=body.claim
+            client, conn, settings, who, name=body.name, kind=body.kind, claim_for_creator=body.claim,
+            seed_shapes=body.shapes,
         )
     except CreateError as exc:
         audit.annotate(reason=exc.code)
@@ -98,7 +107,16 @@ async def create_dataset(
         claimed=created.claim is not None,
         owner=created.claim["person"] if created.claim else None,
         claimError=created.claim_error,
+        shaclEnabled=created.shacl_enabled,
+        shaclEndpoint=created.conn.shacl_endpoint if created.shacl_enabled else None,
+        shapesSeeded=created.shapes_seeded,
+        shapesError=created.shapes_error,
     )
+    if not created.shacl_enabled:
+        result.setdefault("notes", []).append(
+            "Fuseki did not report a shacl service on the new dataset, so validation against "
+            "it will not work until it is added in Fuseki"
+        )
     audit.annotate(
         authorised_by=created.claim["person"] if created.claim else None,
         authorised_reason=(

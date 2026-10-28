@@ -13,6 +13,9 @@ under test:
 - there is a ceiling on how many datasets the server will host;
 - ``kind`` is required and means what it says (TDB2 vs in-memory);
 - the creator becomes the owner by default, and ``claim=false`` writes nothing;
+- every created dataset has a SHACL endpoint (the assembler the bridge generates
+  includes it) and, by default, the bundled shapes; persistent ones go under the
+  configured database directory;
 - the bridge cannot drop a dataset: no client method, no route;
 - a successful creation is always audited, and a refusal is audited as denied.
 """
@@ -20,24 +23,29 @@ under test:
 from __future__ import annotations
 
 import json
-from urllib.parse import parse_qs
+from pathlib import Path
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from rdflib import URIRef
+from rdflib import RDF, Literal, URIRef
 
+from holonbridge.assembler import build_dataset_assembler
 from holonbridge.audit import audit_graph
 from holonbridge.config import Settings
 from holonbridge.conn import Conn
 from holonbridge.fuseki import FusekiClient, FusekiError
 from holonbridge.persona_state import PersonaStore
 from holonbridge.server import create_app
+from holonbridge.turtle import parse
 
 from .test_identity_admin import GraphStoreStub
 
 HOLON = "https://w3id.org/holon/"
 HAS_ROLE = URIRef(f"{HOLON}hasRole")
+FUSEKI = "http://jena.apache.org/fuseki#"
+TDB2 = "http://jena.apache.org/2016/tdb#"
+JA = "http://jena.hpl.hp.com/2005/11/Assembler#"
 
 ALICE_TOKEN = "alice-identity-token-0123456789abcdef"
 MALLORY_TOKEN = "mallory-identity-token-0123456789abcd"
@@ -45,6 +53,7 @@ PROXY_TOKEN = "mcp-proxy-token-0123456789abcdef0123"
 SHARED_TOKEN = "shared-legacy-token-0123456789abcdef"
 
 CREATORS = ("alice",)
+DB_ROOT = Path("/srv/fuseki/run/databases")
 
 
 class CreatingStub(GraphStoreStub):
@@ -54,19 +63,30 @@ class CreatingStub(GraphStoreStub):
         super().__init__()
         self.hosted = list(hosted)
         self.created: list[tuple[str, bool]] = []
+        self.locations: dict[str, str | None] = {}
+        self.shacl_on_create = True  # False models a server that ignores the shacl endpoint
         self.create_error: FusekiError | None = None
         self.list_error: FusekiError | None = None
+        self.services: dict[str, list[str]] = {}
         self.forget_creations = False  # model a server that accepts but does not list
 
     async def list_datasets(self, conn):
         if self.list_error is not None:
             raise self.list_error
-        return [{"name": n, "state": True, "services": []} for n in self.hosted]
+        return [
+            {"name": n, "state": True, "services": self.services.get(n, [])} for n in self.hosted
+        ]
 
-    async def create_dataset(self, conn, name, *, persistent):
+    async def create_dataset(self, conn, name, *, persistent, location=None):
         if self.create_error is not None:
             raise self.create_error
         self.created.append((name, persistent))
+        self.locations[name] = location
+        self.services[name] = (
+            ["gsp-r", "gsp-rw", "query", "shacl", "update"]
+            if self.shacl_on_create
+            else ["gsp-r", "gsp-rw", "query", "update"]
+        )
         if not self.forget_creations:
             self.hosted.append(name)
 
@@ -82,6 +102,7 @@ def make(stub, tmp_path):
 
     def build(**settings) -> TestClient:
         settings.setdefault("dataset_creators", CREATORS)
+        settings.setdefault("fuseki_databases_dir", DB_ROOT)
         app = create_app(Settings(fuseki_dataset="example", **settings))
         cm = TestClient(app)
         c = cm.__enter__()
@@ -382,27 +403,61 @@ def _client_with(handler) -> FusekiClient:
 CONN = Conn(base_url="http://fuseki:3030", dataset="ds", overridden=False, bank_name="local")
 
 
-@pytest.mark.parametrize(("persistent", "db_type"), [(True, "tdb2"), (False, "mem")])
-async def test_the_client_posts_only_a_name_and_a_type(persistent, db_type):
+async def test_the_client_uploads_a_generated_assembler_with_a_shacl_endpoint_for_tdb2():
     seen: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         return httpx.Response(200)
 
-    await _client_with(handler).create_dataset(CONN, "newds", persistent=persistent)
+    await _client_with(handler).create_dataset(
+        CONN, "newds", persistent=True, location="/srv/fuseki/run/databases/newds"
+    )
 
     (req,) = seen
     assert req.method == "POST" and str(req.url) == "http://fuseki:3030/$/datasets"
-    assert req.headers["content-type"] == "application/x-www-form-urlencoded"
-    assert parse_qs(req.content.decode()) == {"dbName": ["newds"], "dbType": [db_type]}
+    assert req.headers["content-type"].startswith("text/turtle")
+    g = parse(req.content.decode())
+    assert (None, URIRef(f"{FUSEKI}operation"), URIRef(f"{FUSEKI}shacl")) in g
+    assert (None, URIRef(f"{TDB2}location"), Literal("/srv/fuseki/run/databases/newds")) in g
+    assert (None, RDF.type, URIRef(f"{TDB2}DatasetTDB2")) in g
+    assert (None, URIRef(f"{FUSEKI}name"), Literal("newds")) in g
+
+
+async def test_the_client_uploads_a_memory_assembler_with_no_location():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200)
+
+    await _client_with(handler).create_dataset(CONN, "scratch", persistent=False)
+
+    g = parse(seen[0].content.decode())
+    assert (None, RDF.type, URIRef(f"{JA}MemoryDataset")) in g
+    assert (None, URIRef(f"{TDB2}location"), None) not in g
+    assert (None, URIRef(f"{FUSEKI}operation"), URIRef(f"{FUSEKI}shacl")) in g
+
+
+@pytest.mark.parametrize("bad", ["a b", "../x", 'x"; evil', "X", "", "a" * 65])
+def test_the_assembler_refuses_an_unsafe_name(bad):
+    with pytest.raises(ValueError):
+        build_dataset_assembler(bad, persistent=False)
+
+
+def test_a_persistent_assembler_needs_a_location_and_escapes_it():
+    with pytest.raises(ValueError):
+        build_dataset_assembler("ok", persistent=True)
+    nasty = 'C:/db/"quoted"\\path'
+    g = parse(build_dataset_assembler("ok", persistent=True, location=nasty))
+    assert (None, URIRef(f"{TDB2}location"), Literal(nasty)) in g
 
 
 async def test_the_client_surfaces_fusekis_409():
     client = _client_with(lambda request: httpx.Response(409, text="conflict"))
 
     with pytest.raises(FusekiError) as exc:
-        await client.create_dataset(CONN, "newds", persistent=True)
+        await client.create_dataset(CONN, "newds", persistent=False)
 
     assert exc.value.status == 409
 
@@ -447,3 +502,122 @@ def test_a_refused_creation_is_audited_as_denied(make, stub):
     text = stub.ds.get_context(URIRef(audit_graph("urn:example:holons"))).serialize(format="turtle")
     assert "POST /datasets" in text
     assert '"denied"' in text
+
+
+# --- SHACL is always on ------------------------------------------------------------------------
+
+
+def test_a_persistent_dataset_is_placed_under_the_configured_directory(make, stub):
+    c = make(identity_tokens={ALICE_TOKEN: "alice"})
+
+    r = alice(c, {"name": "newds", "kind": "persistent"})
+
+    assert r.status_code == 201, r.text
+    assert stub.locations["newds"] == "/srv/fuseki/run/databases/newds"
+
+
+def test_the_directory_defaults_to_a_sibling_of_the_config_directory(make, stub):
+    c = make(
+        identity_tokens={ALICE_TOKEN: "alice"},
+        fuseki_databases_dir=None,
+        fuseki_config_dir=Path("/srv/fuseki/run/configuration"),
+    )
+
+    alice(c, {"name": "newds", "kind": "persistent"})
+
+    assert stub.locations["newds"] == "/srv/fuseki/run/databases/newds"
+
+
+def test_persistent_creation_is_refused_without_a_directory_and_nothing_is_created(make, stub):
+    c = make(identity_tokens={ALICE_TOKEN: "alice"}, fuseki_databases_dir=None)
+
+    r = alice(c, {"name": "newds", "kind": "persistent"})
+
+    assert r.status_code == 503
+    assert r.json()["detail"]["code"] == "databases_dir_unset"
+    assert stub.created == []
+
+
+def test_a_memory_dataset_needs_no_directory(make, stub):
+    c = make(identity_tokens={ALICE_TOKEN: "alice"}, fuseki_databases_dir=None)
+
+    r = alice(c, {"name": "scratch", "kind": "memory"})
+
+    assert r.status_code == 201, r.text
+    assert stub.locations["scratch"] is None
+
+
+@pytest.mark.parametrize("kind", ["persistent", "memory"])
+def test_the_response_reports_the_shacl_endpoint_read_back_from_fuseki(make, stub, kind):
+    c = make(identity_tokens={ALICE_TOKEN: "alice"})
+
+    body = alice(c, {"name": "newds", "kind": kind}).json()
+
+    assert body["shaclEnabled"] is True
+    assert body["shaclEndpoint"] == "http://localhost:3030/newds/shacl"
+
+
+def test_a_server_that_ignores_the_shacl_endpoint_is_reported_not_trusted(make, stub):
+    stub.shacl_on_create = False
+    c = make(identity_tokens={ALICE_TOKEN: "alice"})
+
+    r = alice(c, {"name": "newds", "kind": "memory"})
+
+    assert r.status_code == 201  # the dataset exists, so this is a warning
+    body = r.json()
+    assert body["shaclEnabled"] is False and body["shaclEndpoint"] is None
+    assert any("shacl" in n for n in body["notes"])
+
+
+def test_the_bundled_shapes_are_seeded_into_the_shapes_graph_by_default(make, stub):
+    c = make(identity_tokens={ALICE_TOKEN: "alice"})
+
+    body = alice(c, {"name": "newds", "kind": "persistent"}).json()
+
+    assert body["shapesSeeded"] == "urn:newds:shacl"
+    shapes = stub.ds.get_context(URIRef("urn:newds:shacl"))
+    node_shapes = set(shapes.subjects(RDF.type, URIRef("http://www.w3.org/ns/shacl#NodeShape")))
+    assert node_shapes, "no sh:NodeShape landed in the shapes graph"
+
+
+def test_shapes_false_leaves_the_shapes_graph_empty(make, stub):
+    c = make(identity_tokens={ALICE_TOKEN: "alice"})
+
+    body = alice(c, {"name": "newds", "kind": "persistent", "shapes": False}).json()
+
+    assert body["shapesSeeded"] is None
+    assert len(stub.ds.get_context(URIRef("urn:newds:shacl"))) == 0
+    assert body["shaclEnabled"] is True  # the endpoint is not optional
+
+
+def test_shapes_are_seeded_even_when_the_creator_does_not_claim(make, stub):
+    c = make(identity_tokens={ALICE_TOKEN: "alice"})
+
+    body = alice(c, {"name": "newds", "kind": "memory", "claim": False}).json()
+
+    assert body["claimed"] is False and body["shapesSeeded"] == "urn:newds:shacl"
+    assert roles_in(stub, "urn:newds:holons") == set()
+
+
+def test_a_shapes_failure_is_reported_and_the_dataset_still_stands(make, stub, monkeypatch):
+    async def boom(conn, graph_iri, turtle):
+        raise FusekiError(500, "disk full", endpoint="x")
+
+    monkeypatch.setattr(stub, "put_graph", boom)
+    c = make(identity_tokens={ALICE_TOKEN: "alice"})
+
+    r = alice(c, {"name": "newds", "kind": "memory"})
+
+    assert r.status_code == 201
+    body = r.json()
+    assert body["shapesSeeded"] is None
+    assert body["shapesError"]["code"] == "shapes_seed_failed"
+    assert body["claimed"] is True  # a shapes failure does not stop the claim
+
+
+def test_the_packaged_shapes_parse_and_cover_every_bundled_file():
+    from holonbridge.dataset_create import BUNDLED_SHAPES, SHAPES_DIR, bundled_shapes
+
+    for name in BUNDLED_SHAPES:
+        assert (SHAPES_DIR / name).is_file(), name
+    assert len(parse(bundled_shapes())) > 0
