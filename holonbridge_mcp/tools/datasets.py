@@ -16,6 +16,9 @@ Admin-gated on the bridge side, same as ``act_as``.
 CHANGED 2026-10-27: added ``create_dataset``. Create only -- there is no drop
 tool, deliberately. Gated server-side by ``DATASET_CREATORS``, not by admin on
 any one dataset.
+
+CHANGED 2026-10-27: added ``seed_dataset_shapes``, for a dataset that came back
+empty (an in-memory one after a Fuseki restart). Same gate as ``create_dataset``.
 """
 
 from __future__ import annotations
@@ -180,3 +183,25 @@ async def create_dataset(
     return await _call(
         "POST", "/datasets", json_body={"name": name, "kind": kind, "claim": claim, "shapes": shapes}
     )
+
+
+@mcp.tool()
+async def seed_dataset_shapes(claim: bool = False) -> dict:
+    """Put the bundled shapes back into the ACTIVE dataset, if its shapes graph is empty.
+
+    For a dataset that came back empty: an in-memory dataset after a Fuseki
+    restart keeps its name and shacl endpoint but loses its shapes and its
+    owner, and a SHACL-gated bridge then rejects every write to it (400,
+    "shapes graph is empty or absent") with no way to push the shapes through
+    the gated routes. This restores them.
+
+    ``claim=true`` also makes you the owner if the dataset has none, so one call
+    restores both. It never overwrites: a shapes graph with any content is left
+    alone (``seeded: false`` and why), and a dataset that already has an owner
+    reports ``claimError`` rather than changing hands.
+
+    Same gate as ``create_dataset``: only a caller whose identity is established
+    and listed in the operator's ``DATASET_CREATORS``; anyone else gets a 403.
+    Acts on the active dataset -- ``switch_dataset`` first.
+    """
+    return await _call("POST", "/admin/dataset/shapes", json_body={"claim": claim})

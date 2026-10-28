@@ -921,6 +921,16 @@ no way to drop a dataset, so removing one stays a deliberate step in Fuseki.
   Fuseki, so it stays `false` until then. Without `FUSEKI_CONFIG_DIR` the
   dataset is still created, and `shaclConfigError` says why it has no endpoint.
   The bundled shapes are seeded at once, so they are in place when it does.
+- **In-memory datasets after a Fuseki restart.** Checked live: the dataset comes
+  back with its `shacl` endpoint but **empty** — the seeded shapes and the owner
+  are gone, and a SHACL-gated bridge then rejects every write to it (400, "shapes
+  graph is empty or absent"). `POST /admin/dataset/shapes` (MCP tool
+  `seed_dataset_shapes`) puts the bundled shapes back into the active dataset,
+  and with `claim: true` makes the caller its owner again, in one call. It only
+  fills an **empty** shapes graph (existing shapes are never overwritten, and
+  that is reported rather than treated as an error), and it has the same gate as
+  creation, `DATASET_CREATORS`. The create response for a `memory` dataset says
+  all of this.
 - Gate: `DATASET_CREATORS`, a comma-separated list, empty by default (which
   turns creation off). Same standard as claiming — an identity token, or a
   proxy asserting an identity, that is on the list; never the legacy token or an

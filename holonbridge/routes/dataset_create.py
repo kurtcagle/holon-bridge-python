@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from .. import audit
 from ..claim import creator
-from ..dataset_create import CreateError, Kind, create, describe_new
+from ..dataset_create import CreateError, Kind, create, describe_new, reseed_shapes
 from ..deps import (
     ANIMUS_ID_HEADER,
     ANIMUS_TYPE_HEADER,
@@ -135,3 +135,68 @@ async def create_dataset(
         ),
     )
     return result
+
+
+class ReseedRequest(BaseModel):
+    claim: bool = Field(
+        default=False,
+        description="Also make the caller the dataset's owner, if it has none. Use this on a "
+        "dataset that came back empty (an in-memory one after a Fuseki restart) to restore "
+        "both the shapes and an owner in one call.",
+    )
+
+
+@router.post("/admin/dataset/shapes")
+async def seed_dataset_shapes(
+    body: ReseedRequest,
+    request: Request,
+    conn: ConnDep,
+    client: ClientDep,
+    settings: SettingsDep,
+    token_auth: Annotated[TokenAuth, Depends(require_auth)],
+) -> dict:
+    """Put the bundled shapes into the active dataset, if its shapes graph is empty.
+
+    Same gate as creating a dataset (``DATASET_CREATORS``, established identity),
+    because it writes to a dataset the caller may not own yet. It only ever fills
+    an *empty* shapes graph: existing shapes are never overwritten, and that is
+    reported as ``seeded: false`` rather than an error. ``claim=true`` also makes
+    the caller the owner of a dataset that has none.
+
+    Refusals: 403 for an ineligible caller; 404 ``unknown_dataset``.
+    """
+    who = creator(
+        settings,
+        token_auth,
+        header_id=request.headers.get(ANIMUS_ID_HEADER),
+        header_type=request.headers.get(ANIMUS_TYPE_HEADER),
+        default_type=DEFAULT_ANIMUS_TYPE,
+    )
+    if who is None:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, detail="this caller may not seed a dataset's shapes"
+        )
+    try:
+        result = await reseed_shapes(client, conn, who, claim_for_caller=body.claim)
+    except CreateError as exc:
+        audit.annotate(reason=exc.code)
+        raise HTTPException(exc.status, detail=exc.detail()) from exc
+
+    audit.annotate(
+        authorised_by=result.claim["person"] if result.claim else None,
+        authorised_reason=(
+            f"shapes {'seeded into' if result.seeded else 'left alone in'} {result.dataset!r}; "
+            f"{who.external_id!r} is on DATASET_CREATORS"
+        ),
+    )
+    return {
+        "ok": True,
+        "dataset": result.dataset,
+        "shapesGraph": result.shapes_graph,
+        "seeded": result.seeded,
+        "skippedReason": result.skipped_reason,
+        "claimed": result.claim is not None,
+        "owner": result.claim["person"] if result.claim else None,
+        "claimError": result.claim_error,
+        "shaclEnabled": result.shacl_enabled,
+    }

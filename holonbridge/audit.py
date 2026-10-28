@@ -652,7 +652,7 @@ class AuditMiddleware(BaseHTTPMiddleware):
                 and outcome == "allowed"
                 and (
                     template.startswith("/audit")
-                    or template in ("/admin/dataset/initialise", "/datasets")
+                    or template in ("/admin/dataset/initialise", "/admin/dataset/shapes", "/datasets")
                 )
             )
             if not forced and not should_record(level, outcome, mutation, security_read):

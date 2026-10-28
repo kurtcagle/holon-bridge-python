@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.16
+version: 1.0.17
 created: 2026-09-27
 updated: 2026-10-27
 author:
@@ -63,6 +63,16 @@ process:
   per-caller identity reaches the REST layer. Not covered: dropping a dataset,
   and writing `bankScopedDatasets` to `config.json` -- declare a dataset there
   before its first write.
+- **An in-memory dataset can be restored after a Fuseki restart: `POST
+  /admin/dataset/shapes` / `seed_dataset_shapes`.** Checked live: a `memory`
+  dataset comes back after a restart with its `shacl` endpoint but empty, so
+  its seeded shapes and its owner are gone, and a SHACL-gated bridge rejects
+  every write to it with no way to push the shapes through the gated routes.
+  The new route puts the bundled shapes back into the active dataset, and with
+  `claim=true` makes the caller its owner again. It only fills an empty shapes
+  graph (never overwrites), is gated by `DATASET_CREATORS` like creation, and
+  is always audited. The create response for a `memory` dataset now warns that
+  a restart empties it and names this tool.
 - **A created dataset gets a SHACL endpoint, after a Fuseki restart.** Fuseki's
   admin API can only create a dataset from a fixed template, and no longer
   accepts an uploaded service configuration (it could read any file on the

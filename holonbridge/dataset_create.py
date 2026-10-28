@@ -36,10 +36,12 @@ rules are written down here rather than left to the route:
 Two kinds, and the difference matters:
 
 ``persistent``  a TDB2 dataset on disk; survives a Fuseki restart.
-``memory``      an in-memory dataset; its *contents* are lost on restart. Fuseki
-                keeps the dataset's configuration for dynamically created
-                datasets, so it is expected to reappear empty rather than vanish
-                -- verify that on your own build before depending on it.
+``memory``      an in-memory dataset; its *contents* are lost on restart.
+                Checked live: Fuseki keeps the dataset's configuration, so it
+                reappears -- with its shacl endpoint -- but empty. The seeded
+                shapes and the owner are gone with the rest, so
+                :func:`reseed_shapes` (``POST /admin/dataset/shapes``) exists to
+                put them back.
 """
 
 from __future__ import annotations
@@ -131,8 +133,11 @@ def describe_new(conn: Conn, name: str, kind: Kind) -> dict[str, Any]:
     notes: list[str] = []
     if kind == "memory":
         notes.append(
-            "in-memory: the contents are lost when Fuseki restarts; push anything worth "
-            "keeping to a persistent dataset first"
+            "in-memory: the contents are lost when Fuseki restarts. The dataset itself comes "
+            "back, but EMPTY: the seeded shapes and the owner are gone, so a SHACL-gated bridge "
+            "rejects writes to it. After a restart call seed_dataset_shapes (claim=true) to put "
+            "the shapes back and take ownership again. Push anything worth keeping to a "
+            "persistent dataset first"
         )
     if not bank_scoped:
         notes.append(
@@ -159,6 +164,82 @@ def bundled_shapes() -> str:
     except TurtleSyntaxError as exc:
         raise RuntimeError(f"bundled shapes do not parse: {exc}") from exc
     return text
+
+
+async def _has_triples(client: FusekiClient, conn: Conn, graph: str) -> bool:
+    result = await client.select(conn, f"ASK {{ GRAPH <{graph}> {{ ?s ?p ?o }} }}")
+    return bool(result.get("boolean"))
+
+
+@dataclass(frozen=True)
+class Reseeded:
+    dataset: str
+    shapes_graph: str
+    seeded: bool
+    skipped_reason: str | None
+    claim: dict[str, Any] | None
+    claim_error: dict[str, Any] | None
+    shacl_enabled: bool | None  # None: Fuseki could not say
+
+
+async def reseed_shapes(
+    client: FusekiClient,
+    conn: Conn,
+    who: Claimant,
+    *,
+    claim_for_caller: bool = False,
+) -> Reseeded:
+    """Put the bundled shapes into an existing dataset whose shapes graph is empty.
+
+    For a dataset that came back empty -- an in-memory one after a Fuseki
+    restart, mainly. **Never overwrites:** a shapes graph that has any content
+    is left alone and reported, so this cannot clobber shapes someone edited.
+    Optionally also makes ``who`` the owner (:func:`holonbridge.claim.claim`),
+    which itself refuses a dataset that already has one. The caller has already
+    been authorised as a creator. Raises :class:`CreateError` for a dataset
+    Fuseki does not host.
+    """
+    hosted = None
+    try:
+        hosted = await client.list_datasets(conn)
+    except FusekiError:
+        pass  # the admin API being off is not evidence the dataset is missing
+    if hosted is not None and not any(d.get("name") == conn.dataset for d in hosted):
+        raise CreateError(404, "unknown_dataset", f"dataset {conn.dataset!r} does not exist on this server")
+    shacl_enabled = (
+        None
+        if hosted is None
+        else any(d.get("name") == conn.dataset and "shacl" in d.get("services", []) for d in hosted)
+    )
+
+    shapes_graph = conn.shapes_graph
+    seeded = False
+    reason: str | None = None
+    if await _has_triples(client, conn, shapes_graph):
+        reason = "the shapes graph already has content; the bridge never overwrites it"
+    else:
+        await client.put_graph(conn, shapes_graph, bundled_shapes())
+        seeded = True
+
+    claimed: dict[str, Any] | None = None
+    claim_error: dict[str, Any] | None = None
+    if claim_for_caller:
+        try:
+            claimed = await claim(client, conn, who)
+        except ClaimError as exc:
+            claim_error = {"code": exc.code, "message": exc.message}
+        except FusekiError as exc:
+            claim_error = {"code": "claim_failed", "message": exc.message, "status": exc.status}
+
+    return Reseeded(
+        dataset=conn.dataset,
+        shapes_graph=shapes_graph,
+        seeded=seeded,
+        skipped_reason=reason,
+        claim=claimed,
+        claim_error=claim_error,
+        shacl_enabled=shacl_enabled,
+    )
 
 
 async def create(
