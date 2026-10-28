@@ -907,15 +907,18 @@ no way to drop a dataset, so removing one stays a deliberate step in Fuseki.
   the gap; false creates it and writes nothing, for instance to set up bank
   scoping first), and `shapes` (default true: seed the bundled identity,
   delegation and fluent shapes into the new dataset's shapes graph).
-- **SHACL is always on.** Fuseki's own admin form makes datasets with no `/shacl`
-  endpoint, which would leave a SHACL-gated bridge rejecting every write (and
-  unable to be given shapes through the gated routes). So the bridge uploads an
-  assembler it **generates** — the standard query/update/graph-store endpoints
-  plus `shacl` — from a validated name and, for `persistent`, a directory under
-  `FUSEKI_DATABASES_DIR` (default: `databases` beside `FUSEKI_CONFIG_DIR`). It
-  never accepts or relays an assembler from a caller, which could name arbitrary
-  paths and classes. After creating, the bridge reads back the services Fuseki
-  actually reports and returns `shaclEnabled` / `shaclEndpoint`.
+- **SHACL needs a Fuseki restart.** Fuseki's admin API can only create a dataset
+  from a fixed template (it no longer accepts an uploaded configuration, which
+  could read any file on the server), and the template has no `/shacl` endpoint.
+  A SHACL-gated bridge cannot write to such a dataset. So when
+  `FUSEKI_CONFIG_DIR` is set, the bridge appends a `shacl` endpoint to the
+  configuration file Fuseki wrote for the new dataset
+  (`{FUSEKI_CONFIG_DIR}/{name}.ttl`), leaving everything else in it as Fuseki
+  wrote it, and the response says `restartRequired: true`. **Restart Fuseki**
+  and the endpoint exists. The response's `shaclEnabled` is read back from
+  Fuseki, so it stays `false` until then. Without `FUSEKI_CONFIG_DIR` the
+  dataset is still created, and `shaclConfigError` says why it has no endpoint.
+  The bundled shapes are seeded at once, so they are in place when it does.
 - Gate: `DATASET_CREATORS`, a comma-separated list, empty by default (which
   turns creation off). Same standard as claiming — an identity token, or a
   proxy asserting an identity, that is on the list; never the legacy token or an
@@ -927,8 +930,7 @@ no way to drop a dataset, so removing one stays a deliberate step in Fuseki.
   `reserved_dataset_name` (`admin` and the scheduler dataset); **409**
   `dataset_exists` (compared case-insensitively, since Windows folds case) or
   `dataset_limit_reached` (`MAX_DATASETS`, default 50, counted from what Fuseki
-  reports); **503** `databases_dir_unset` (persistent, no directory configured);
-  **502** `admin_api_unavailable` or `create_failed`. A successful
+  reports); **502** `admin_api_unavailable` or `create_failed`. A successful
   creation is always audited, like initialising a dataset, whatever the audit
   level.
 - Fuseki's default rule admits `/$/` admin requests only from the same machine,
