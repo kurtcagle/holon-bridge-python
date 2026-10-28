@@ -74,8 +74,15 @@ process:
   until the restart. Without the setting the dataset is still created and
   `shaclConfigError` says why it has no endpoint. The bundled
   identity/delegation/fluent shapes are seeded into the shapes graph at once
-  (`shapes=false` to skip). Not checked against a live Fuseki: that Fuseki
-  names the file `{name}.ttl` and that a restart picks the endpoint up.
+  (`shapes=false` to skip). Checked live on 2026-10-27: Fuseki rejects an
+  uploaded service configuration (the reason for this design); the file is
+  `{name}.ttl`; the appended endpoint is accepted; after a Fuseki restart the
+  dataset lists `shacl` among its services, validates against its seeded
+  shapes (a violating payload is reported, a conforming one passes) and a
+  gated `push_turtle` rejects the violation (422) and accepts the conforming
+  write. The restart cannot be avoided: Fuseki reads service configuration
+  only at startup, so create several datasets, then restart once. Not checked:
+  in-memory datasets.
 
 ### 2026-10-26
 

@@ -915,7 +915,9 @@ no way to drop a dataset, so removing one stays a deliberate step in Fuseki.
   configuration file Fuseki wrote for the new dataset
   (`{FUSEKI_CONFIG_DIR}/{name}.ttl`), leaving everything else in it as Fuseki
   wrote it, and the response says `restartRequired: true`. **Restart Fuseki**
-  and the endpoint exists. The response's `shaclEnabled` is read back from
+  and the endpoint exists. The restart cannot be avoided (Fuseki reads service
+  configuration only at startup), so when creating several datasets, create them
+  all and restart once. The response's `shaclEnabled` is read back from
   Fuseki, so it stays `false` until then. Without `FUSEKI_CONFIG_DIR` the
   dataset is still created, and `shaclConfigError` says why it has no endpoint.
   The bundled shapes are seeded at once, so they are in place when it does.
