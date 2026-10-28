@@ -76,8 +76,7 @@ async def create_dataset(
 
     Refusals: 400 ``bad_dataset_name`` / ``reserved_dataset_name``; 409
     ``dataset_exists`` or ``dataset_limit_reached``; 502 ``admin_api_unavailable``
-    or ``create_failed`` when Fuseki would not do it; 503 ``databases_dir_unset`` for a
-    persistent dataset when no database directory is configured.
+    or ``create_failed`` when Fuseki would not do it.
     """
     who = creator(
         settings,
@@ -112,10 +111,21 @@ async def create_dataset(
         shapesSeeded=created.shapes_seeded,
         shapesError=created.shapes_error,
     )
-    if not created.shacl_enabled:
+    result.update(
+        shaclConfigured=created.shacl_configured,
+        restartRequired=created.shacl_configured and not created.shacl_enabled,
+        shaclConfigError=created.shacl_config_error,
+    )
+    if created.shacl_configured and not created.shacl_enabled:
         result.setdefault("notes", []).append(
-            "Fuseki did not report a shacl service on the new dataset, so validation against "
-            "it will not work until it is added in Fuseki"
+            "a shacl endpoint was added to the dataset's Fuseki configuration, but Fuseki reads "
+            "that at startup: restart Fuseki before validating against this dataset. Until then "
+            "a SHACL-gated bridge cannot write to it"
+        )
+    elif not created.shacl_enabled:
+        result.setdefault("notes", []).append(
+            f"this dataset has no shacl endpoint ({created.shacl_config_error}); add one in "
+            "Fuseki's configuration for it, then restart Fuseki"
         )
     audit.annotate(
         authorised_by=created.claim["person"] if created.claim else None,

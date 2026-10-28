@@ -13,9 +13,10 @@ under test:
 - there is a ceiling on how many datasets the server will host;
 - ``kind`` is required and means what it says (TDB2 vs in-memory);
 - the creator becomes the owner by default, and ``claim=false`` writes nothing;
-- every created dataset has a SHACL endpoint (the assembler the bridge generates
-  includes it) and, by default, the bundled shapes; persistent ones go under the
-  configured database directory;
+- Fuseki's admin API cannot make a dataset with a SHACL endpoint, so the bridge
+  adds one to the configuration file Fuseki wrote (effective after a restart),
+  says so, and never edits anything but an appended statement; the bundled shapes
+  are seeded by default;
 - the bridge cannot drop a dataset: no client method, no route;
 - a successful creation is always audited, and a refusal is audited as denied.
 """
@@ -24,19 +25,20 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.parse import parse_qs
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 from rdflib import RDF, Literal, URIRef
 
-from holonbridge.assembler import build_dataset_assembler
 from holonbridge.audit import audit_graph
 from holonbridge.config import Settings
 from holonbridge.conn import Conn
 from holonbridge.fuseki import FusekiClient, FusekiError
 from holonbridge.persona_state import PersonaStore
 from holonbridge.server import create_app
+from holonbridge.service_config import ServiceConfigError, enable_shacl, with_shacl
 from holonbridge.turtle import parse
 
 from .test_identity_admin import GraphStoreStub
@@ -44,8 +46,23 @@ from .test_identity_admin import GraphStoreStub
 HOLON = "https://w3id.org/holon/"
 HAS_ROLE = URIRef(f"{HOLON}hasRole")
 FUSEKI = "http://jena.apache.org/fuseki#"
-TDB2 = "http://jena.apache.org/2016/tdb#"
-JA = "http://jena.hpl.hp.com/2005/11/Assembler#"
+
+#: Roughly what Fuseki writes for a dataset made through its admin API.
+FUSEKI_TEMPLATE = """@prefix :        <#> .
+@prefix fuseki:  <http://jena.apache.org/fuseki#> .
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix tdb2:    <http://jena.apache.org/2016/tdb#> .
+
+:service rdf:type fuseki:Service ;
+    fuseki:name "{name}" ;
+    fuseki:endpoint [ fuseki:operation fuseki:query ; fuseki:name "query" ] ;
+    fuseki:endpoint [ fuseki:operation fuseki:update ; fuseki:name "update" ] ;
+    fuseki:endpoint [ fuseki:operation fuseki:gsp-rw ; fuseki:name "data" ] ;
+    fuseki:dataset :ds .
+
+:ds rdf:type tdb2:DatasetTDB2 ;
+    tdb2:location "databases/{name}" .
+"""
 
 ALICE_TOKEN = "alice-identity-token-0123456789abcdef"
 MALLORY_TOKEN = "mallory-identity-token-0123456789abcd"
@@ -53,7 +70,6 @@ PROXY_TOKEN = "mcp-proxy-token-0123456789abcdef0123"
 SHARED_TOKEN = "shared-legacy-token-0123456789abcdef"
 
 CREATORS = ("alice",)
-DB_ROOT = Path("/srv/fuseki/run/databases")
 
 
 class CreatingStub(GraphStoreStub):
@@ -63,8 +79,7 @@ class CreatingStub(GraphStoreStub):
         super().__init__()
         self.hosted = list(hosted)
         self.created: list[tuple[str, bool]] = []
-        self.locations: dict[str, str | None] = {}
-        self.shacl_on_create = True  # False models a server that ignores the shacl endpoint
+        self.config_dir: Path | None = None  # where this "Fuseki" writes its config files
         self.create_error: FusekiError | None = None
         self.list_error: FusekiError | None = None
         self.services: dict[str, list[str]] = {}
@@ -77,16 +92,14 @@ class CreatingStub(GraphStoreStub):
             {"name": n, "state": True, "services": self.services.get(n, [])} for n in self.hosted
         ]
 
-    async def create_dataset(self, conn, name, *, persistent, location=None):
+    async def create_dataset(self, conn, name, *, persistent):
         if self.create_error is not None:
             raise self.create_error
         self.created.append((name, persistent))
-        self.locations[name] = location
-        self.services[name] = (
-            ["gsp-r", "gsp-rw", "query", "shacl", "update"]
-            if self.shacl_on_create
-            else ["gsp-r", "gsp-rw", "query", "update"]
-        )
+        # What the admin API really does: the fixed template, no shacl endpoint.
+        self.services[name] = ["gsp-rw", "query", "update"]
+        if self.config_dir is not None:
+            (self.config_dir / f"{name}.ttl").write_text(FUSEKI_TEMPLATE.format(name=name))
         if not self.forget_creations:
             self.hosted.append(name)
 
@@ -102,7 +115,6 @@ def make(stub, tmp_path):
 
     def build(**settings) -> TestClient:
         settings.setdefault("dataset_creators", CREATORS)
-        settings.setdefault("fuseki_databases_dir", DB_ROOT)
         app = create_app(Settings(fuseki_dataset="example", **settings))
         cm = TestClient(app)
         c = cm.__enter__()
@@ -343,7 +355,7 @@ def test_bank_scoping_is_honoured_when_the_dataset_is_declared_first(make, stub,
         ("urn:local:newds:person:alice", "urn:local:newds:role:owner")
     }
     assert len(stub.ds.get_context(URIRef("urn:newds:holons"))) == 0
-    assert "notes" not in body  # nothing to warn about
+    assert not any("bankScopedDatasets" in n for n in body.get("notes", []))  # nothing to warn about
 
 
 def test_an_undeclared_dataset_gets_the_warning_about_bank_scoping(make, stub):
@@ -403,61 +415,27 @@ def _client_with(handler) -> FusekiClient:
 CONN = Conn(base_url="http://fuseki:3030", dataset="ds", overridden=False, bank_name="local")
 
 
-async def test_the_client_uploads_a_generated_assembler_with_a_shacl_endpoint_for_tdb2():
+@pytest.mark.parametrize(("persistent", "db_type"), [(True, "tdb2"), (False, "mem")])
+async def test_the_client_posts_only_a_name_and_a_type(persistent, db_type):
     seen: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         return httpx.Response(200)
 
-    await _client_with(handler).create_dataset(
-        CONN, "newds", persistent=True, location="/srv/fuseki/run/databases/newds"
-    )
+    await _client_with(handler).create_dataset(CONN, "newds", persistent=persistent)
 
     (req,) = seen
     assert req.method == "POST" and str(req.url) == "http://fuseki:3030/$/datasets"
-    assert req.headers["content-type"].startswith("text/turtle")
-    g = parse(req.content.decode())
-    assert (None, URIRef(f"{FUSEKI}operation"), URIRef(f"{FUSEKI}shacl")) in g
-    assert (None, URIRef(f"{TDB2}location"), Literal("/srv/fuseki/run/databases/newds")) in g
-    assert (None, RDF.type, URIRef(f"{TDB2}DatasetTDB2")) in g
-    assert (None, URIRef(f"{FUSEKI}name"), Literal("newds")) in g
-
-
-async def test_the_client_uploads_a_memory_assembler_with_no_location():
-    seen: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(request)
-        return httpx.Response(200)
-
-    await _client_with(handler).create_dataset(CONN, "scratch", persistent=False)
-
-    g = parse(seen[0].content.decode())
-    assert (None, RDF.type, URIRef(f"{JA}MemoryDataset")) in g
-    assert (None, URIRef(f"{TDB2}location"), None) not in g
-    assert (None, URIRef(f"{FUSEKI}operation"), URIRef(f"{FUSEKI}shacl")) in g
-
-
-@pytest.mark.parametrize("bad", ["a b", "../x", 'x"; evil', "X", "", "a" * 65])
-def test_the_assembler_refuses_an_unsafe_name(bad):
-    with pytest.raises(ValueError):
-        build_dataset_assembler(bad, persistent=False)
-
-
-def test_a_persistent_assembler_needs_a_location_and_escapes_it():
-    with pytest.raises(ValueError):
-        build_dataset_assembler("ok", persistent=True)
-    nasty = 'C:/db/"quoted"\\path'
-    g = parse(build_dataset_assembler("ok", persistent=True, location=nasty))
-    assert (None, URIRef(f"{TDB2}location"), Literal(nasty)) in g
+    assert req.headers["content-type"] == "application/x-www-form-urlencoded"
+    assert parse_qs(req.content.decode()) == {"dbName": ["newds"], "dbType": [db_type]}
 
 
 async def test_the_client_surfaces_fusekis_409():
     client = _client_with(lambda request: httpx.Response(409, text="conflict"))
 
     with pytest.raises(FusekiError) as exc:
-        await client.create_dataset(CONN, "newds", persistent=False)
+        await client.create_dataset(CONN, "newds", persistent=True)
 
     assert exc.value.status == 409
 
@@ -504,69 +482,132 @@ def test_a_refused_creation_is_audited_as_denied(make, stub):
     assert '"denied"' in text
 
 
-# --- SHACL is always on ------------------------------------------------------------------------
+# --- SHACL: only a restart can add it ------------------------------------------------------------
 
 
-def test_a_persistent_dataset_is_placed_under_the_configured_directory(make, stub):
+@pytest.fixture
+def cfg(stub, tmp_path) -> Path:
+    d = tmp_path / "configuration"
+    d.mkdir()
+    stub.config_dir = d
+    return d
+
+
+def test_without_a_config_directory_the_dataset_is_created_but_reported_as_lacking_shacl(make, stub):
     c = make(identity_tokens={ALICE_TOKEN: "alice"})
 
     r = alice(c, {"name": "newds", "kind": "persistent"})
 
     assert r.status_code == 201, r.text
-    assert stub.locations["newds"] == "/srv/fuseki/run/databases/newds"
-
-
-def test_the_directory_defaults_to_a_sibling_of_the_config_directory(make, stub):
-    c = make(
-        identity_tokens={ALICE_TOKEN: "alice"},
-        fuseki_databases_dir=None,
-        fuseki_config_dir=Path("/srv/fuseki/run/configuration"),
-    )
-
-    alice(c, {"name": "newds", "kind": "persistent"})
-
-    assert stub.locations["newds"] == "/srv/fuseki/run/databases/newds"
-
-
-def test_persistent_creation_is_refused_without_a_directory_and_nothing_is_created(make, stub):
-    c = make(identity_tokens={ALICE_TOKEN: "alice"}, fuseki_databases_dir=None)
-
-    r = alice(c, {"name": "newds", "kind": "persistent"})
-
-    assert r.status_code == 503
-    assert r.json()["detail"]["code"] == "databases_dir_unset"
-    assert stub.created == []
-
-
-def test_a_memory_dataset_needs_no_directory(make, stub):
-    c = make(identity_tokens={ALICE_TOKEN: "alice"}, fuseki_databases_dir=None)
-
-    r = alice(c, {"name": "scratch", "kind": "memory"})
-
-    assert r.status_code == 201, r.text
-    assert stub.locations["scratch"] is None
+    body = r.json()
+    assert body["shaclEnabled"] is False and body["shaclEndpoint"] is None
+    assert body["shaclConfigured"] is False and body["restartRequired"] is False
+    assert "FUSEKI_CONFIG_DIR" in body["shaclConfigError"]
+    assert any("no shacl endpoint" in n for n in body["notes"])
 
 
 @pytest.mark.parametrize("kind", ["persistent", "memory"])
-def test_the_response_reports_the_shacl_endpoint_read_back_from_fuseki(make, stub, kind):
-    c = make(identity_tokens={ALICE_TOKEN: "alice"})
+def test_a_shacl_endpoint_is_appended_to_the_configuration_fuseki_wrote(make, stub, cfg, kind):
+    c = make(identity_tokens={ALICE_TOKEN: "alice"}, fuseki_config_dir=cfg)
 
     body = alice(c, {"name": "newds", "kind": kind}).json()
 
+    assert body["shaclConfigured"] is True and body["restartRequired"] is True
+    assert body["shaclEnabled"] is False  # read back from Fuseki: not live yet
+    assert any("restart Fuseki" in n for n in body["notes"])
+    text = (cfg / "newds.ttl").read_text()
+    # what Fuseki wrote is untouched; the edit is purely an addition
+    assert text.startswith(FUSEKI_TEMPLATE.format(name="newds").rstrip("\n"))
+    g = parse(text)
+    assert (None, URIRef(f"{FUSEKI}operation"), URIRef(f"{FUSEKI}shacl")) in g
+    assert (None, URIRef(f"{FUSEKI}name"), Literal("shacl")) in g
+    # and the shacl endpoint hangs off the service, beside the originals
+    (service,) = g.subjects(RDF.type, URIRef(f"{FUSEKI}Service"))
+    operations = {
+        o
+        for ep in g.objects(service, URIRef(f"{FUSEKI}endpoint"))
+        for o in g.objects(ep, URIRef(f"{FUSEKI}operation"))
+    }
+    assert URIRef(f"{FUSEKI}shacl") in operations and URIRef(f"{FUSEKI}query") in operations
+
+
+def test_a_missing_configuration_file_is_reported_and_the_dataset_stands(make, stub, cfg):
+    stub.config_dir = None  # this "Fuseki" writes no file
+    c = make(identity_tokens={ALICE_TOKEN: "alice"}, fuseki_config_dir=cfg)
+
+    r = alice(c, {"name": "newds", "kind": "persistent"})
+
+    assert r.status_code == 201
+    body = r.json()
+    assert body["shaclConfigured"] is False and "no configuration file" in body["shaclConfigError"]
+    assert list(cfg.iterdir()) == []  # nothing invented
+
+
+def test_the_server_already_reporting_shacl_is_left_alone(make, stub, cfg, monkeypatch):
+    original = stub.create_dataset
+
+    async def with_shacl(conn, name, *, persistent):
+        await original(conn, name, persistent=persistent)
+        stub.services[name] = ["gsp-rw", "query", "shacl", "update"]
+
+    monkeypatch.setattr(stub, "create_dataset", with_shacl)
+    c = make(identity_tokens={ALICE_TOKEN: "alice"}, fuseki_config_dir=cfg)
+
+    body = alice(c, {"name": "newds", "kind": "persistent"}).json()
+
     assert body["shaclEnabled"] is True
     assert body["shaclEndpoint"] == "http://localhost:3030/newds/shacl"
+    assert body["restartRequired"] is False
+    assert (cfg / "newds.ttl").read_text() == FUSEKI_TEMPLATE.format(name="newds")
 
 
-def test_a_server_that_ignores_the_shacl_endpoint_is_reported_not_trusted(make, stub):
-    stub.shacl_on_create = False
-    c = make(identity_tokens={ALICE_TOKEN: "alice"})
+# --- the configuration edit itself ---------------------------------------------------------------
 
-    r = alice(c, {"name": "newds", "kind": "memory"})
 
-    assert r.status_code == 201  # the dataset exists, so this is a warning
-    body = r.json()
-    assert body["shaclEnabled"] is False and body["shaclEndpoint"] is None
-    assert any("shacl" in n for n in body["notes"])
+def test_with_shacl_is_idempotent_and_only_appends():
+    once = with_shacl(FUSEKI_TEMPLATE.format(name="x"), "x")
+    assert once.startswith(FUSEKI_TEMPLATE.format(name="x").rstrip("\n"))
+    assert with_shacl(once, "x") == once
+    assert once.count("fuseki#shacl") == 1
+
+
+_PFX = "@prefix fuseki: <http://jena.apache.org/fuseki#> .\n"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "this is not turtle",
+        _PFX + '<#a> a fuseki:Service ; fuseki:name "other" .',
+        _PFX + '<#a> a fuseki:Service ; fuseki:name "x" .\n<#b> a fuseki:Service ; fuseki:name "x" .',
+        _PFX + '[] a fuseki:Service ; fuseki:name "x" .',
+    ],
+)
+def test_a_configuration_that_is_not_one_clean_named_service_is_refused(text):
+    with pytest.raises(ServiceConfigError):
+        with_shacl(text, "x")
+
+
+def test_the_configuration_path_cannot_leave_its_directory(tmp_path):
+    inside = tmp_path / "configuration"
+    inside.mkdir()
+    outside = tmp_path / "escape.ttl"  # a real, valid file one level up
+    outside.write_text(FUSEKI_TEMPLATE.format(name="../escape"))  # even if it claims that name
+
+    with pytest.raises(ServiceConfigError):
+        enable_shacl(inside, "../escape")
+
+    assert outside.read_text() == FUSEKI_TEMPLATE.format(name="../escape")
+
+
+def test_enable_shacl_writes_atomically_and_leaves_no_temporary_file(tmp_path):
+    (tmp_path / "x.ttl").write_text(FUSEKI_TEMPLATE.format(name="x"))
+
+    result = enable_shacl(tmp_path, "x")
+
+    assert result.changed and result.restart_required
+    assert sorted(f.name for f in tmp_path.iterdir()) == ["x.ttl"]
+    assert enable_shacl(tmp_path, "x").changed is False
 
 
 def test_the_bundled_shapes_are_seeded_into_the_shapes_graph_by_default(make, stub):
@@ -587,7 +628,6 @@ def test_shapes_false_leaves_the_shapes_graph_empty(make, stub):
 
     assert body["shapesSeeded"] is None
     assert len(stub.ds.get_context(URIRef("urn:newds:shacl"))) == 0
-    assert body["shaclEnabled"] is True  # the endpoint is not optional
 
 
 def test_shapes_are_seeded_even_when_the_creator_does_not_claim(make, stub):
