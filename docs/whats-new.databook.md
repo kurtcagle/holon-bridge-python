@@ -75,7 +75,12 @@ process:
   as content and is merged on restore; `SNAPSHOT_MAX_BYTES` (50 MB) caps the
   size; graphs are never parsed, so RDF 1.2 passes through. A checkpoint, not a
   backup system: use a persistent dataset for anything that must not be lost.
-  Both are always audited. Not checked against a live Fuseki.
+  Both are always audited. Checked live on 2026-10-27: a `memory` dataset
+  (ownership, seeded shapes, a data graph, the audit graph) was snapshotted,
+  Fuseki was restarted, the dataset came back empty, and `restore_dataset`
+  put all four graphs back with the owner role and data intact; the restored
+  shapes still rejected a violating payload. The directory is created on the
+  first snapshot.
 - **An in-memory dataset can be restored after a Fuseki restart: `POST
   /admin/dataset/shapes` / `seed_dataset_shapes`.** Checked live: a `memory`
   dataset comes back after a restart with its `shacl` endpoint but empty, so
@@ -85,7 +90,9 @@ process:
   `claim=true` makes the caller its owner again. It only fills an empty shapes
   graph (never overwrites), is gated by `DATASET_CREATORS` like creation, and
   is always audited. The create response for a `memory` dataset now warns that
-  a restart empties it and names this tool.
+  a restart empties it and names this tool. Checked live on 2026-10-27 on an
+  emptied `memory` dataset: the shapes and the owner role were restored in one
+  call.
 - **A created dataset gets a SHACL endpoint, after a Fuseki restart.** Fuseki's
   admin API can only create a dataset from a fixed template, and no longer
   accepts an uploaded service configuration (it could read any file on the
@@ -104,8 +111,8 @@ process:
   shapes (a violating payload is reported, a conforming one passes) and a
   gated `push_turtle` rejects the violation (422) and accepts the conforming
   write. The restart cannot be avoided: Fuseki reads service configuration
-  only at startup, so create several datasets, then restart once. Not checked:
-  in-memory datasets.
+  only at startup, so create several datasets, then restart once. In-memory
+  datasets were checked the same day (see the entries above).
 
 ### 2026-10-26
 
