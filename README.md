@@ -944,7 +944,10 @@ no way to drop a dataset, so removing one stays a deliberate step in Fuseki.
   replace a good one; the audit graph is not counted as content and is merged, not
   replaced, on restore; a snapshot over `SNAPSHOT_MAX_BYTES` (default 50 MB) is
   refused; graphs are stored and restored as text, never parsed, so RDF 1.2 passes
-  through. Off unless `SNAPSHOT_DIR` is set.
+  through. Off unless `SNAPSHOT_DIR` is set (the directory is created on the first
+  snapshot; a trailing `/` or `\` makes no difference, and forward slashes are the
+  safe choice on Windows). Checked live: a `memory` dataset snapshotted, Fuseki
+  restarted, then restored with its owner, shapes and data intact.
 - Gate: `DATASET_CREATORS`, a comma-separated list, empty by default (which
   turns creation off). Same standard as claiming — an identity token, or a
   proxy asserting an identity, that is on the list; never the legacy token or an
