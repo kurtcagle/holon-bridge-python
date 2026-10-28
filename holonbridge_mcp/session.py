@@ -60,6 +60,7 @@ from mcp.server.fastmcp import FastMCP
 from holonbridge.envfile import load_shared_env
 
 from .identity import current_github_login
+from .friendly import plain_message
 
 log = logging.getLogger("holonbridge_mcp.server")
 
@@ -472,7 +473,11 @@ async def _call(
             detail = response.json()
         except ValueError:
             detail = response.text.strip()
-        return {"error": True, "status": response.status_code, "detail": detail}
+        failure: dict[str, Any] = {"error": True, "status": response.status_code, "detail": detail}
+        message = plain_message(response.status_code, path, detail)
+        if message:
+            failure["message"] = message
+        return failure
     if text:
         return response.text
     try:
