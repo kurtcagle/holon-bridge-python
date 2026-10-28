@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.17
+version: 1.0.18
 created: 2026-09-27
 updated: 2026-10-27
 author:
@@ -63,6 +63,19 @@ process:
   per-caller identity reaches the REST layer. Not covered: dropping a dataset,
   and writing `bankScopedDatasets` to `config.json` -- declare a dataset there
   before its first write.
+- **A dataset can be snapshotted before a Fuseki restart and restored after:
+  `POST /admin/dataset/snapshot` / `snapshot_dataset` and `POST
+  /admin/dataset/restore` / `restore_dataset`.** For in-memory datasets, which
+  come back from a restart empty. A snapshot writes each graph to a Turtle file
+  plus a manifest under `SNAPSHOT_DIR` (off unless set); restore puts them back
+  into an empty dataset, ownership included. Snapshot needs admin on the
+  dataset; restore needs the `DATASET_CREATORS` gate (an empty dataset has no
+  admin) and never overwrites. An empty dataset is never snapshotted, so one
+  taken after a restart cannot replace a good one; the audit graph does not count
+  as content and is merged on restore; `SNAPSHOT_MAX_BYTES` (50 MB) caps the
+  size; graphs are never parsed, so RDF 1.2 passes through. A checkpoint, not a
+  backup system: use a persistent dataset for anything that must not be lost.
+  Both are always audited. Not checked against a live Fuseki.
 - **An in-memory dataset can be restored after a Fuseki restart: `POST
   /admin/dataset/shapes` / `seed_dataset_shapes`.** Checked live: a `memory`
   dataset comes back after a restart with its `shacl` endpoint but empty, so

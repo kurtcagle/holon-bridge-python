@@ -931,6 +931,20 @@ no way to drop a dataset, so removing one stays a deliberate step in Fuseki.
   that is reported rather than treated as an error), and it has the same gate as
   creation, `DATASET_CREATORS`. The create response for a `memory` dataset says
   all of this.
+- **Snapshot and restore.** `POST /admin/dataset/snapshot` (MCP `snapshot_dataset`)
+  saves every graph of the active dataset to `SNAPSHOT_DIR/{dataset}/` — a
+  `manifest.json` and one Turtle file per graph — and `POST /admin/dataset/restore`
+  (`restore_dataset`) puts them back into an **empty** dataset, ownership and data
+  included. Take the snapshot **before** restarting Fuseki: it is a checkpoint,
+  not a backup system, and a persistent dataset is the right home for anything that
+  must not be lost. Rules: snapshot needs **admin on the dataset** (it reads
+  everything in it); restore uses the `DATASET_CREATORS` gate, because an empty
+  dataset has no admin, and **never overwrites** (a dataset with content is refused);
+  an empty dataset is never snapshotted, so a snapshot taken after a restart cannot
+  replace a good one; the audit graph is not counted as content and is merged, not
+  replaced, on restore; a snapshot over `SNAPSHOT_MAX_BYTES` (default 50 MB) is
+  refused; graphs are stored and restored as text, never parsed, so RDF 1.2 passes
+  through. Off unless `SNAPSHOT_DIR` is set.
 - Gate: `DATASET_CREATORS`, a comma-separated list, empty by default (which
   turns creation off). Same standard as claiming — an identity token, or a
   proxy asserting an identity, that is on the list; never the legacy token or an
