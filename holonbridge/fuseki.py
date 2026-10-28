@@ -243,6 +243,31 @@ class FusekiClient:
         out.sort(key=lambda d: d["name"])
         return out
 
+    async def create_dataset(self, conn: Conn, name: str, *, persistent: bool) -> None:
+        """Create an empty dataset through Fuseki's admin API.
+
+        ``persistent=True`` asks for a TDB2 dataset (on disk, survives a
+        restart); ``False`` asks for an in-memory one. Raises
+        :class:`FusekiError` -- status 409 when the name is taken.
+
+        Deliberately takes only a name and a kind. Fuseki's admin API will also
+        accept a whole assembler file in the request body, but an assembler can
+        name arbitrary filesystem locations and Java classes, so that variant is
+        never exposed here: if a richer dataset is ever wanted, the bridge
+        should generate the assembler itself from a template, not relay one.
+
+        There is intentionally no ``drop_dataset`` beside this. See
+        ``tests/test_dataset_create.py``, which fails if one appears.
+        """
+        url = f"{conn.base_url}/$/datasets"
+        await self._post(
+            url,
+            conn=conn,
+            content=urlencode({"dbName": name, "dbType": "tdb2" if persistent else "mem"}),
+            content_type="application/x-www-form-urlencoded",
+            accept="*/*",
+        )
+
     async def ping(self, conn: Conn) -> bool:
         try:
             await self.select(conn, "ASK { ?s ?p ?o }")

@@ -644,11 +644,16 @@ class AuditMiddleware(BaseHTTPMiddleware):
             # A change to the audit configuration is always recorded, whatever
             # level it sets: otherwise turning audit off would erase the
             # record of turning it off. Initialising a dataset (the first owner
-            # being created) is likewise never left to the audit level.
+            # being created) is likewise never left to the audit level, and
+            # neither is creating a dataset: it allocates storage on the
+            # server, and the bridge has no way to take it back.
             forced = (
                 mutation
                 and outcome == "allowed"
-                and (template.startswith("/audit") or template == "/admin/dataset/initialise")
+                and (
+                    template.startswith("/audit")
+                    or template in ("/admin/dataset/initialise", "/datasets")
+                )
             )
             if not forced and not should_record(level, outcome, mutation, security_read):
                 return

@@ -889,12 +889,49 @@ identifiers; empty (the default) turns the in-band claim off.
   which datasets are open.
 - Refusals: **403** for an ineligible caller (the same whether or not the
   dataset is open); **404 `unknown_dataset`** when the server does not host the
-  dataset (the bridge never creates one; checked after eligibility, so it does
-  not reveal which datasets exist); **409 `dataset_already_claimed`** when it
+  dataset (checked after eligibility, so it does not reveal which datasets
+  exist; create it first -- see below); **409 `dataset_already_claimed`** when it
   already has an owner or admin. The 409 is audited as a refusal, with its
   reason, so it survives the `denials` audit level. If Fuseki's
   `/$/datasets` admin API is unavailable the 404 check is skipped rather than
   guessed.
+
+**Creating a dataset.** `POST /datasets` (MCP tool `create_dataset`) creates a
+new, empty dataset through Fuseki's admin API. It is create-only: the bridge has
+no way to drop a dataset, so removing one stays a deliberate step in Fuseki.
+
+- Body: `name` (1-64 characters, lower-case letters, digits, `-`, `_`, starting
+  with a letter), `kind` (**required**: `persistent` is TDB2 and survives a
+  restart; `memory` loses its contents when Fuseki restarts), and `claim`
+  (default true: the caller becomes the owner, so nobody can take the dataset in
+  the gap; false creates it and writes nothing, for instance to set up bank
+  scoping first). The bridge sends only a name and a type to Fuseki — never an
+  assembler file, which could name arbitrary paths and classes.
+- Gate: `DATASET_CREATORS`, a comma-separated list, empty by default (which
+  turns creation off). Same standard as claiming — an identity token, or a
+  proxy asserting an identity, that is on the list; never the legacy token or an
+  open deployment — but a **separate list**, because creating a dataset
+  allocates storage (and, for `memory`, heap) on a Fuseki every dataset shares,
+  which admin on one dataset cannot imply. Being a claimant or an admin is not
+  enough.
+- Refusals: **403** for an ineligible caller; **400** `bad_dataset_name` /
+  `reserved_dataset_name` (`admin` and the scheduler dataset); **409**
+  `dataset_exists` (compared case-insensitively, since Windows folds case) or
+  `dataset_limit_reached` (`MAX_DATASETS`, default 50, counted from what Fuseki
+  reports); **502** `admin_api_unavailable` or `create_failed`. A successful
+  creation is always audited, like initialising a dataset, whatever the audit
+  level.
+- Fuseki's default rule admits `/$/` admin requests only from the same machine,
+  so this works as shipped when the bridge and Fuseki share a host. A remote
+  Fuseki needs its admin API opened to the bridge, and note the bridge sends its
+  bank token as a Bearer header, which Fuseki's default Shiro setup does not
+  read.
+- **Bank scoping order matters.** A new dataset uses `urn:{dataset}:{role}`
+  unless it is already in the bank's `bankScopedDatasets`. To have
+  `urn:{bank}:{dataset}:{role}`, add it to `config.json` and reload *before*
+  creating it (or create with `claim=false` and do so before its first write);
+  identity written under one convention is orphaned when the setting changes.
+  The response reports `bankScoped` and the graph IRIs.
 
 ---
 
