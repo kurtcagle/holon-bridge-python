@@ -219,18 +219,22 @@ async def snapshot_dataset() -> dict:
     is taken before the restart, and anything that must not be lost belongs in
     a persistent dataset.
 
-    Needs admin on the dataset. Keeps one snapshot per dataset and replaces it
-    atomically. Refuses an empty dataset so a snapshot taken AFTER a restart
-    cannot replace a good one with nothing, and one larger than the operator's
-    ``SNAPSHOT_MAX_BYTES``. Off unless the operator set ``SNAPSHOT_DIR``.
+    Needs admin on the dataset. Adds a timestamped snapshot and keeps the newest
+    few (the operator's ``SNAPSHOT_KEEP``, default 5), so an earlier good state
+    is still there after a bad write. Works on a persistent dataset too, as a
+    bridge-side copy -- though restore only fills an EMPTY dataset. Refuses an
+    empty dataset, and one larger than the operator's ``SNAPSHOT_MAX_BYTES``.
+    Off unless the operator set ``SNAPSHOT_DIR``.
     Acts on the active dataset -- ``switch_dataset`` first.
     """
     return await _call("POST", "/admin/dataset/snapshot", json_body={})
 
 
 @mcp.tool()
-async def restore_dataset() -> dict:
-    """Put the ACTIVE dataset's snapshot back into it. Use after Fuseki lost it.
+async def restore_dataset(snapshot: str | None = None) -> dict:
+    """Put a snapshot of the ACTIVE dataset back into it. Use after Fuseki lost it.
+
+    ``snapshot`` is an id from ``list_snapshots``; leave it out for the newest.
 
     Only fills an EMPTY dataset and never overwrites: a dataset with any content
     is refused. Restores exactly what ``snapshot_dataset`` saved, ownership
@@ -239,4 +243,15 @@ async def restore_dataset() -> dict:
     dataset has no admin to ask. If no snapshot exists, ``seed_dataset_shapes``
     can at least restore the shapes. Acts on the active dataset.
     """
-    return await _call("POST", "/admin/dataset/restore", json_body={})
+    return await _call("POST", "/admin/dataset/restore", json_body={"snapshot": snapshot})
+
+
+@mcp.tool()
+async def list_snapshots() -> dict:
+    """List the ACTIVE dataset's snapshots, newest first (id, time, who, size).
+
+    Use the id with ``restore_dataset`` to restore an older one than the
+    newest. Same gate as ``restore_dataset`` (``DATASET_CREATORS``). Shows
+    metadata only, never contents.
+    """
+    return await _call("GET", "/admin/dataset/snapshots")

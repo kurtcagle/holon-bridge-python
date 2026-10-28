@@ -119,6 +119,15 @@ def make(stub, tmp_path, snaps):
         cm.__exit__(None, None, None)
 
 
+def snap_dirs(snaps: Path) -> list[Path]:
+    """The dataset's snapshot directories, oldest first."""
+    return sorted(d for d in (snaps / "example").iterdir() if d.is_dir() and not d.name.startswith("."))
+
+
+def latest(snaps: Path) -> Path:
+    return snap_dirs(snaps)[-1]
+
+
 def auth(token: str = ALICE_TOKEN) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
@@ -174,25 +183,143 @@ def test_the_snapshot_is_one_manifest_and_a_turtle_file_per_graph(make, stub, sn
 
     snapshot(c)
 
-    manifest = json.loads((snaps / "example" / MANIFEST).read_text())
+    manifest = json.loads((latest(snaps) / MANIFEST).read_text())
     assert manifest["dataset"] == "example" and manifest["createdBy"]
     assert {g["iri"] for g in manifest["graphs"]} >= {"urn:example:holons", "urn:example:data"}
     for entry in manifest["graphs"]:
-        assert (snaps / "example" / entry["file"]).is_file()
+        assert (latest(snaps) / entry["file"]).is_file()
 
 
-def test_a_second_snapshot_replaces_the_first_and_leaves_no_temporary_files(make, stub, snaps):
+def test_each_snapshot_is_kept_and_none_leaves_temporary_files(make, stub, snaps):
+    c = make()
+    first = snapshot(c).json()["snapshot"]
+    triples(stub, "urn:example:data").add(
+        (URIRef("urn:example:thing:2"), URIRef("urn:p"), URIRef("urn:o"))
+    )
+
+    second = snapshot(c).json()["snapshot"]
+
+    assert first != second  # even when taken in the same second
+    assert [d.name for d in snap_dirs(snaps)] == sorted([first, second])
+    texts = {d.name: "".join(f.read_text() for f in d.glob("g*.ttl")) for d in snap_dirs(snaps)}
+    assert "thing:2" not in texts[first] and "thing:2" in texts[second]
+    assert sorted(p.name for p in (snaps / "example").iterdir()) == sorted([first, second])
+
+
+def test_only_the_newest_few_are_kept_and_older_ones_are_removed(make, stub, snaps):
+    c = make(snapshot_keep=3)
+    ids = [snapshot(c).json()["snapshot"] for _ in range(5)]
+
+    assert [d.name for d in snap_dirs(snaps)] == sorted(ids)[-3:]
+    assert snapshot(c).json()["kept"] == 3
+
+
+def test_a_failed_snapshot_does_not_cost_an_earlier_one_its_place(make, stub, snaps):
+    c = make(snapshot_keep=1)
+    good = snapshot(c).json()["snapshot"]
+
+    c = make(snapshot_keep=1, snapshot_max_bytes=10)
+    assert snapshot(c).status_code == 413
+
+    assert [d.name for d in snap_dirs(snaps)] == [good]
+
+
+def test_listing_shows_the_snapshots_newest_first_without_contents(make, stub, snaps):
+    c = make()
+    first = snapshot(c).json()["snapshot"]
+    second = snapshot(c).json()["snapshot"]
+
+    r = c.get("/admin/dataset/snapshots", headers=auth())
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [s["id"] for s in body["snapshots"]] == sorted([first, second], reverse=True)
+    assert body["keep"] == 5 and all(s["graphs"] > 0 and s["bytes"] > 0 for s in body["snapshots"])
+    assert "thing" not in r.text  # metadata only
+
+
+def test_listing_uses_the_creation_gate(make, stub, snaps):
+    c = make()
+    snapshot(c)
+
+    assert c.get("/admin/dataset/snapshots", headers=auth(JANE_TOKEN)).status_code == 403
+
+
+def test_an_older_snapshot_can_be_restored_by_id(make, stub, snaps):
+    c = make()
+    older = snapshot(c).json()["snapshot"]
+    triples(stub, "urn:example:data").add(
+        (URIRef("urn:example:thing:2"), URIRef("urn:p"), URIRef("urn:o"))
+    )
+    snapshot(c)  # the newest has thing:2
+    stub.wipe()
+
+    r = c.post("/admin/dataset/restore", json={"snapshot": older}, headers=auth())
+
+    assert r.status_code == 200, r.text
+    assert r.json()["snapshot"] == older
+    assert (URIRef("urn:example:thing:2"), URIRef("urn:p"), URIRef("urn:o")) not in triples(
+        stub, "urn:example:data"
+    )
+
+
+def test_restore_defaults_to_the_newest_snapshot(make, stub, snaps):
     c = make()
     snapshot(c)
     triples(stub, "urn:example:data").add(
         (URIRef("urn:example:thing:2"), URIRef("urn:p"), URIRef("urn:o"))
     )
+    newest = snapshot(c).json()["snapshot"]
+    stub.wipe()
 
+    body = restore(c).json()
+
+    assert body["snapshot"] == newest
+    assert (URIRef("urn:example:thing:2"), URIRef("urn:p"), URIRef("urn:o")) in triples(
+        stub, "urn:example:data"
+    )
+
+
+def test_an_unknown_snapshot_id_is_a_404_that_lists_what_exists(make, stub, snaps):
+    c = make()
+    have = snapshot(c).json()["snapshot"]
+    stub.wipe()
+
+    r = c.post("/admin/dataset/restore", json={"snapshot": "20000101T000000Z"}, headers=auth())
+
+    assert r.status_code == 404 and have in r.json()["detail"]["message"]
+    assert stub.put_calls == []
+
+
+@pytest.mark.parametrize("bad", ["../escape", "g0001.ttl", "latest", "20261028T041706Z/../x", ""])
+def test_a_snapshot_id_cannot_name_anything_but_a_snapshot(make, stub, snaps, bad):
+    c = make()
     snapshot(c)
+    stub.wipe()
 
-    texts = [p.read_text() for p in (snaps / "example").glob("g*.ttl")]
-    assert any("thing:2" in t for t in texts)
-    assert sorted(p.name for p in snaps.iterdir()) == ["example"]
+    r = c.post("/admin/dataset/restore", json={"snapshot": bad}, headers=auth())
+
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "bad_snapshot_id"
+    assert stub.put_calls == []
+
+
+def test_a_snapshot_in_the_first_layout_is_migrated_and_still_restorable(make, stub, snaps):
+    """The first release wrote manifest.json and the graph files straight into the dataset directory."""
+    c = make()
+    snapshot(c)
+    snap = latest(snaps)
+    flat = snaps / "example"
+    for f in snap.iterdir():
+        f.rename(flat / f.name)
+    snap.rmdir()
+    assert (flat / MANIFEST).is_file()
+    stub.wipe()
+
+    r = restore(c)
+
+    assert r.status_code == 200, r.text
+    assert not (flat / MANIFEST).exists()  # moved into an id-named directory
+    assert len(snap_dirs(snaps)) == 1 and stub.graphs() >= {"urn:example:holons", "urn:example:data"}
 
 
 def test_rdf12_text_passes_through_unparsed(make, stub, snaps, monkeypatch):
@@ -300,10 +427,10 @@ def test_both_are_off_without_a_snapshot_directory(make, stub, path):
 # --- a snapshot is never made worse ------------------------------------------------------------
 
 
-def test_an_empty_dataset_is_not_snapshotted_so_a_good_snapshot_survives(make, stub, snaps):
+def test_an_empty_dataset_is_not_snapshotted_so_good_snapshots_are_not_pushed_out(make, stub, snaps):
     c = make()
     snapshot(c)
-    good = (snaps / "example" / MANIFEST).read_text()
+    good = (latest(snaps) / MANIFEST).read_text()
     stub.wipe()
     # the caller is no longer admin once the data is gone, so exercise the rule directly
     conn = Conn(base_url="http://x", dataset="example", overridden=False, bank_name="local")
@@ -312,12 +439,12 @@ def test_an_empty_dataset_is_not_snapshotted_so_a_good_snapshot_survives(make, s
         asyncio.run(take(stub, conn, Settings(snapshot_dir=snaps), by="alice"))
 
     assert exc.value.code == "nothing_to_snapshot"
-    assert (snaps / "example" / MANIFEST).read_text() == good
+    assert (latest(snaps) / MANIFEST).read_text() == good
 
 
 def test_a_dataset_holding_only_its_audit_graph_counts_as_empty_for_a_snapshot(make, stub, snaps):
     snapshot(make())
-    good = (snaps / "example" / MANIFEST).read_text()
+    good = (latest(snaps) / MANIFEST).read_text()
     stub.wipe()
     triples(stub, "urn:example:audit").add((URIRef("urn:a"), URIRef("urn:p"), URIRef("urn:o")))
     conn = Conn(base_url="http://x", dataset="example", overridden=False, bank_name="local")
@@ -326,7 +453,7 @@ def test_a_dataset_holding_only_its_audit_graph_counts_as_empty_for_a_snapshot(m
         asyncio.run(take(stub, conn, Settings(snapshot_dir=snaps), by="alice"))
 
     assert exc.value.code == "nothing_to_snapshot"
-    assert (snaps / "example" / MANIFEST).read_text() == good
+    assert (latest(snaps) / MANIFEST).read_text() == good
 
 
 def test_a_refused_call_after_a_restart_does_not_block_the_restore(make, stub, snaps):
@@ -350,7 +477,7 @@ def test_restore_merges_the_audit_graph_instead_of_replacing_it(make, stub, snap
     assert in_snapshot
     snapshot(c)  # ... so this second snapshot is the first to contain an audit graph
     assert "urn:example:audit" in {
-        g["iri"] for g in json.loads((snaps / "example" / MANIFEST).read_text())["graphs"]
+        g["iri"] for g in json.loads((latest(snaps) / MANIFEST).read_text())["graphs"]
     }
     stub.wipe()
     since = (URIRef("urn:audit:since-restart"), URIRef("urn:p"), URIRef("urn:o"))
@@ -372,14 +499,14 @@ def test_an_oversized_snapshot_is_refused_before_anything_is_written(make, stub,
     assert not snaps.exists()
 
 
-def test_an_oversized_replacement_leaves_the_earlier_snapshot_alone(make, stub, snaps):
+def test_an_oversized_snapshot_leaves_the_earlier_one_alone(make, stub, snaps):
     snapshot(make())
-    good = (snaps / "example" / MANIFEST).read_text()
+    good = (latest(snaps) / MANIFEST).read_text()
 
     r = snapshot(make(snapshot_max_bytes=10))
 
     assert r.status_code == 413
-    assert (snaps / "example" / MANIFEST).read_text() == good
+    assert (latest(snaps) / MANIFEST).read_text() == good
 
 
 # --- a tampered or failing restore ---------------------------------------------------------------
@@ -388,7 +515,7 @@ def test_an_oversized_replacement_leaves_the_earlier_snapshot_alone(make, stub, 
 def test_a_manifest_naming_a_path_outside_the_snapshot_is_refused(make, stub, snaps):
     c = make()
     snapshot(c)
-    manifest_path = snaps / "example" / MANIFEST
+    manifest_path = latest(snaps) / MANIFEST
     manifest = json.loads(manifest_path.read_text())
     manifest["graphs"][0]["file"] = "../../secret.ttl"
     manifest_path.write_text(json.dumps(manifest))
@@ -403,7 +530,7 @@ def test_a_manifest_naming_a_path_outside_the_snapshot_is_refused(make, stub, sn
 def test_a_snapshot_of_another_dataset_is_refused(make, stub, snaps):
     c = make()
     snapshot(c)
-    manifest_path = snaps / "example" / MANIFEST
+    manifest_path = latest(snaps) / MANIFEST
     manifest = json.loads(manifest_path.read_text())
     manifest["dataset"] = "someone-else"
     manifest_path.write_text(json.dumps(manifest))

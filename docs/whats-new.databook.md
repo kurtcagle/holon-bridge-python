@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.18
+version: 1.0.19
 created: 2026-09-27
 updated: 2026-10-27
 author:
@@ -63,6 +63,19 @@ process:
   per-caller identity reaches the REST layer. Not covered: dropping a dataset,
   and writing `bankScopedDatasets` to `config.json` -- declare a dataset there
   before its first write.
+- **Snapshots are now kept as a history: the newest `SNAPSHOT_KEEP` (default
+  5), listed by `list_snapshots`, restorable by id.** Each `snapshot_dataset`
+  adds a timestamped snapshot under `SNAPSHOT_DIR/{dataset}/{id}/` instead of
+  replacing the previous one, and removes the oldest beyond the limit only
+  after the new one is safely written, so a good earlier state survives a bad
+  write. `GET /admin/dataset/snapshots` lists them (metadata only, same gate as
+  restore) and `restore_dataset` takes an optional `snapshot` id, defaulting to
+  the newest. It works on a persistent dataset too, as a bridge-side copy,
+  though restore still only fills an empty dataset (checked live on a
+  persistent dataset: the snapshot is taken, a restore into it is refused).
+  A snapshot written by the first release is migrated into the new layout on
+  first use. Not a backup system: it reads the whole dataset through the
+  bridge's memory, so `SNAPSHOT_MAX_BYTES` (50 MB) still applies per snapshot.
 - **A dataset can be snapshotted before a Fuseki restart and restored after:
   `POST /admin/dataset/snapshot` / `snapshot_dataset` and `POST
   /admin/dataset/restore` / `restore_dataset`.** For in-memory datasets, which

@@ -194,6 +194,7 @@ class Settings:
     # since the bridge reads the whole dataset into memory to write it.
     snapshot_dir: Path | None = None
     snapshot_max_bytes: int = 50_000_000
+    snapshot_keep: int = 5  # newest snapshots kept per dataset
     allow_legacy_bearer: bool = True
 
     # Turtle handling. ``passthrough`` sends payloads to Jena unparsed, which
@@ -277,6 +278,7 @@ class Settings:
             max_datasets=int(os.getenv("MAX_DATASETS", "50")),
             snapshot_dir=Path(os.environ["SNAPSHOT_DIR"]) if os.getenv("SNAPSHOT_DIR") else None,
             snapshot_max_bytes=int(os.getenv("SNAPSHOT_MAX_BYTES", "50000000")),
+            snapshot_keep=max(1, int(os.getenv("SNAPSHOT_KEEP", "5"))),
             allow_legacy_bearer=_flag("ALLOW_LEGACY_BEARER", True),
             parse_mode=os.getenv("PARSE_MODE", "passthrough").strip().lower(),
             shacl_required=_flag("SHACL_REQUIRED", False),
