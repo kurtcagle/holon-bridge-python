@@ -226,3 +226,75 @@ def test_validate_local_unaffected_by_ordinary_shapes():
     pytest.importorskip("pyshacl")
     report = shacl_mod.validate_local("<urn:a> <urn:b> <urn:c> .", ORDINARY_SHAPES)
     assert report.conforms is True
+
+
+# --- unparseable shapes: fail closed, cleanly ----------------------------------
+
+TRIPLE_TERM_SHAPES = """
+@prefix ex: <https://example.org/> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+
+ex:S a sh:NodeShape ;
+    sh:targetClass ex:Thing ;
+    ex:annotates <<( ex:a ex:b ex:c )>> .
+"""
+
+
+def test_reject_helper_refuses_unparseable_shapes_naming_the_graph():
+    with pytest.raises(shacl_mod.UnreadableShapesError) as exc:
+        shacl_mod._reject_graph_crossing_constraints(TRIPLE_TERM_SHAPES, "urn:big:shapes")
+    msg = str(exc.value)
+    assert "<urn:big:shapes>" in msg
+    assert "cannot read" in msg
+    assert "smaller shapes graph" in msg
+    assert isinstance(exc.value, ValueError)
+
+
+@pytest.mark.parametrize("fn", ["validate_full", "validate_delta"])
+async def test_unparseable_shapes_are_refused_before_touching_fuseki(fn):
+    client = FakeClient(shapes_turtle=TRIPLE_TERM_SHAPES)
+    conn = _conn()
+    with pytest.raises(shacl_mod.UnreadableShapesError, match="urn:ds:big-shapes"):
+        await getattr(shacl_mod, fn)(
+            client,
+            conn,
+            turtle="<urn:a> <urn:b> <urn:c> .",
+            shapes_graph="urn:ds:big-shapes",
+            target_graph="urn:ds:holons",
+        )
+    assert client.updates == []
+    assert client.dropped == []
+    assert client.posted == []
+    assert client.validated == []  # fail closed: the validator never ran
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_validate_route_returns_400_not_500_for_unparseable_shapes(mode):
+    from fastapi.testclient import TestClient
+
+    from holonbridge.config import Settings
+    from holonbridge.server import create_app
+
+    app = create_app(Settings(bearer_token="test-token"))
+    with TestClient(app) as http:
+        class _Stub(FakeClient):
+            async def aclose(self):
+                return None
+
+        stub = _Stub(shapes_turtle=TRIPLE_TERM_SHAPES)
+        app.state.fuseki = stub
+        response = http.post(
+            "/validate",
+            headers={"Authorization": "Bearer test-token"},
+            json={
+                "turtle": "<urn:a> <urn:b> <urn:c> .",
+                "shapes_graph": "https://w3id.org/ggsc/databooks/shacl-all-v1.1#graph",
+                "target_graph": "urn:ds:holons",
+                "mode": mode,
+            },
+        )
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "shacl-all-v1.1#graph" in detail
+    assert "smaller shapes graph" in detail
+    assert stub.validated == []

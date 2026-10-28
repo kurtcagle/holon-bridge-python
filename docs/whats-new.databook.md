@@ -75,6 +75,32 @@ process:
   back from Fuseki rather than assumed. Verify on a live server that a new
   dataset lists `shacl` among its services.
 
+### 2026-10-26
+
+- **The MCP has a token of its own; the claim route audits a 409 as a refusal and returns 404 for an unknown dataset.**
+  The MCP read only `BEARER_TOKEN`. Once the REST bridge moves to
+  `PROXY_TOKENS`, the MCP (a proxy) cannot share the legacy token under
+  one-token-one-role, and a token supplied under any other name was ignored:
+  the MCP sent no `Authorization` header and every call failed with
+  `401 missing bearer token`, with nothing to say why. It now reads
+  `HOLONBRIDGE_MCP_TOKEN` first and falls back to `BEARER_TOKEN`, so existing
+  single-token setups are unchanged. A blank value counts as unset, so a shared
+  `.env` carrying `BEARER_TOKEN=` cannot hide the MCP's own token. Startup logs
+  which variable supplied the token (never its value), or a warning when there
+  is none. On `POST /admin/dataset/initialise`, a 409 is now audited as
+  `denied` with its code as the reason, so it survives the `denials` audit
+  level; a 409 on any other route is unchanged. The route also returns
+  `404 unknown_dataset` when the backend does not host the dataset, instead of
+  an opaque backend error. That check runs after eligibility, so an ineligible
+  caller still gets the plain 403 and cannot use it to ask which datasets
+  exist, and it is skipped when Fuseki's `/$/datasets` admin API is
+  unavailable. `DATASET_CLAIMANTS`, the one-token-one-role startup rule, and
+  the fact that a real environment variable beats `.env` are now documented in
+  `.env.example` and the README. Checked live on a development bridge: the MCP
+  authenticates with its own token, a claim on a claimed dataset gives the 409,
+  and it is recorded as `denied`. The 404 was tested against stubs only
+  ([#61](https://github.com/kurtcagle/holon-bridge-python/pull/61)).
+
 ### 2026-10-25
 
 - **Fluent transitions now refuse a shapes graph with a graph-crossing constraint.**
@@ -385,6 +411,12 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-10-26-a a hb:ReleaseNote ;
+    dcterms:date "2026-10-26"^^xsd:date ;
+    rdfs:label "MCP own token; claim route 409 audited as a refusal, 404 for unknown dataset" ;
+    dcterms:description "The MCP now reads HOLONBRIDGE_MCP_TOKEN, falling back to BEARER_TOKEN (a blank value counts as unset), so it can hold a PROXY_TOKENS token distinct from the legacy one; before, a token under any other name was ignored and every call was a 401 missing bearer token. Startup logs which variable was used, never the value. POST /admin/dataset/initialise now audits a 409 as denied with its code as the reason, and returns 404 unknown_dataset for a dataset the backend does not host (checked after eligibility, skipped if the Fuseki admin API is unavailable). DATASET_CLAIMANTS, the one-token-one-role rule and environment-over-file precedence are documented in .env.example and the README. The 409 audit outcome and the MCP token path were checked live; the 404 against stubs only." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/61> .
 
 hb:release-2026-10-25-b a hb:ReleaseNote ;
     dcterms:date "2026-10-25"^^xsd:date ;

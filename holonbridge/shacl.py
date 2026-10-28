@@ -204,6 +204,14 @@ def _raise_if_graph_crossing(hits: list[tuple[str, str, list[str]]]) -> None:
     )
 
 
+class UnreadableShapesError(ValueError):
+    """The shapes graph could not be parsed, so the guard cannot vouch for it.
+
+    A ``ValueError`` so every caller that already turns the guard's refusal into
+    a client error (``/validate`` -> 400) does the same here.
+    """
+
+
 def ensure_enforceable(shapes_turtle: str) -> None:
     """Public name for the graph-crossing guard, for gates outside this module
     (the fluent pre-commit check validates through the client directly, so it
@@ -211,12 +219,31 @@ def ensure_enforceable(shapes_turtle: str) -> None:
     _reject_graph_crossing_constraints(shapes_turtle)
 
 
-def _reject_graph_crossing_constraints(shapes_turtle: str) -> None:
+def _reject_graph_crossing_constraints(
+    shapes_turtle: str, shapes_graph: str | None = None
+) -> None:
     """Raise ``ValueError`` if ``shapes_turtle`` declares a GRAPH-crossing
     SPARQLConstraint, rather than let it silently pass every validation.
+
+    Fails closed: shapes this module cannot parse are refused
+    (:class:`UnreadableShapesError`), never validated unchecked -- an unread
+    graph could hold exactly the constraint the guard exists to catch. The
+    usual cause is RDF 1.2 syntax (triple terms, ``<<( s p o )>>``) that
+    rdflib cannot read although Jena can.
     """
     graph = Graph()
-    graph.parse(data=shapes_turtle, format="turtle")
+    try:
+        graph.parse(data=shapes_turtle, format="turtle")
+    except Exception as exc:  # noqa: BLE001 - rdflib raises several parser types
+        which = f"shapes graph <{shapes_graph}>" if shapes_graph else "the shapes graph"
+        detail = " ".join(str(exc).split())[:200]
+        raise UnreadableShapesError(
+            f"{which} uses syntax the graph-crossing guard cannot read (rdflib "
+            "cannot parse it; RDF 1.2 triple terms <<( ... )>> are a known "
+            "cause), so the validation was refused rather than run unchecked. "
+            "Name a smaller shapes graph that avoids that syntax, via "
+            f"shapes_graph. Parser said: {detail}"
+        ) from exc
     _raise_if_graph_crossing(_graph_crossing_hits(graph))
 
 
@@ -255,7 +282,7 @@ async def validate_full(
     shapes = await client.get_graph(conn, shapes_graph)
     if not shapes.strip():
         raise ValueError(f"shapes graph <{shapes_graph}> is empty or absent")
-    _reject_graph_crossing_constraints(shapes)
+    _reject_graph_crossing_constraints(shapes, shapes_graph)
     context_graphs = _checked_context_graphs(context_graphs)
 
     scratch = _scratch_iri(conn)
@@ -323,7 +350,7 @@ async def validate_delta(
     shapes = await client.get_graph(conn, shapes_graph)
     if not shapes.strip():
         raise ValueError(f"shapes graph <{shapes_graph}> is empty or absent")
-    _reject_graph_crossing_constraints(shapes)
+    _reject_graph_crossing_constraints(shapes, shapes_graph)
     context_graphs = _checked_context_graphs(context_graphs)
 
     scratch = _scratch_iri(conn)
