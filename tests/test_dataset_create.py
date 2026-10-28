@@ -17,6 +17,8 @@ under test:
   adds one to the configuration file Fuseki wrote (effective after a restart),
   says so, and never edits anything but an appended statement; the bundled shapes
   are seeded by default;
+- an in-memory dataset comes back empty after a Fuseki restart, so there is a way
+  to put its shapes (and optionally an owner) back, which never overwrites;
 - the bridge cannot drop a dataset: no client method, no route;
 - a successful creation is always audited, and a refusal is audited as denied.
 """
@@ -661,3 +663,112 @@ def test_the_packaged_shapes_parse_and_cover_every_bundled_file():
     for name in BUNDLED_SHAPES:
         assert (SHAPES_DIR / name).is_file(), name
     assert len(parse(bundled_shapes())) > 0
+
+
+# --- an in-memory dataset after a Fuseki restart --------------------------------------------------
+
+SHAPES = "urn:example:shacl"
+SH_NODESHAPE = URIRef("http://www.w3.org/ns/shacl#NodeShape")
+
+
+def reseed(c, token=ALICE_TOKEN, **body):
+    return c.post("/admin/dataset/shapes", json=body, headers=bearer(token))
+
+
+def shape_count(stub, graph=SHAPES) -> int:
+    return len(set(stub.ds.get_context(URIRef(graph)).subjects(RDF.type, SH_NODESHAPE)))
+
+
+def test_the_memory_warning_says_what_a_restart_costs_and_how_to_recover(make, stub):
+    c = make(identity_tokens={ALICE_TOKEN: "alice"})
+
+    body = alice(c, {"name": "scratch", "kind": "memory"}).json()
+
+    (note,) = [n for n in body["notes"] if "in-memory" in n]
+    assert "EMPTY" in note and "owner" in note and "seed_dataset_shapes" in note
+
+
+def test_a_restarted_memory_dataset_gets_its_shapes_and_owner_back_in_one_call(make, stub):
+    c = make(identity_tokens={ALICE_TOKEN: "alice"})
+    # the dataset is "example" (the active one) and, as after a restart, holds nothing
+    assert shape_count(stub) == 0
+
+    r = reseed(c, claim=True)
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["seeded"] is True and body["shapesGraph"] == SHAPES
+    assert body["claimed"] is True and body["owner"] == "urn:example:person:alice"
+    assert shape_count(stub) > 0
+    assert roles_in(stub, "urn:example:holons") == {
+        ("urn:example:person:alice", "urn:example:role:owner")
+    }
+
+
+def test_reseeding_does_not_claim_unless_asked(make, stub):
+    c = make(identity_tokens={ALICE_TOKEN: "alice"})
+
+    body = reseed(c).json()
+
+    assert body["seeded"] is True and body["claimed"] is False
+    assert roles_in(stub, "urn:example:holons") == set()
+
+
+def test_reseeding_never_overwrites_shapes_that_are_already_there(make, stub):
+    c = make(identity_tokens={ALICE_TOKEN: "alice"})
+    mine = URIRef("urn:example:my-own-shape")
+    stub.ds.get_context(URIRef(SHAPES)).add((mine, RDF.type, SH_NODESHAPE))
+
+    body = reseed(c).json()
+
+    assert body["seeded"] is False and "never overwrites" in body["skippedReason"]
+    assert set(stub.ds.get_context(URIRef(SHAPES)).subjects(RDF.type, SH_NODESHAPE)) == {mine}
+
+
+def test_reseeding_does_not_hand_an_owned_dataset_to_the_caller(make, stub):
+    c = make(identity_tokens={ALICE_TOKEN: "alice", MALLORY_TOKEN: "mallory"}, dataset_creators=("alice", "mallory"))
+    assert reseed(c, claim=True).json()["claimed"] is True  # alice owns it
+
+    body = reseed(c, token=MALLORY_TOKEN, claim=True).json()
+
+    assert body["claimed"] is False and body["claimError"]["code"] == "dataset_already_claimed"
+    assert roles_in(stub, "urn:example:holons") == {("urn:example:person:alice", "urn:example:role:owner")}
+
+
+@pytest.mark.parametrize(
+    "settings, token",
+    [
+        ({"identity_tokens": {MALLORY_TOKEN: "mallory"}}, MALLORY_TOKEN),  # established, not a creator
+        ({"bearer_token": SHARED_TOKEN}, SHARED_TOKEN),  # legacy shared token
+    ],
+)
+def test_an_ineligible_caller_cannot_reseed_and_nothing_is_written(make, stub, settings, token):
+    c = make(**settings)
+
+    r = reseed(c, token=token, claim=True)
+
+    assert r.status_code == 403
+    assert shape_count(stub) == 0 and roles_in(stub, "urn:example:holons") == set()
+
+
+def test_reseeding_a_dataset_fuseki_does_not_host_is_a_404(make, stub):
+    c = make(identity_tokens={ALICE_TOKEN: "alice"})
+
+    r = c.post(
+        "/admin/dataset/shapes",
+        json={},
+        headers=bearer(ALICE_TOKEN, **{"x-dataset-override": "nowhere"}),
+    )
+
+    assert r.status_code == 404 and r.json()["detail"]["code"] == "unknown_dataset"
+    assert shape_count(stub, "urn:nowhere:shacl") == 0
+
+
+def test_reseeding_is_audited_even_when_the_operator_has_turned_audit_down(make, stub, monkeypatch):
+    monkeypatch.setenv("HOLONBRIDGE_AUDIT_LEVEL", "denials")
+    c = make(identity_tokens={ALICE_TOKEN: "alice"})
+
+    reseed(c)
+
+    text = stub.ds.get_context(URIRef(audit_graph("urn:example:holons"))).serialize(format="turtle")
+    assert "POST /admin/dataset/shapes" in text
