@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 
 import httpx
 
+from .assembler import build_dataset_assembler
 from .conn import Conn
 
 SPARQL_JSON = "application/sparql-results+json"
@@ -242,6 +243,34 @@ class FusekiClient:
             )
         out.sort(key=lambda d: d["name"])
         return out
+
+    async def create_dataset(
+        self, conn: Conn, name: str, *, persistent: bool, location: str | None = None
+    ) -> None:
+        """Create an empty dataset, with a SHACL endpoint, through Fuseki's admin API.
+
+        ``persistent=True`` makes a TDB2 dataset at ``location`` (an absolute
+        directory, required then); ``False`` makes an in-memory one. Raises
+        :class:`FusekiError` -- status 409 when the name is taken.
+
+        The bridge uploads an assembler it *generates* (see
+        :mod:`holonbridge.assembler`) rather than using the simpler
+        ``dbName``/``dbType`` form, because a dataset made by the form has no
+        ``/shacl`` endpoint. The assembler is never taken from a caller: it can
+        name arbitrary filesystem locations and Java classes, so only a
+        validated name and an operator-configured directory go into it.
+
+        There is intentionally no ``drop_dataset`` beside this. See
+        ``tests/test_dataset_create.py``, which fails if one appears.
+        """
+        url = f"{conn.base_url}/$/datasets"
+        await self._post(
+            url,
+            conn=conn,
+            content=build_dataset_assembler(name, persistent=persistent, location=location),
+            content_type=TURTLE,
+            accept="*/*",
+        )
 
     async def ping(self, conn: Conn) -> bool:
         try:

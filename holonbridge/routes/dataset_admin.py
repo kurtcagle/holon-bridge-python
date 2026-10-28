@@ -7,11 +7,14 @@ disagreeing is the normal case worth being able to see -- a bank naming
 a dataset that was renamed or never created looks identical to a working
 one until something reads from it and comes back empty.
 
-Listing only, for Fuseki's own datasets. Creating and dropping datasets
-stays out for now: those are destructive server-level operations, and the
-bridge deliberately holds one credential shared by every caller, so "who
-asked for this" cannot be answered yet. Adding them before per-caller
-identity reaches the REST layer would put a `DROP` behind a shared secret.
+Listing only, here. Creating a dataset is ``routes/dataset_create.py``
+(CHANGED 2026-10-27): it became safe to add once per-caller identity reached
+the REST layer, and it is gated on an *established* identity listed in
+``DATASET_CREATORS`` -- never on the shared token, and never on admin of any
+one dataset. Dropping a dataset stays out, deliberately and for good: it is
+the destructive half, and nothing in the bridge can undo it. A test
+(``tests/test_dataset_create.py``) fails if a drop route or client method
+appears.
 
 CHANGED 2026-09-27: added the text-index provisioning route. This is a
 narrower, additive operation than create/drop -- it patches an *existing*

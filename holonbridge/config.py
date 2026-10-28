@@ -116,6 +116,13 @@ def parse_proxy_tokens(raw: str | None) -> tuple[str, ...]:
     return tokens
 
 
+def _parse_identifier_list(raw: str | None, setting: str) -> tuple[str, ...]:
+    items = tuple(i.strip() for i in (raw or "").split(",") if i.strip())
+    if len(set(items)) != len(items):
+        raise ValueError(f"{setting}: duplicate identifier")
+    return items
+
+
 def parse_dataset_claimants(raw: str | None) -> tuple[str, ...]:
     """``DATASET_CLAIMANTS="login-a,login-b"`` -> the external identifiers that
     may initialise an unclaimed dataset (become its first owner).
@@ -126,10 +133,20 @@ def parse_dataset_claimants(raw: str | None) -> tuple[str, ...]:
     in-band claim off entirely -- ``holonbridge-bootstrap-admin`` is then the
     only way in, exactly as before.
     """
-    items = tuple(i.strip() for i in (raw or "").split(",") if i.strip())
-    if len(set(items)) != len(items):
-        raise ValueError("DATASET_CLAIMANTS: duplicate identifier")
-    return items
+    return _parse_identifier_list(raw, "DATASET_CLAIMANTS")
+
+
+def parse_dataset_creators(raw: str | None) -> tuple[str, ...]:
+    """``DATASET_CREATORS="login-a,login-b"`` -> the external identifiers that
+    may create a brand-new dataset on the backend (``POST /datasets``).
+
+    Same shape and same reasoning as :func:`parse_dataset_claimants`, but a
+    separate list on purpose: creating a dataset is a *server-level* act (it
+    allocates storage and, for an in-memory dataset, heap on a Fuseki that every
+    other dataset shares), so it is not something admin on any one dataset can
+    imply. Empty by default, which turns creation off entirely.
+    """
+    return _parse_identifier_list(raw, "DATASET_CREATORS")
 
 
 @dataclass
@@ -162,6 +179,14 @@ class Settings:
     # External identifiers permitted to initialise a dataset that has no owner
     # or admin yet. See claim.py and parse_dataset_claimants.
     dataset_claimants: tuple[str, ...] = ()
+    # External identifiers permitted to create a new dataset on the backend.
+    # Empty turns ``POST /datasets`` off. See dataset_create.py.
+    dataset_creators: tuple[str, ...] = ()
+    # Creation is refused once the backend already hosts this many datasets.
+    # There is deliberately no way to drop one through the bridge, so this is
+    # the backstop against a runaway loop (or a mistaken script) filling the
+    # server. Counts what Fuseki reports, not just what the bridge created.
+    max_datasets: int = 50
     allow_legacy_bearer: bool = True
 
     # Turtle handling. ``passthrough`` sends payloads to Jena unparsed, which
@@ -201,6 +226,21 @@ class Settings:
     # whether this process can see that host's disk.
     fuseki_config_dir: Path | None = None
 
+    # Where persistent (TDB2) datasets the bridge creates are stored: an
+    # absolute directory on the Fuseki host. Defaults to ``databases`` beside
+    # ``fuseki_config_dir`` (Fuseki's ``run/configuration`` and ``run/databases``
+    # are siblings), so setting FUSEKI_CONFIG_DIR is normally enough. Never
+    # guessed from fuseki_url, for the same reason fuseki_config_dir isn't.
+    fuseki_databases_dir: Path | None = None
+
+    def databases_dir(self) -> Path | None:
+        """The directory persistent datasets are created under, or ``None``."""
+        if self.fuseki_databases_dir is not None:
+            return self.fuseki_databases_dir
+        if self.fuseki_config_dir is not None:
+            return self.fuseki_config_dir.parent / "databases"
+        return None
+
     def __post_init__(self) -> None:
         # One token, one role. A token that is both the shared legacy token and
         # an identity token (or a proxy token) would be ambiguous about whether
@@ -231,6 +271,7 @@ class Settings:
             return raw.strip().lower() in {"1", "true", "yes", "on"}
 
         fuseki_config_dir_raw = os.getenv("FUSEKI_CONFIG_DIR")
+        fuseki_databases_dir_raw = os.getenv("FUSEKI_DATABASES_DIR")
 
         return cls(
             host=os.getenv("HOLONBRIDGE_HOST", "127.0.0.1"),
@@ -241,6 +282,8 @@ class Settings:
             identity_tokens=parse_identity_tokens(os.getenv("IDENTITY_TOKENS")),
             proxy_tokens=parse_proxy_tokens(os.getenv("PROXY_TOKENS")),
             dataset_claimants=parse_dataset_claimants(os.getenv("DATASET_CLAIMANTS")),
+            dataset_creators=parse_dataset_creators(os.getenv("DATASET_CREATORS")),
+            max_datasets=int(os.getenv("MAX_DATASETS", "50")),
             allow_legacy_bearer=_flag("ALLOW_LEGACY_BEARER", True),
             parse_mode=os.getenv("PARSE_MODE", "passthrough").strip().lower(),
             shacl_required=_flag("SHACL_REQUIRED", False),
@@ -254,6 +297,9 @@ class Settings:
             scheduler_max_firing_depth=int(os.getenv("SCHEDULER_MAX_FIRING_DEPTH", "3")),
             config_path=Path(os.getenv("HOLONBRIDGE_CONFIG", str(DEFAULT_CONFIG_PATH))),
             fuseki_config_dir=Path(fuseki_config_dir_raw) if fuseki_config_dir_raw else None,
+            fuseki_databases_dir=(
+                Path(fuseki_databases_dir_raw) if fuseki_databases_dir_raw else None
+            ),
         )
 
 

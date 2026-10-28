@@ -12,6 +12,10 @@ CHANGED 2026-09-27: added ``provision_text_index``. Thin wrapper over
 ``POST /datasets/{name}/text-index`` -- all the actual patch logic lives
 server-side in ``provisioning.py``; this module just forwards the call.
 Admin-gated on the bridge side, same as ``act_as``.
+
+CHANGED 2026-10-27: added ``create_dataset``. Create only -- there is no drop
+tool, deliberately. Gated server-side by ``DATASET_CREATORS``, not by admin on
+any one dataset.
 """
 
 from __future__ import annotations
@@ -133,4 +137,42 @@ async def provision_text_index(
             "lucene_dir": lucene_dir,
             "commit": commit,
         },
+    )
+
+
+@mcp.tool()
+async def create_dataset(
+    name: str, kind: str, claim: bool = True, shapes: bool = True
+) -> dict:
+    """Create a new, empty dataset on the backend. There is no drop tool.
+
+    ``kind`` is required and is either ``persistent`` (a TDB2 dataset on disk,
+    survives a Fuseki restart) or ``memory`` (in-memory: the contents are lost
+    when Fuseki restarts). Ask the person which they want rather than guessing,
+    and confirm the name with them too: the bridge cannot remove a dataset once
+    it exists, so a mistake is theirs to clean up in Fuseki by hand.
+
+    ``name``: 1-64 characters, lower-case letters, digits, hyphen or underscore,
+    starting with a letter.
+
+    Allowed only for a caller whose identity is established AND listed in the
+    operator's ``DATASET_CREATORS`` -- anyone else gets a 403, and that is the
+    same answer whatever the name. Being admin on some dataset is not enough.
+
+    By default the caller becomes the new dataset's owner (``claim=true``), so
+    nobody else can take it in the gap. Pass ``claim=false`` to create it without
+    writing anything -- for instance to add it to the bank's ``bankScopedDatasets``
+    first, so its graphs use the ``urn:{bank}:{dataset}:{role}`` convention from
+    the very first write. The result reports ``bankScoped`` and the graph IRIs
+    the dataset will use.
+
+    Every dataset is created with SHACL enabled (``shaclEndpoint`` in the result)
+    and, unless ``shapes=false``, with the bundled identity/delegation/fluent
+    shapes already in its shapes graph, so validation works from the first write.
+    Pass ``shapes=false`` too when you want a completely untouched dataset.
+
+    Does not switch you to the new dataset; call ``switch_dataset`` for that.
+    """
+    return await _call(
+        "POST", "/datasets", json_body={"name": name, "kind": kind, "claim": claim, "shapes": shapes}
     )

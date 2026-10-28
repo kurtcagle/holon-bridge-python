@@ -2,9 +2,9 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.15
+version: 1.0.16
 created: 2026-09-27
-updated: 2026-10-26
+updated: 2026-10-27
 author:
   - name: Kurt Cagle
     iri: https://holongraph.com/people/kurt-cagle
@@ -45,6 +45,35 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-10-27
+
+- **A dataset can now be created through the bridge: `POST /datasets` /
+  `create_dataset`.** Persistent (TDB2) or in-memory, via Fuseki's admin API;
+  create only, with no drop route or client method (a test fails if one
+  appears). Gated by a new `DATASET_CREATORS` list, separate from
+  `DATASET_CLAIMANTS` and empty by default, and by the same *established
+  identity* standard as claiming, so the legacy shared token and an open
+  deployment can never create one. The caller becomes the new dataset's owner
+  unless `claim` is false. Names are strict (lower-case, no dots, reserved
+  names refused, existing names compared case-insensitively), `kind` is
+  required rather than defaulted, and `MAX_DATASETS` (default 50) caps what the
+  server will host. A successful creation is always audited. This reverses the
+  earlier stance that dataset creation stays outside the bridge, now that
+  per-caller identity reaches the REST layer. Not covered: dropping a dataset,
+  and writing `bankScopedDatasets` to `config.json` -- declare a dataset there
+  before its first write.
+- **Every dataset the bridge creates has SHACL enabled.** Datasets made through
+  Fuseki's admin form have no `/shacl` endpoint, which would leave a SHACL-gated
+  bridge rejecting every write to them. Creation now uploads an assembler the
+  bridge generates (standard endpoints plus `shacl`; never taken from a caller)
+  and seeds the bundled identity/delegation/fluent shapes into the new
+  dataset's shapes graph (`shapes=false` to skip). Persistent datasets are
+  placed under the new `FUSEKI_DATABASES_DIR` (default: `databases` beside
+  `FUSEKI_CONFIG_DIR`); without either, persistent creation is refused with 503.
+  The response reports `shaclEnabled`, `shaclEndpoint` and `shapesSeeded`, read
+  back from Fuseki rather than assumed. Verify on a live server that a new
+  dataset lists `shacl` among its services.
 
 ### 2026-10-26
 
@@ -527,3 +556,9 @@ hb:release-2026-10-04-a a hb:ReleaseNote ;
     dcterms:description "find_delegation 500'd against real Fuseki with ARQInternalErrorException: Peek iterator is already empty, on any dataset with no matching Delegation triples for the bound pattern -- the common case, hit via check_write/authorize_query for any identity with no grantsWrite. The rdflib test harness in tests/test_delegation*.py cannot see this; it's a Jena ARQ optimizer bug. Three independent SPARQL-level rewrites (merging two FILTER NOT EXISTS into one via UNION, merging delegatedGraph into the main predicate chain, VALUES instead of a FILTER equality on ?delegator) each fixed their own isolated case live against Fuseki but still crashed combined -- none composed. Fixed by replacing the one correlated query with the simplest possible candidate query (delegate + permission only) plus validity-window, revocation, delegator-status and target/delegator narrowing in Python instead of SPARQL. Verified against the real running service: an unprivileged write now returns a clean 403, not a 500; a real delegation lets the write through with correct attribution. Full test suite unchanged." ;
     rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/43> .
 ```
+
+hb:release-2026-10-27-a a hb:ReleaseNote ;
+    dcterms:date "2026-10-27"^^xsd:date ;
+    rdfs:label "Datasets can be created through the bridge (create-only), behind DATASET_CREATORS" ;
+    dcterms:description "POST /datasets and the create_dataset MCP tool create an empty persistent (TDB2) or in-memory dataset through Fuseki's /$/datasets admin API, uploading an assembler the bridge generates itself (never one from a caller), which includes a shacl endpoint, and seeding the bundled shapes (shapes=false to skip). Persistent datasets go under FUSEKI_DATABASES_DIR. Gated on an established identity listed in the new DATASET_CREATORS setting (empty by default, separate from DATASET_CLAIMANTS); the legacy shared token and an open deployment never qualify. The creator becomes the owner unless claim is false. Strict lower-case names, reserved names refused, case-insensitive existence check, MAX_DATASETS ceiling, successful creations always audited. There is deliberately no drop: a test asserts no DELETE route and no drop method exist. Tested against rdflib and a mocked Fuseki, not a live server." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pulls> .

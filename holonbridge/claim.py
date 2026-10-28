@@ -24,10 +24,11 @@ What it will and will not do
 * The claimer is the *caller*. There is no parameter that names anyone else.
 * It grants ``owner``, never a bypass beyond what owner already means.
 
-What it deliberately does not do: create the dataset (that stays outside the
-bridge), seed the scene/events/sequences graphs (they are created on first
-write, which is safe now that an unconditional transition no longer depends on
-the scene graph existing), or install shapes (gating is a per-dataset choice).
+What it deliberately does not do: create the dataset (that is
+``dataset_create.py``, a separate and separately-gated act), seed the
+scene/events/sequences graphs (they are created on first write, which is safe
+now that an unconditional transition no longer depends on the scene graph
+existing), or install shapes (gating is a per-dataset choice).
 """
 
 from __future__ import annotations
@@ -70,6 +71,34 @@ class Claimant:
     external_id_type: str
 
 
+def _established(
+    token_auth: Any,
+    *,
+    header_id: str | None,
+    header_type: str | None,
+    default_type: str,
+) -> tuple[str, str] | None:
+    """``(external_id, external_id_type)`` for a caller whose identity is
+    *established*, else ``None``.
+
+    Established means an identity-bound token (the credential is the identity)
+    or a trusted proxy's asserted identity. A legacy shared token or an open
+    deployment never qualifies: there the "identity" is a header anyone can
+    write. Shared by :func:`claimant` and :func:`creator` so the two can never
+    drift on what "established" means.
+    """
+    kind = getattr(token_auth, "kind", None)
+    if kind == "identity":
+        external_id, external_type = getattr(token_auth, "identity", None), default_type
+    elif kind == "proxy":
+        external_id, external_type = header_id, header_type or default_type
+    else:  # legacy shared token, open deployment, or anything unrecognised
+        return None
+    if not external_id or not _TYPE_NAME.match(external_type):
+        return None
+    return external_id, external_type
+
+
 def claimant(
     settings: Settings,
     token_auth: Any,
@@ -84,18 +113,37 @@ def claimant(
     not import ``deps`` (which imports it). Eligibility needs both halves: the
     identity is established, and the operator has listed it.
     """
-    kind = getattr(token_auth, "kind", None)
-    if kind == "identity":
-        external_id, external_type = getattr(token_auth, "identity", None), default_type
-    elif kind == "proxy":
-        external_id, external_type = header_id, header_type or default_type
-    else:  # legacy shared token, open deployment, or anything unrecognised
+    who = _established(
+        token_auth, header_id=header_id, header_type=header_type, default_type=default_type
+    )
+    if who is None or who[0] not in settings.dataset_claimants:
         return None
-    if not external_id or external_id not in settings.dataset_claimants:
+    return Claimant(*who)
+
+
+def creator(
+    settings: Settings,
+    token_auth: Any,
+    *,
+    header_id: str | None,
+    header_type: str | None,
+    default_type: str,
+) -> Claimant | None:
+    """The caller as a :class:`Claimant`, or ``None`` if they may not create datasets.
+
+    Same two halves as :func:`claimant` -- established identity, and listed by
+    the operator -- but against ``DATASET_CREATORS``. The list is separate from
+    ``DATASET_CLAIMANTS`` because creating a dataset is a server-level act,
+    not something authority over any one dataset implies, and the result is
+    returned as a :class:`Claimant` so it can be handed straight to
+    :func:`claim` when the creator is to become the new dataset's owner.
+    """
+    who = _established(
+        token_auth, header_id=header_id, header_type=header_type, default_type=default_type
+    )
+    if who is None or who[0] not in settings.dataset_creators:
         return None
-    if not _TYPE_NAME.match(external_type):
-        return None
-    return Claimant(external_id, external_type)
+    return Claimant(*who)
 
 
 def _unclaimed_pattern(holons_graph: str) -> str:
@@ -222,8 +270,8 @@ async def claim(
         raise ClaimError(
             404,
             "unknown_dataset",
-            f"dataset {conn.dataset!r} does not exist on this server; the bridge does not "
-            "create datasets, so create it in Fuseki first",
+            f"dataset {conn.dataset!r} does not exist on this server; create it first "
+            "(the create_dataset tool, if you are on DATASET_CREATORS, or in Fuseki itself)",
         )
 
     if not await is_unclaimed(query_fn, conn.holons_graph):

@@ -17,10 +17,8 @@ refuses to guess when a file doesn't match the expected shape rather than
 silently doing something the caller didn't ask for.
 
 This intentionally does NOT create or drop datasets, and does not touch
-Fuseki's own admin API. See routes/dataset_admin.py's module docstring for
-why: creating/dropping is a destructive, server-level operation, and the
-bridge does not yet have the per-caller accountability (HB_PER_PERSON_AUTH)
-that operation deserves. Patching a dataset's *existing* assembler file to
+Fuseki's own admin API. (Creating one is now ``dataset_create.py``, over the
+admin API; dropping remains out -- see routes/dataset_admin.py.) Patching a dataset's *existing* assembler file to
 add a non-destructive capability (a text index) is narrower and additive --
 but it is still a filesystem write on the machine Fuseki runs on, so it is
 gated the same way (admin animus only, see routes/dataset_admin.py) for the
