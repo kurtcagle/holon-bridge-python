@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.23
+version: 1.0.24
 created: 2026-09-27
 updated: 2026-11-01
 author:
@@ -45,6 +45,23 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-11-01 (agent calls: scheduler gates and audit)
+
+- **The scheduler's gates now cover agent calls.** The `agent-dispatch` job
+  needs the new `AgentCall` action class on its persona whatever class the task
+  declares (`POST /scheduler/task` requires the declaration), and the ODRL daily
+  count bounds *calls sent* rather than firings: a firing sends no more than is
+  left of the tightest task/persona limit, records it as `sched:units`, and a
+  manual run does not draw on it. Behaviour change: `firings_today` now sums
+  units (older records count as one).
+- **Agent calls are in the audit graph.** `placed`, `approved`, `rejected`,
+  `send`, `result`, `dispatch refused` and trigger refusals are written to
+  `urn:{dataset}:audit` with the call, endpoint, actor, authoriser and body
+  digest (never the body), and `GET /audit` returns `agent_call` and
+  `agent_endpoint`. A call whose `send` entry cannot be written is not sent.
+- **A bounded queue.** `AGENT_MAX_OPEN_CALLS` (default 200) caps open calls per
+  endpoint: 429 from the route, `failed` firings for a trigger.
 
 ### 2026-11-01 (agent endpoints)
 
@@ -555,6 +572,12 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-11-01-f a hb:ReleaseNote ;
+    dcterms:date "2026-11-01"^^xsd:date ;
+    rdfs:label "Agent calls under the scheduler's capability and ODRL gates, and in the audit graph" ;
+    dcterms:description "The agent-dispatch job requires the AgentCall action class on its persona regardless of the declared class, and the daily ODRL count now bounds calls sent (sched:units; a firing sends at most what the tightest limit leaves, manual runs do not draw on it). Placement, approval, rejection, send, result, dispatch refusal and trigger refusal are audit entries carrying the call, endpoint, actor, authoriser and body digest; a call whose send entry cannot be written is not sent. New AGENT_MAX_OPEN_CALLS caps open calls per endpoint (429 / failed firing)." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/77> .
 
 hb:release-2026-11-01-e a hb:ReleaseNote ;
     dcterms:date "2026-11-01"^^xsd:date ;

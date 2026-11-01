@@ -997,11 +997,43 @@ that the endpoint is still active. Without that job scheduled, policy-approved
 calls simply wait. A trigger does not stack a second call for a focus while one
 is still open.
 
-Not in this slice: the scheduler's action-class and ODRL capability gates do not
-yet cover agent calls, and calls are not yet written to the audit graph beyond
-the ledger itself. Toolset/persona reachability is not applied to endpoints.
-Asynchronous agents (a 202 and a later callback) are not supported: a reply is
-the response to the request or it is a failure.
+Toolset/persona reachability is not applied to endpoints. Asynchronous agents
+(a 202 and a later callback) are not supported: a reply is the response to the
+request or it is a failure.
+
+**Under the scheduler's gates.** The `agent-dispatch` job passes the same three
+gates as any task, and the gates know it sends data to a third party:
+
+- *Capability.* A persona needs the `AgentCall` action class to run it, whatever
+  class the task declares (the declared class defaults to `ReadOnlyQuery`, which
+  would otherwise let a read-only persona send). `POST /scheduler/task` refuses a
+  dispatch task that does not declare `action_class` `AgentCall`.
+- *Daily count.* The ODRL count bounds **calls sent**, not firings: a firing sends
+  no more than what is left of the tightest task or persona limit (and at most 10
+  per firing), records the number sent as `sched:units`, and the next firing sees
+  it taken off. An idle firing costs nothing; calls the agent refused still count
+  (a broken endpoint cannot be hammered past the limit); a firing that attempted
+  nothing is `failed` and free. A manual run (`/scheduler/task/{id}/fire`) does not
+  draw on the allowance, as for every task. Records written before units existed
+  count as one each.
+
+**In the audit graph.** Every step of a call's life is also written to
+`urn:{dataset}:audit`, so `GET /audit` (admin-only) shows what left the dataset
+without reading the ledger: `AGENT-CALL placed | approved | rejected | send |
+result | dispatch refused | trigger refused`, each with the call (`hb:agentCall`),
+the endpoint (`hb:agentEndpoint`), who acted, who authorised it, and the digest
+and size of the body (never the body). The `send` entry is written after the
+claim and **before any byte leaves, and the send does not happen if it cannot be
+written**: the call fails unsent (`the audit log could not be written, so the call
+was not sent`) and can be retried once the log is back. Other entries are
+best-effort, as for every audit entry. A dataset whose audit level is `off` is
+not asked for entries and so is not blocked by the log.
+
+**A bounded queue.** `AGENT_MAX_OPEN_CALLS` (default 200, `0` = no limit) caps the
+calls open to one endpoint (`PendingApproval`, `Approved` or `Sending`). Past it,
+`POST /agent-call` answers **429** `too_many_open_calls`, and a trigger whose
+condition matches more focus nodes than fit records `failed` for the rest rather
+than filling the ledger.
 
 ### Three guards against runaway firing
 

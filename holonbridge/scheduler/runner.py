@@ -43,9 +43,12 @@ from .proposer import (
     ProposerNotConfigured,
 )
 from .store import PolicyUnresolvable, SchedulerStore
-from .vocab import LLM_INVOCATION, TRIGGER_TEMPORAL
+from .vocab import AGENT_DISPATCH_JOBS, LLM_INVOCATION, TRIGGER_TEMPORAL
 
 log = logging.getLogger("holonbridge.scheduler")
+
+#: Most calls one ``agent-dispatch`` firing sends, before any daily limit.
+DISPATCH_BATCH = 10
 
 
 class Proposer(Protocol):
@@ -332,10 +335,10 @@ class Scheduler:
             record.detail = f"task is {task.status.lower()}"
             return record.detail
 
-        if persona is not None and not persona.can(task.action_class):
+        if persona is not None and not persona.can(task.required_class):
             record.outcome = "rejected-capability"
             record.detail = (
-                f"persona {persona.id} lacks {task.action_class}; "
+                f"persona {persona.id} lacks {task.required_class}; "
                 f"it has {', '.join(persona.capabilities) or 'no capabilities'}"
             )
             return record.detail
@@ -382,6 +385,13 @@ class Scheduler:
                     f"({count} today)"
                 )
                 return record.detail
+            # What is left of the tightest limit that applies. Most actions use
+            # one unit per firing and ignore this; a dispatch sends no more
+            # calls than it allows.
+            remaining = (policy.count or 0) - count
+            record.allowance = (
+                remaining if record.allowance is None else min(record.allowance, remaining)
+            )
 
         return None
 
@@ -560,7 +570,7 @@ class Scheduler:
             )
             return
 
-        if job in {"agent-dispatch", "dispatch-agent-calls"}:
+        if job in AGENT_DISPATCH_JOBS:
             # CHANGED 2026-11-01: sends agent calls that a *policy* approved (a
             # trigger registered with reviewRequired=false against an endpoint
             # with callReview=false). Those calls wait in the ledger as
@@ -574,14 +584,27 @@ class Scheduler:
 
             endpoints = {e.id: e for e in (await load_endpoints(self._client, conn)).endpoints}
             sender = self._agent_sender or HttpAgentSender(settings=get_settings())
+            scheduled = record.invocation_source == "scheduled"
+            limit = DISPATCH_BATCH
+            if scheduled and record.allowance is not None:
+                limit = min(limit, record.allowance)
             result = await dispatch_approved(
-                self._client, conn, endpoints=endpoints, sender=sender
+                self._client, conn, endpoints=endpoints, sender=sender, limit=limit,
+                source=f"scheduled task {task.id!r}",
             )
-            record.outcome = "failed" if result["failed"] and not result["responded"] else "committed"
+            # The daily count bounds calls sent, not how often the job ran. A
+            # manual invocation, as everywhere else, does not draw on it.
+            record.units = result["sent"] if scheduled else 0
+            # "failed" only when nothing was attempted: a batch whose calls were
+            # sent and refused still used outbound calls, and a failed firing is
+            # not billable, so calling it failed would let a broken endpoint be
+            # hammered past the limit.
+            record.outcome = "failed" if result["failed"] and not result["sent"] else "committed"
             record.triples_written = 0
             record.detail = (
                 f"{result['queued']} queued, {result['sent']} sent, "
                 f"{result['responded']} responded, {result['failed']} failed"
+                + (f" (limit {limit})" if limit != DISPATCH_BATCH else "")
             )
             return
 

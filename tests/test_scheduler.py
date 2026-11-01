@@ -93,7 +93,7 @@ class SchedStub(IdentityStub):
             if self.policy_rows_empty:
                 return {"results": {"bindings": []}}
             return {"results": {"bindings": [_row(count=self.policy_count, version="v2")]}}
-        if "COUNT(?rec)" in query:
+        if "SUM(COALESCE(?units, 1))" in query:
             return {"results": {"bindings": [{"c": {"value": str(self.firings_today)}}]}}
         if "FiringRecord" in query:
             return {"results": {"bindings": self.activity_rows}}
@@ -180,7 +180,7 @@ def test_graph_query_refuses_an_empty_graph():
 async def test_policy_and_count_queries_name_their_graphs(stub, scheduler):
     await scheduler.fire(scheduler.task("census"))
     policy_queries = [q for q in stub.queries if "odrl:permission" in q]
-    count_queries = [q for q in stub.queries if "COUNT(?rec)" in q]
+    count_queries = [q for q in stub.queries if "SUM(COALESCE(?units, 1))" in q]
     assert policy_queries and count_queries
     assert all(f"GRAPH <{TASKS_GRAPH}>" in q for q in policy_queries)
     assert all(f"GRAPH <{PROVENANCE_GRAPH}>" in q for q in count_queries)

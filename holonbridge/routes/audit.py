@@ -76,7 +76,7 @@ async def list_entries(
         filters.append(f'FILTER(?at >= "{dg._iso(since)}"^^<{audit.XSD}dateTime>)')
 
     query = f"""PREFIX hb: <{audit.HB}>
-SELECT ?e ?at ?actor ?realActor ?outcome ?operation ?status ?graph ?by ?reason ?note ?security ?hash ?tokenKind
+SELECT ?e ?at ?actor ?realActor ?outcome ?operation ?status ?graph ?by ?reason ?note ?security ?hash ?tokenKind ?agentCall ?agentEndpoint
 WHERE {{ GRAPH <{audit.audit_graph(conn.holons_graph)}> {{
   ?e a hb:AuditEntry ; hb:at ?at ; hb:outcome ?outcome ; hb:operation ?operation ; hb:status ?status .
   OPTIONAL {{ ?e hb:actor ?actor }}
@@ -88,6 +88,8 @@ WHERE {{ GRAPH <{audit.audit_graph(conn.holons_graph)}> {{
   OPTIONAL {{ ?e hb:securityRead ?security }}
   OPTIONAL {{ ?e hb:payloadHash ?hash }}
   OPTIONAL {{ ?e hb:tokenKind ?tokenKind }}
+  OPTIONAL {{ ?e hb:agentCall ?agentCall }}
+  OPTIONAL {{ ?e hb:agentEndpoint ?agentEndpoint }}
   {' '.join(filters)}
 }} }} ORDER BY DESC(?at) LIMIT {limit * 10}"""
 
@@ -117,6 +119,8 @@ WHERE {{ GRAPH <{audit.audit_graph(conn.holons_graph)}> {{
                 "security_read": "security" in row,
                 "payload_hash": row.get("hash", {}).get("value"),
                 "token_kind": row.get("tokenKind", {}).get("value"),
+                "agent_call": row.get("agentCall", {}).get("value"),
+                "agent_endpoint": row.get("agentEndpoint", {}).get("value"),
                 "graphs": [],
             }
         graph = row.get("graph", {}).get("value")

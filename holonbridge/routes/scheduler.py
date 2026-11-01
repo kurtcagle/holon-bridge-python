@@ -34,6 +34,8 @@ from ..scheduler.model import validate_task_fields
 from ..scheduler.store import SchedulerStore
 from ..scheduler.vocab import (
     ACTION_CLASSES,
+    AGENT_CALL,
+    AGENT_DISPATCH_JOBS,
     OUTCOMES,
     SCHEDULER_GRAPHS,
     TASK_STATUSES,
@@ -210,6 +212,17 @@ async def create_task(
         )
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    if (
+        body.maintenance
+        and body.maintenance.strip().lower() in AGENT_DISPATCH_JOBS
+        and body.action_class != AGENT_CALL
+    ):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=f"{body.maintenance!r} sends calls to external agents; declare "
+            f"action_class {AGENT_CALL!r} (a persona needs that capability to run it)",
+        )
 
     if scheduler.task(body.id) is not None:
         raise HTTPException(

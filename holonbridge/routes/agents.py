@@ -175,6 +175,10 @@ def _call_errors(exc: Exception) -> HTTPException:
         return HTTPException(
             status.HTTP_409_CONFLICT, detail={"error": "call_state", "message": str(exc)}
         )
+    if isinstance(exc, agent_service.QueueFull):
+        return HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS, detail={"error": "too_many_open_calls", "message": str(exc)}
+        )
     if isinstance(exc, agent_service.CallInvalid):
         return _bad("invalid_call", str(exc))
     if isinstance(exc, TriggerDenied):

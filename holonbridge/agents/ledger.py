@@ -175,6 +175,20 @@ WHERE {{
         calls.sort(key=lambda c: (c.requested_at, c.id), reverse=True)
         return calls[: max(limit, 0)]
 
+    async def open_count(self, conn: Conn, endpoint_id: str) -> int:
+        """How many calls to this endpoint can still leave the bridge."""
+        graph = conn.graph("agent-calls")
+        result = await self._client.select(
+            conn,
+            f"""SELECT (COUNT(?c) AS ?n) WHERE {{ GRAPH <{graph}> {{
+  ?c <{HB}agentEndpoint> {literal(endpoint_id)} ;
+     <{HB}callStatus> ?s .
+  FILTER( ?s IN ("PendingApproval", "Approved", "Sending") )
+}} }}""",
+        )
+        rows = result.get("results", {}).get("bindings", [])
+        return int(float(rows[0]["n"]["value"])) if rows and "n" in rows[0] else 0
+
     async def open_call_exists(self, conn: Conn, *, trigger_iri: str, focus: str) -> bool:
         """Is a call for this (trigger, focus) still able to leave the bridge?"""
         graph = conn.graph("agent-calls")

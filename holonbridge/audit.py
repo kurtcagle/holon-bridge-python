@@ -569,6 +569,12 @@ def build_entry(entry: dict[str, Any]) -> str:
         props.append('hb:securityRead "true"^^xsd:boolean')
     if entry.get("reason"):
         props.append(f"hb:reason {_lit(entry['reason'])}")
+    # An agent-call event (see agents/audit.py): which call, to which endpoint.
+    call = _iri(entry.get("agent_call"))
+    if call:
+        props.append(f"hb:agentCall <{call}>")
+    if entry.get("agent_endpoint"):
+        props.append(f"hb:agentEndpoint {_lit(entry['agent_endpoint'])}")
 
     return (
         f"@prefix hb:  <{HB}> .\n@prefix xsd: <{XSD}> .\n\n"

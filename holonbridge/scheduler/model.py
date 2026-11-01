@@ -7,7 +7,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from .vocab import ACTION_CLASSES, SCHED, TASK_STATUSES, TRIGGER_TEMPORAL
+from .vocab import (
+    ACTION_CLASSES,
+    AGENT_CALL,
+    AGENT_DISPATCH_JOBS,
+    SCHED,
+    TASK_STATUSES,
+    TRIGGER_TEMPORAL,
+)
 
 
 def now() -> datetime:
@@ -95,6 +102,22 @@ class Task:
         return self.status == "Active"
 
     @property
+    def sends_agent_calls(self) -> bool:
+        return bool(self.maintenance) and self.maintenance.strip().lower() in AGENT_DISPATCH_JOBS
+
+    @property
+    def required_class(self) -> str:
+        """The action class a persona must hold to run this task.
+
+        Derived from what the task *does*, not only from what it declares: the
+        declared ``action_class`` defaults to ``ReadOnlyQuery``, and a task that
+        sends data to an external agent must not pass a gate meant for reads
+        because nobody changed the default. (The same gap exists for rule and
+        pipeline tasks declared read-only; it is not changed here.)
+        """
+        return AGENT_CALL if self.sends_agent_calls else self.action_class
+
+    @property
     def action(self) -> str:
         """What this task will do, derived from which field is populated."""
         if self.sparql:
@@ -146,6 +169,7 @@ class Task:
             "persona": self.persona_iri,
             "policy": self.policy_iri,
             "action": self.action,
+            "requiredClass": self.required_class,
             "rule": self.rule,
             "pipeline": self.pipeline,
             "projection": self.projection,
@@ -186,6 +210,14 @@ class FiringRecord:
     detail: str = ""
     triples_written: int = 0
     duration_ms: int = 0
+    #: How much of the daily ODRL ``count`` this firing used. Almost always 1;
+    #: an ``agent-dispatch`` firing uses one per call it sent (zero when idle),
+    #: because the limit exists to bound outbound calls, not how often a job ran.
+    units: int = 1
+    #: Set by the gates, never stored: how many more units the task's and
+    #: persona's policies allow today (``None`` = unlimited). A dispatch firing
+    #: sends no more than this.
+    allowance: int | None = None
 
     @staticmethod
     def new_iri() -> str:

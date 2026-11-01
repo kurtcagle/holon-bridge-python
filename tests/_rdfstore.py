@@ -12,6 +12,9 @@ other route tests, so the same knobs apply (``admin``, ``write_grant``...), plus
 ``denied_write_graphs`` / ``denied_replace_graphs`` to refuse a grant on
 particular graphs.
 
+``failing_post_graphs`` makes ``post_graph`` raise for the named graphs, which is
+how a test makes the audit log unwritable.
+
 ``default_union=True`` makes the default graph the union of the named ones,
 which is how the bridge's context queries (no ``GRAPH`` clause) are meant to see
 domain data.
@@ -33,6 +36,7 @@ class RdfStore(IdentityStub):
         self.updates: list[str] = []
         self.denied_write_graphs: set[str] = set()
         self.denied_replace_graphs: set[str] = set()
+        self.failing_post_graphs: set[str] = set()
 
     # --- the client surface ---------------------------------------------------------
 
@@ -60,6 +64,8 @@ class RdfStore(IdentityStub):
         self.ds.update(update)
 
     async def post_graph(self, conn, graph_iri, turtle):
+        if graph_iri in self.failing_post_graphs:
+            raise RuntimeError(f"store refused a write to <{graph_iri}>")
         self.ds.graph(URIRef(graph_iri)).parse(data=turtle, format="turtle")
 
     async def put_graph(self, conn, graph_iri, turtle):
