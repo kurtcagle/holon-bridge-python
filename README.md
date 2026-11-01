@@ -644,6 +644,16 @@ Every `/scheduler/*` route is pinned to admin regardless of the caller's
 means one registry and one provenance trail, and a per-caller view of either
 would be a fiction.
 
+**The scheduler routes are admin-only, reads included.** A task runs with the
+bridge's own authority, not its creator's, so letting anyone with the bearer
+token create or fire one was a privilege escalation. A caller must resolve to a
+Person holding the admin (or owner) role on the *admin dataset*. A request that
+`X-Dataset-Override` points elsewhere is refused (`403
+scheduler_requires_admin_dataset`) rather than quietly served, because the
+caller's identity was resolved against that other dataset and says nothing
+about this one. A missing identity is a 401; a non-admin is a 403
+`admin_required`.
+
 **Recursion has two guards.** A task already in flight is skipped rather than
 recorded, which is the cross-tick half: a task whose action indirectly
 triggers itself would otherwise queue firings faster than they retire until
@@ -740,12 +750,71 @@ envelope. `pull` queues it for a target to collect and acknowledge — which is
 how an MCP-based Postgres agent or an XSLT processor participates without the
 bridge knowing anything about either.
 
+**Who may operate hooks, and where they may send.** The projection routes used
+to be gated by the bearer token alone, so a token holder could register a hook
+with any scope and any endpoint and read the dataset out through it. Now:
+
+- Every route needs a resolved identity.
+- Registering, changing status, running, resetting, sweeping, acknowledging and
+  rejecting need `holon:grantsWrite` on the dataset's hook registry graph
+  (`urn:{dataset}:projections`). Deleting a hook needs the stricter
+  `holon:grantsReplace`, as dropping a pipeline does. Listing hooks and
+  deliveries needs an identity only.
+- A hook's scope is read with the bridge's own authority, so the check that the
+  *caller* may read it happens where they cause it to be read or see the
+  result: on registration, on `run`, and when fetching a pending delivery's
+  payload. A CONSTRUCT scope must pass the same graph-level check as an
+  ad-hoc query (so `GRAPH ?g` is refused to non-admins); a named-query scope
+  must be reachable from the caller's persona. Admins bypass.
+- A `webhook` endpoint must pass the egress policy at registration **and**
+  again at every send (the endpoint is data in the graph, and the allowlist can
+  change after it was stored). The default is `https` only, no credentials in
+  the URL, and every address the host resolves to must be public — loopback,
+  private, link-local (including the cloud metadata address), CGNAT and
+  reserved ranges are refused, as are hosts that do not resolve. Redirects are
+  never followed. Set `WEBHOOK_ALLOWLIST` (comma-separated `host`, `host:port`
+  or `*.suffix`) to restrict delivery to those hosts and nothing else; a listed
+  host is exempt from the `https` and public-address rules, which is how a
+  deployment points a hook at a service on its own network on purpose.
+  **Upgrading:** hooks that deliver to plain-`http` or private targets stop
+  working until those hosts are listed.
+- The check resolves the host and the HTTP client resolves it again on
+  connect, so a hostile DNS server could answer differently the second time
+  (DNS rebinding). Not closed here; pinning the connection to the checked
+  address would be the complete fix.
+
 This also closes the two loose ends from the previous slices. A pipeline stage
 with an `external` transformer that names a hook now executes instead of
 deferring, and a scheduler task can name a hook as its action. Both stop at
 the same boundary and now cross it the same way. A stage or task that names
 *no* hook still defers — the honest outcome when there is genuinely nothing to
 hand over.
+
+### Triggers are edge-triggered, and re-arm on the falling edge
+
+A named trigger's condition is a SELECT projecting `?focus`; each focus that
+matches fires the trigger's rule once. "Once" is kept in a ledger graph
+(`urn:{dataset}:trigger-log`). Previously the ledger was append-only, so a
+focus that fired could never fire again, even after its condition went false
+and came true a second time.
+
+Each evaluation now compares the condition's current matches with the ledger.
+A live firing whose focus no longer matches is stamped `hev:clearedAt` (the
+firing is *superseded, not deleted* — the history stays); the next time that
+focus matches it fires again. Details worth knowing:
+
+- A condition that fails to evaluate clears nothing: an error is not a falling
+  edge.
+- Auto-executing triggers (`reviewRequired false`) re-arm the same way.
+- With `reviewRequired` (the default) a new proposal is **not** stacked on a
+  candidate that is still Pending for the same trigger and focus; the firing
+  reports `skipped-pending-candidate` and the focus is picked up once the
+  earlier candidate is resolved.
+- A condition must not carry a `LIMIT`: a truncated result looks like a
+  falling edge for the rows cut off and would clear them.
+- The candidate's `hev:proposedFromFiring` now points at the firing that was
+  actually recorded; the two IRIs used to be minted separately, so the link
+  dangled.
 
 ### Three guards against runaway firing
 

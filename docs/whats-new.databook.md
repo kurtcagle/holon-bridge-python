@@ -2,9 +2,9 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.19
+version: 1.0.20
 created: 2026-09-27
-updated: 2026-10-27
+updated: 2026-11-01
 author:
   - name: Kurt Cagle
     iri: https://holongraph.com/people/kurt-cagle
@@ -45,6 +45,31 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-11-01
+
+- **Projection and scheduler routes are now access-controlled.** Both were
+  gated by the bearer token alone: a token holder could register a projection
+  hook with any scope and any webhook endpoint and read the dataset out through
+  it, or create and fire a scheduler task that runs with the bridge's own
+  authority. Every projection route now needs a resolved identity; operating
+  hooks needs `holon:grantsWrite` on the dataset's projections graph, deleting
+  one needs `holon:grantsReplace`, and a hook's scope must be readable by the
+  caller (same graph-level check as an ad-hoc query; named-query scopes must be
+  reachable from the caller's persona). The scheduler routes are admin-only,
+  reads included, and refuse a request aimed at a dataset other than the admin
+  dataset.
+- **Webhook delivery has an egress policy (`WEBHOOK_ALLOWLIST`).** Default:
+  `https` only, no URL credentials, every resolved address public, redirects
+  not followed; checked at registration and again at each send. **Breaking**
+  for hooks that deliver to plain-`http` or private targets: list those hosts
+  in `WEBHOOK_ALLOWLIST`. DNS rebinding is a documented residual risk.
+- **Triggers re-arm on the falling edge.** A fired (trigger, focus) pair used
+  to be recorded forever, so it could never fire again. A focus that stops
+  matching is now stamped `hev:clearedAt` (superseded, not deleted) and fires
+  again if it matches later; a new proposal is not stacked on a still-Pending
+  candidate for the same focus. Also fixed: a candidate's
+  `hev:proposedFromFiring` pointed at an IRI that was never recorded.
 
 ### 2026-10-27
 
@@ -463,6 +488,16 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-11-01-a a hb:ReleaseNote ;
+    dcterms:date "2026-11-01"^^xsd:date ;
+    rdfs:label "Projection and scheduler routes access-controlled; webhook egress policy" ;
+    dcterms:description "Projection routes now require a resolved identity, holon:grantsWrite on the projections graph to operate hooks (grantsReplace to delete) and read access to the hook's scope; scheduler routes are admin-only on the admin dataset. Webhook endpoints must pass an egress policy (https, public addresses, no credentials, no redirects, or WEBHOOK_ALLOWLIST) at registration and at send. Breaking for plain-http and private webhook targets." .
+
+hb:release-2026-11-01-b a hb:ReleaseNote ;
+    dcterms:date "2026-11-01"^^xsd:date ;
+    rdfs:label "Trigger re-arming on the falling edge" ;
+    dcterms:description "A (trigger, focus) pair that fired can now fire again once its condition has gone false and then true. Cleared firings are stamped hev:clearedAt rather than deleted, a failing condition clears nothing, and a new proposal is not stacked on a Pending candidate for the same focus. Fixes a dangling hev:proposedFromFiring link." .
 
 hb:release-2026-10-26-a a hb:ReleaseNote ;
     dcterms:date "2026-10-26"^^xsd:date ;

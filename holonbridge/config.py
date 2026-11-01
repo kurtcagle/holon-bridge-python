@@ -22,6 +22,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from .egress import parse_allowlist
 from .envfile import load_shared_env
 
 log = logging.getLogger(__name__)
@@ -182,6 +183,10 @@ class Settings:
     # External identifiers permitted to create a new dataset on the backend.
     # Empty turns ``POST /datasets`` off. See dataset_create.py.
     dataset_creators: tuple[str, ...] = ()
+    # Hosts a projection webhook may be sent to (``WEBHOOK_ALLOWLIST``). Empty
+    # means the default policy: https only, public addresses only. See
+    # egress.py for the entry syntax and the reasoning.
+    webhook_allowlist: tuple[str, ...] = ()
     # Creation is refused once the backend already hosts this many datasets.
     # There is deliberately no way to drop one through the bridge, so this is
     # the backstop against a runaway loop (or a mistaken script) filling the
@@ -275,6 +280,7 @@ class Settings:
             proxy_tokens=parse_proxy_tokens(os.getenv("PROXY_TOKENS")),
             dataset_claimants=parse_dataset_claimants(os.getenv("DATASET_CLAIMANTS")),
             dataset_creators=parse_dataset_creators(os.getenv("DATASET_CREATORS")),
+            webhook_allowlist=parse_allowlist(os.getenv("WEBHOOK_ALLOWLIST")),
             max_datasets=int(os.getenv("MAX_DATASETS", "50")),
             snapshot_dir=Path(os.environ["SNAPSHOT_DIR"]) if os.getenv("SNAPSHOT_DIR") else None,
             snapshot_max_bytes=int(os.getenv("SNAPSHOT_MAX_BYTES", "50000000")),
