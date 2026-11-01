@@ -68,8 +68,12 @@ class Scheduler:
         tick_seconds: float = 30.0,
         proposer: Proposer | None = None,
         max_firing_depth: int = 3,
+        agent_sender: Any = None,
     ) -> None:
         self._client = client
+        #: Sends the calls the ``agent-dispatch`` job picks up. ``None`` means the
+        #: real HTTP sender; tests (and any embedding application) pass their own.
+        self._agent_sender = agent_sender
         self._store = SchedulerStore(client)
         self._admin = admin_conn
         self._tick = max(tick_seconds, 1.0)
@@ -553,6 +557,31 @@ class Scheduler:
             record.detail = (
                 f"{len(firings)} firing(s): {proposed} proposed, {executed} executed, "
                 f"{failed} failed"
+            )
+            return
+
+        if job in {"agent-dispatch", "dispatch-agent-calls"}:
+            # CHANGED 2026-11-01: sends agent calls that a *policy* approved (a
+            # trigger registered with reviewRequired=false against an endpoint
+            # with callReview=false). Those calls wait in the ledger as
+            # ``Approved`` rather than being sent inside whichever write caused
+            # them, so the network call happens here, off any request. A call a
+            # person has yet to approve is never touched.
+            from ..agents.registry import load_endpoints  # noqa: PLC0415
+            from ..agents.sender import HttpAgentSender  # noqa: PLC0415
+            from ..agents.service import dispatch_approved  # noqa: PLC0415
+            from ..config import get_settings  # noqa: PLC0415
+
+            endpoints = {e.id: e for e in (await load_endpoints(self._client, conn)).endpoints}
+            sender = self._agent_sender or HttpAgentSender(settings=get_settings())
+            result = await dispatch_approved(
+                self._client, conn, endpoints=endpoints, sender=sender
+            )
+            record.outcome = "failed" if result["failed"] and not result["responded"] else "committed"
+            record.triples_written = 0
+            record.detail = (
+                f"{result['queued']} queued, {result['sent']} sent, "
+                f"{result['responded']} responded, {result['failed']} failed"
             )
             return
 

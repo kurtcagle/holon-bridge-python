@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.22
+version: 1.0.23
 created: 2026-09-27
 updated: 2026-11-01
 author:
@@ -45,6 +45,33 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-11-01 (agent endpoints)
+
+- **An outbound gateway for external agents, with two human gates.** New
+  registry `hb:AgentEndpoint` (`urn:{dataset}:agents`) and ledger `hb:AgentCall`
+  (`urn:{dataset}:agent-calls`); routes `/agent-endpoint(s)`, `/agent-call(s)`
+  and MCP tools `register_agent_endpoint`, `request_agent_call`,
+  `approve_agent_call`, `retry_agent_call` and friends. A call is recorded with
+  the exact request body and sends nothing until a person approves it; the
+  agent's reply is a 200 JSON object whose optional `turtle` is staged as a
+  candidate (`hb:proposedByAgentCall`), never written. Sends are at most once per
+  approval (claimed under the write lock before any bytes leave) with an
+  explicit retry under the same `Idempotency-Key`.
+- **Credentials by reference only.** An endpoint names `env:HB_AGENT_...`; the
+  prefix is enforced (`AGENT_CREDENTIAL_PREFIX`) and an endpoint with a credential
+  must be on `AGENT_ALLOWLIST`, so registering one cannot be used to read an
+  unrelated secret or send it to a host the operator did not name. Optional HMAC
+  body signing. The egress policy is the webhook one under its own setting and
+  is re-checked at every send.
+- **Usable from triggers and pipelines.** A trigger may name `onFireAgent`
+  instead of `onFire`; its calls are placed as the person who armed it (and
+  stop when that person loses access), and wait for a person unless both the
+  trigger's `reviewRequired` and the endpoint's `callReview` are false, in which
+  case they are queued for the new `agent-dispatch` maintenance job. A pipeline
+  `agent` stage places a call as whoever ran the pipeline and ends `Deferred`.
+  Deferred to the next slice: scheduler action-class/ODRL gating and the unified
+  audit record for agent calls.
 
 ### 2026-11-01 (post-write trigger hook)
 
@@ -528,6 +555,12 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-11-01-e a hb:ReleaseNote ;
+    dcterms:date "2026-11-01"^^xsd:date ;
+    rdfs:label "Agent endpoint registry and gated agent calls (triggers, pipelines, scheduler dispatch)" ;
+    dcterms:description "hb:AgentEndpoint registry and hb:AgentCall ledger with a human gate on what leaves (the exact request body is stored and sent only on approval, at most once, retry under the same idempotency key) and on what lands (a reply's Turtle is staged as a candidate, never written). Credentials are env: references limited to AGENT_CREDENTIAL_PREFIX and to hosts in AGENT_ALLOWLIST; the endpoint passes the egress policy at registration and at every send. Triggers may fire an agent (onFireAgent) as their definer, held for approval unless both reviewRequired and the endpoint's callReview are false, in which case the agent-dispatch maintenance job sends them; a pipeline agent stage places a call as whoever ran it. Scheduler capability/ODRL gating and the audit graph for agent calls are not yet covered." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/76> .
 
 hb:release-2026-11-01-d a hb:ReleaseNote ;
     dcterms:date "2026-11-01"^^xsd:date ;

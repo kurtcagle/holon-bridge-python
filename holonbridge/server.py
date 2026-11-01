@@ -23,6 +23,7 @@ from .cache import RegistryCache
 from .conn import resolve_conn
 from .persona_state import PersonaStore
 from .routes import (
+    agents as agent_routes,
     audit as audit_routes,
     banks,
     dataset_admin,
@@ -135,6 +136,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(named_projections.router)
     app.include_router(named_rules.router)
     app.include_router(triggers.router)
+    app.include_router(agent_routes.router)
     app.include_router(pipeline.router)
     app.include_router(scheduler_routes.router)
     app.include_router(projection.router)

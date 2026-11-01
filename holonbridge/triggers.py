@@ -127,6 +127,11 @@ _TRIGGER_FIELDS: dict[str, tuple[str, ...]] = {
     "review_required": ("reviewRequired",),
     "status": ("triggerStatus", "status"),
     "armed_by": ("armedBy",),
+    # CHANGED 2026-11-01: an agent action instead of a rule (hev:onFireAgent).
+    "agent_endpoint": ("onFireAgent",),
+    "agent_task": ("agentTask",),
+    "agent_context": ("agentContext",),
+    "agent_target_graph": ("agentTargetGraph",),
 }
 _WATCHED_PREDICATE_LINKS = ("watchedPredicate", "watchedPredicates")
 
@@ -150,10 +155,22 @@ class Trigger:
     #: access is re-checked at firing (``trigger_authz``). Empty for a trigger
     #: that was hand-authored rather than registered through the API.
     armed_by: str = ""
+    #: Set instead of ``on_fire_rule_id``: the id of an ``hb:AgentEndpoint`` to
+    #: place a call to, with the task text, an optional context query (a named
+    #: SELECT/CONSTRUCT run when the call is placed) and an optional graph the
+    #: answer is proposed for. See ``agents/trigger_action.py``.
+    agent_endpoint: str = ""
+    agent_task: str = ""
+    agent_context: str = ""
+    agent_target_graph: str = ""
 
     @property
     def runnable(self) -> bool:
         return self.status == "Active"
+
+    @property
+    def is_agent(self) -> bool:
+        return bool(self.agent_endpoint)
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -168,6 +185,14 @@ class Trigger:
             "triggerStatus": self.status,
             "watchedPredicates": sorted(self.watched_predicates),
             "armedBy": self.armed_by or None,
+            "onFireAgent": {
+                "endpoint": self.agent_endpoint,
+                "task": self.agent_task,
+                "context": self.agent_context or None,
+                "targetGraph": self.agent_target_graph or None,
+            }
+            if self.is_agent
+            else None,
         }
 
 
@@ -189,9 +214,13 @@ class TriggerFiring:
 
     trigger_id: str
     focus: str
-    outcome: str  # "proposed" | "executed" | "skipped-pending-candidate" | "skipped-definer-unauthorised" | "failed"
+    #: "proposed" | "executed" | "requested" (an agent call was placed) |
+    #: "skipped-pending-candidate" | "skipped-open-call" |
+    #: "skipped-definer-unauthorised" | "failed"
+    outcome: str
     candidate_iri: str | None = None
     detail: str = ""
+    call_iri: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -199,6 +228,7 @@ class TriggerFiring:
             "focus": self.focus,
             "outcome": self.outcome,
             "candidate": self.candidate_iri,
+            "call": self.call_iri,
             "detail": self.detail,
         }
 
@@ -278,8 +308,16 @@ async def load_named_triggers(
 
         condition_id = pick(props, _TRIGGER_FIELDS["condition"])
         rule_id = pick(props, _TRIGGER_FIELDS["on_fire_rule"])
-        if not condition_id or not rule_id:
+        agent_endpoint = pick(props, _TRIGGER_FIELDS["agent_endpoint"]) or ""
+        agent_task = pick(props, _TRIGGER_FIELDS["agent_task"]) or ""
+        if not condition_id or not (rule_id or agent_endpoint):
             warnings.append(f"<{iri}> is missing condition and/or onFire; skipped")
+            continue
+        if rule_id and agent_endpoint:
+            warnings.append(f"<{iri}> names both onFire and onFireAgent; skipped")
+            continue
+        if agent_endpoint and not agent_task.strip():
+            warnings.append(f"<{iri}> has onFireAgent but no agentTask; skipped")
             continue
 
         trigger_id = pick(props, _TRIGGER_FIELDS["id"]) or local_name(iri)
@@ -289,7 +327,11 @@ async def load_named_triggers(
                 iri=iri,
                 trigger_kind=kind,
                 condition_id=condition_id,
-                on_fire_rule_id=rule_id,
+                on_fire_rule_id=rule_id or "",
+                agent_endpoint=agent_endpoint,
+                agent_task=agent_task,
+                agent_context=pick(props, _TRIGGER_FIELDS["agent_context"]) or "",
+                agent_target_graph=pick(props, _TRIGGER_FIELDS["agent_target_graph"]) or "",
                 review_required=truthy(pick(props, _TRIGGER_FIELDS["review_required"]))
                 if pick(props, _TRIGGER_FIELDS["review_required"]) is not None
                 else True,
@@ -402,10 +444,12 @@ async def _record_firing(
     outcome: str,
     candidate_iri: str | None,
     firing_iri: str | None = None,
+    call_iri: str | None = None,
 ) -> str:
     """Record one firing. ``firing_iri`` lets the caller mint the IRI first and
     hand the same one to the candidate it stages, so ``hev:proposedFromFiring``
-    points at the firing that was actually recorded."""
+    points at the firing that was actually recorded. ``call_iri`` is the agent
+    call an agent trigger placed (``hev:requestedCall``)."""
     firing_iri = firing_iri or f"{log_graph}:{uuid.uuid4().hex}"
     now = datetime.now(timezone.utc).isoformat()
     clauses = [
@@ -415,6 +459,7 @@ async def _record_firing(
         f'hev:firedAt "{now}"^^xsd:dateTime',
         f'hev:outcome "{escape_literal(outcome)}"',
         f"hev:producedCandidate <{candidate_iri}>" if candidate_iri else "",
+        f"hev:requestedCall <{call_iri}>" if call_iri else "",
     ]
     body = " ;\n    ".join(c for c in clauses if c)
     await client.update(
@@ -536,6 +581,50 @@ INSERT DATA {{
     return candidate_iri
 
 
+async def propose_agent_candidate(
+    client: FusekiClient,
+    conn: Conn,
+    *,
+    call_iri: str,
+    agent_id: str,
+    turtle: str,
+    target_graph: str,
+) -> str:
+    """Stage an agent's reply as a review candidate.
+
+    Third sibling of :func:`_write_candidate` and
+    :func:`propose_pipeline_candidate`, with the same contract: the Turtle sits
+    in the candidates graph, ``Pending``, until a person approves it through
+    :func:`approve_candidate` -- the ordinary ACL-checked, SHACL-gated write.
+    Whatever an external agent says is only ever a proposal; this function
+    never touches ``target_graph``.
+
+    ``call_iri`` is the ``hb:AgentCall`` that produced it, so a reviewer can go
+    from the proposal to exactly what was asked and by whom.
+    """
+    candidates_graph = conn.graph("candidates")
+    candidate_iri = conn.scoped("candidates", uuid.uuid4().hex)
+    now = datetime.now(timezone.utc).isoformat()
+    await client.update(
+        conn,
+        f"""PREFIX hev: <{HEV_NAMESPACE}>
+PREFIX holon: <https://w3id.org/holon/>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+INSERT DATA {{
+  GRAPH <{candidates_graph}> {{
+    <{candidate_iri}> a holon:CandidateStatus ;
+      hev:proposedByAgentCall <{call_iri}> ;
+      hev:proposedByAgent "{escape_literal(agent_id)}" ;
+      hev:proposedTargetGraph "{escape_literal(target_graph)}" ;
+      hev:proposedTurtle "{escape_literal(turtle)}" ;
+      hev:candidateStatusValue "Pending" ;
+      hev:proposedAt "{now}"^^xsd:dateTime .
+  }}
+}}""",
+    )
+    return candidate_iri
+
+
 def _candidates_query(graph: str) -> str:
     return f"""PREFIX hev: <{HEV_NAMESPACE}>
 SELECT ?c ?p ?o
@@ -575,6 +664,10 @@ class Candidate:
     pipeline_id: str = ""
     stage_id: str = ""
     message_iri: str = ""
+    #: Third provenance set: proposed by an external agent in answer to an
+    #: ``hb:AgentCall`` (see :func:`propose_agent_candidate`).
+    agent_call_iri: str = ""
+    agent_id: str = ""
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -589,6 +682,8 @@ class Candidate:
             "pipeline": self.pipeline_id,
             "stage": self.stage_id,
             "message": self.message_iri,
+            "agentCall": self.agent_call_iri,
+            "agent": self.agent_id,
         }
 
     def detail(self) -> dict[str, Any]:
@@ -619,6 +714,8 @@ async def list_candidates(
             pipeline_id=pick(props, ("proposedByPipeline",)) or "",
             stage_id=pick(props, ("proposedFromStage",)) or "",
             message_iri=pick(props, ("proposedFromMessage",)) or "",
+            agent_call_iri=pick(props, ("proposedByAgentCall",)) or "",
+            agent_id=pick(props, ("proposedByAgent",)) or "",
         )
         if status is None or cand.status == status:
             out.append(cand)
@@ -772,7 +869,14 @@ def clear_definer_cache() -> None:
 
 
 async def _definer_denied(
-    client: FusekiClient, conn: Conn, trig: "Trigger", condition: NamedQuery, rule: NamedRule
+    client: FusekiClient,
+    conn: Conn,
+    trig: "Trigger",
+    condition: NamedQuery,
+    rule: NamedRule | None,
+    *,
+    endpoint: Any = None,
+    context_query: NamedQuery | None = None,
 ) -> str | None:
     """Why this trigger may not fire right now, or ``None`` if it may.
 
@@ -793,10 +897,19 @@ async def _definer_denied(
             return "no recorded definer, and TRIGGERS_REQUIRE_DEFINER is set"
         return None
 
-    key = (
-        conn.base_url, conn.dataset, trig.iri, trig.armed_by, trig.review_required,
-        condition.sparql, rule.construct, rule.target_graph, rule.write_mode,
-    )
+    if trig.is_agent:
+        key = (
+            conn.base_url, conn.dataset, trig.iri, trig.armed_by, trig.review_required,
+            condition.sparql, trig.agent_endpoint, trig.agent_target_graph,
+            context_query.sparql if context_query else "",
+            (endpoint.url, endpoint.status, endpoint.credential_ref, endpoint.signing_ref)
+            if endpoint else None,
+        )
+    else:
+        key = (
+            conn.base_url, conn.dataset, trig.iri, trig.armed_by, trig.review_required,
+            condition.sparql, rule.construct, rule.target_graph, rule.write_mode,
+        )
     now = _clock()
     cached = _recheck_cache.get(key)
     if cached is not None and now - cached[0] < DEFINER_RECHECK_TTL_SECONDS:
@@ -807,10 +920,20 @@ async def _definer_denied(
 
     verdict: str | None
     try:
-        await authorize_definition(
-            query_fn, conn, trig.armed_by,
-            condition=condition, rule=rule, review_required=trig.review_required,
-        )
+        if trig.is_agent:
+            from .agents.trigger_action import authorize_agent_trigger  # noqa: PLC0415
+
+            await authorize_agent_trigger(
+                query_fn, conn, trig.armed_by,
+                condition=condition, endpoint=endpoint, endpoint_id=trig.agent_endpoint,
+                context_query=context_query, target_graph=trig.agent_target_graph,
+                review_required=trig.review_required,
+            )
+        else:
+            await authorize_definition(
+                query_fn, conn, trig.armed_by,
+                condition=condition, rule=rule, review_required=trig.review_required,
+            )
         verdict = None
     except TriggerDenied as exc:
         verdict = f"definer <{trig.armed_by}> may no longer do this: {exc.reason}"
@@ -916,10 +1039,22 @@ async def _evaluate(
     rules = await load_named_rules(client, conn)
     log_graph = conn.graph("trigger-log")
 
+    # Only agent triggers need the endpoint registry; do not read it otherwise.
+    agent_endpoints: dict[str, Any] = {}
+    if any(t.is_agent for t in triggers):
+        from .agents.registry import load_endpoints  # noqa: PLC0415
+
+        loaded = await load_endpoints(client, conn)
+        agent_endpoints = {e.id: e for e in loaded.endpoints}
+
     firings: list[TriggerFiring] = []
     for trig in triggers:
         condition = queries.by_id(trig.condition_id)
-        rule = rules.by_id(trig.on_fire_rule_id)
+        rule = None if trig.is_agent else rules.by_id(trig.on_fire_rule_id)
+        agent_endpoint = agent_endpoints.get(trig.agent_endpoint) if trig.is_agent else None
+        agent_context = (
+            queries.by_id(trig.agent_context) if trig.is_agent and trig.agent_context else None
+        )
         if condition is None:
             firings.append(
                 TriggerFiring(
@@ -927,7 +1062,23 @@ async def _evaluate(
                 )
             )
             continue
-        if rule is None:
+        if trig.is_agent and agent_endpoint is None:
+            firings.append(
+                TriggerFiring(
+                    trig.id, "", "failed",
+                    detail=f"unknown agent endpoint {trig.agent_endpoint!r}",
+                )
+            )
+            continue
+        if trig.is_agent and trig.agent_context and agent_context is None:
+            firings.append(
+                TriggerFiring(
+                    trig.id, "", "failed",
+                    detail=f"unknown context query {trig.agent_context!r}",
+                )
+            )
+            continue
+        if not trig.is_agent and rule is None:
             firings.append(
                 TriggerFiring(
                     trig.id, "", "failed", detail=f"unknown rule {trig.on_fire_rule_id!r}"
@@ -965,7 +1116,10 @@ async def _evaluate(
             # Asked at most once per trigger per evaluation, and only when
             # there is something to fire, so a quiet evaluation costs nothing.
             if not checked:
-                denial = await _definer_denied(client, conn, trig, condition, rule)
+                denial = await _definer_denied(
+                    client, conn, trig, condition, rule,
+                    endpoint=agent_endpoint, context_query=agent_context,
+                )
                 checked = True
                 if denial:
                     log.warning("trigger %s not fired: %s", trig.id, denial)
@@ -976,7 +1130,39 @@ async def _evaluate(
                 continue
 
             try:
-                if trig.review_required:
+                if trig.is_agent:
+                    from .agents.service import CallInvalid  # noqa: PLC0415
+                    from .agents.trigger_action import fire_agent  # noqa: PLC0415
+
+                    try:
+                        call = await fire_agent(
+                            client, conn, trig, focus,
+                            endpoints=agent_endpoints, queries=queries,
+                        )
+                    except (CallInvalid, TriggerDenied) as exc:
+                        reason = exc.reason if isinstance(exc, TriggerDenied) else str(exc)
+                        log.warning("trigger %s could not place a call for <%s>: %s", trig.id, focus, reason)
+                        firings.append(TriggerFiring(trig.id, focus, "failed", detail=reason))
+                        continue
+                    if call is None:
+                        firings.append(
+                            TriggerFiring(
+                                trig.id, focus, "skipped-open-call",
+                                detail="an earlier call for this focus is still open",
+                            )
+                        )
+                        continue
+                    await _record_firing(
+                        client, conn, log_graph=log_graph, trigger=trig, focus=focus,
+                        outcome="requested", candidate_iri=None, call_iri=call.iri,
+                    )
+                    firings.append(
+                        TriggerFiring(
+                            trig.id, focus, "requested",
+                            detail=f"call {call.id} {call.status}", call_iri=call.iri,
+                        )
+                    )
+                elif trig.review_required:
                     # A re-armed focus may still have the proposal from its
                     # previous firing waiting for review. Do not stack another
                     # on top of it; try again once that one is resolved.

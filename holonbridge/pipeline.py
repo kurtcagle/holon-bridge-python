@@ -92,7 +92,7 @@ BUILD = "https://w3id.org/databook/ns#"
 NODE_KINDS = ("Target", "Stage", "Source")
 
 #: Transformers the bridge executes. Everything else is recorded as deferred.
-EXECUTABLE = {"sparql", "rule", "shacl", "validate", "projection", "external"}
+EXECUTABLE = {"sparql", "rule", "shacl", "validate", "projection", "external", "agent"}
 #: Still not executed by the bridge. An ``external`` or ``xslt`` stage that
 #: names a projection hook is executable — the hook is exactly the contract
 #: for handing work to something the bridge does not implement.
@@ -110,6 +110,9 @@ _NODE_FIELDS: dict[str, tuple[str, ...]] = {
     "projection": ("projection", "hook", "projectionHook"),
     "target_graph": ("targetGraph", "produces", "target"),
     "prompt_text": ("promptText", "prompt"),
+    # CHANGED 2026-11-01: ``agent`` stages place a call to an agent endpoint.
+    "agent": ("agentEndpoint", "agent"),
+    "agent_context": ("agentContext",),
 }
 _DEPENDS = ("dependsOn",)
 #: Explicit opt-in for a read-only stage -- see the module docstring for why
@@ -144,6 +147,11 @@ class PipelineNode:
     #: See the module docstring for why this cannot be inferred from an
     #: absent ``target_graph``.
     context_only: bool = False
+    #: ``agent`` stages: the id of the ``hb:AgentEndpoint`` to call, and an
+    #: optional named query whose result travels with the request. The task text
+    #: is ``prompt_text``. See ``_run_agent_stage``.
+    agent: str = ""
+    agent_context: str = ""
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -162,6 +170,8 @@ class PipelineNode:
             "dependsOn": self.depends_on,
             "promptText": self.prompt_text,
             "contextOnly": self.context_only,
+            "agent": self.agent,
+            "agentContext": self.agent_context,
             "executable": self.transformer.lower() in EXECUTABLE,
         }
 
@@ -260,6 +270,8 @@ async def load_manifest(
             depends_on=pick_all(props, _DEPENDS),
             prompt_text=pick(props, _NODE_FIELDS["prompt_text"]) or "",
             context_only=context_only,
+            agent=pick(props, _NODE_FIELDS["agent"]) or "",
+            agent_context=pick(props, _NODE_FIELDS["agent_context"]) or "",
         )
 
     manifest.warnings.extend(_type_mismatches(manifest))
@@ -383,8 +395,13 @@ async def run_pipeline(
     *,
     params: Mapping[str, Any] | None = None,
     stop_on_error: bool = True,
+    requested_by: str | None = None,
 ) -> Message:
     """Run every stage in dependency order, recording each on the message.
+
+    ``requested_by`` is the person on whose behalf the run is made. Stages run
+    as the bridge, so it matters only to a stage that must act *as someone*:
+    an ``agent`` stage places its call as this person, under their access.
 
     ``conn`` comes first and is a frozen value, so it is safe to hold across
     the await points of a background task — unlike a request object, which is
@@ -432,7 +449,11 @@ async def run_pipeline(
             continue
 
         try:
-            if node.projection or transformer in {"projection", "external"}:
+            if transformer == "agent":
+                await _run_agent_stage(
+                    conn, client, manifest, node, context_results, params, record, requested_by
+                )
+            elif node.projection or transformer in {"projection", "external"}:
                 await _run_projection_stage(conn, client, node, record)
             elif node.context_only and (transformer in {"sparql", "rule"} or node.rule):
                 result = await _run_context_stage(conn, client, node, rules, params, record)
@@ -522,6 +543,16 @@ def _extra_param_slots(params: Mapping[str, Any] | None) -> dict[str, str]:
     return {str(key): str(value) for key, value in params.items() if key != "input"}
 
 
+def _context_slot(node: PipelineNode, context_results: dict[str, str]) -> tuple[str, str]:
+    """The ``{{context}}`` value for a stage, and a note saying where it came from."""
+    context_deps = [d for d in node.depends_on if d in context_results]
+    if len(context_deps) == 1:
+        return context_results[context_deps[0]], f"context from {local_name(context_deps[0])!r}"
+    if not context_deps:
+        return "", "no context dependency"
+    return "", f"{len(context_deps)} context dependencies; {{context}} left empty"
+
+
 def _run_llm_stage(
     node: PipelineNode,
     context_results: dict[str, str],
@@ -550,16 +581,7 @@ def _run_llm_stage(
         record.detail = "'llm' stages are not executed by the bridge"
         return
 
-    context_deps = [d for d in node.depends_on if d in context_results]
-    if len(context_deps) == 1:
-        context_value = context_results[context_deps[0]]
-        context_note = f"context from {local_name(context_deps[0])!r}"
-    elif not context_deps:
-        context_value = ""
-        context_note = "no context dependency"
-    else:
-        context_value = ""
-        context_note = f"{len(context_deps)} context dependencies; {{context}} left empty"
+    context_value, context_note = _context_slot(node, context_results)
 
     rendered = render_template(
         node.prompt_text,
@@ -575,6 +597,82 @@ def _run_llm_stage(
     record.detail = (
         f"'llm' stages are not executed by the bridge; prompt rendered ({context_note})"
     )
+
+
+async def _run_agent_stage(
+    conn: Conn,
+    client: FusekiClient,
+    manifest: "Manifest",
+    node: PipelineNode,
+    context_results: dict[str, str],
+    params: Mapping[str, Any] | None,
+    record: StageRecord,
+    requested_by: str | None,
+) -> None:
+    """Place a call to an agent endpoint. **Nothing is sent.**
+
+    The stage's ``promptText`` is the task, rendered with the same slots an
+    ``llm`` stage gets. The call is recorded as ``PendingApproval`` with the
+    exact body a person will read before it leaves the bridge (a pipeline run
+    never queues a call for policy dispatch: whoever ran it reviews it). The
+    stage ends ``Deferred`` -- the same honest status an ``llm`` stage has, for
+    work the bridge does not do inside the run -- with the call's id on
+    ``record.result``. The agent's answer, if it includes Turtle, comes back
+    through the candidate queue, not this run.
+
+    It is placed as ``requested_by`` and fails if the run has none: a scheduled
+    pipeline has no person, and an agent call must always be someone's.
+    """
+    from .agents import service as agent_service  # noqa: PLC0415 - cycle with triggers
+    from .agents.registry import load_endpoints  # noqa: PLC0415
+    from .named_queries import load_named_queries  # noqa: PLC0415
+    from .trigger_authz import TriggerDenied  # noqa: PLC0415
+
+    if not node.agent:
+        raise PipelineError(f"stage {node.id!r} is an agent stage but names no agentEndpoint")
+    if not node.prompt_text.strip():
+        raise PipelineError(f"stage {node.id!r} is an agent stage but has no promptText (the task)")
+    if not requested_by:
+        raise PipelineError(
+            f"stage {node.id!r} places an agent call on behalf of whoever ran the pipeline, "
+            "and this run has no identified person (a scheduled pipeline cannot place agent "
+            "calls; use a temporal trigger with onFireAgent instead)"
+        )
+
+    endpoint = (await load_endpoints(client, conn)).by_id(node.agent)
+    if endpoint is None:
+        raise PipelineError(f"stage {node.id!r} names unknown agent endpoint {node.agent!r}")
+    context_query = None
+    if node.agent_context:
+        context_query = (await load_named_queries(client, conn)).by_id(node.agent_context)
+        if context_query is None:
+            raise PipelineError(f"stage {node.id!r} names unknown context query {node.agent_context!r}")
+
+    context_value, _note = _context_slot(node, context_results)
+    task = render_template(
+        node.prompt_text,
+        {"input": _stringify_input(params), "context": context_value, **_extra_param_slots(params)},
+    )
+    payload: dict[str, Any] = {"pipeline": manifest.id, "stage": node.id}
+    if params:
+        import json  # noqa: PLC0415
+
+        payload["params"] = json.loads(json.dumps(dict(params), default=str))
+
+    try:
+        call = await agent_service.request_call(
+            client, conn,
+            requested_by=requested_by, endpoint=endpoint, task=task, payload=payload,
+            context_query=context_query, target_graph=node.target_graph or None,
+            via_pipeline=manifest.id, via_stage=node.id,
+        )
+    except (agent_service.CallInvalid, TriggerDenied) as exc:
+        reason = exc.reason if isinstance(exc, TriggerDenied) else str(exc)
+        raise PipelineError(f"stage {node.id!r} could not place its call: {reason}") from exc
+
+    record.status = "Deferred"
+    record.result = call.id
+    record.detail = f"agent call {call.id} to {endpoint.id!r} awaits approval"
 
 
 async def _run_context_stage(

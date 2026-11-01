@@ -48,7 +48,10 @@ from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from .. import audit
-from ..deps import AnimusDep, ClientDep, ConnDep, PersonasDep, RegistryDep
+from ..agents.registry import load_endpoints as load_agent_endpoints
+from ..agents.service import authorize_request
+from ..agents.trigger_action import authorize_agent_trigger
+from ..deps import AnimusDep, ClientDep, ConnDep, PersonasDep, RegistryDep, SettingsDep
 from ..fuseki import FusekiError
 from ..named_queries import load_named_queries
 from ..named_rules import load_named_rules
@@ -96,11 +99,31 @@ class RegisterTriggerRequest(BaseModel):
     id: str = Field(..., min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._-]+$")
     trigger_kind: str = Field(..., description="StateTrigger or TemporalTrigger")
     condition: str = Field(..., min_length=1, description="id of a named SELECT projecting ?focus")
-    on_fire: str = Field(..., min_length=1, description="id of a named rule, bound with $this=focus")
+    on_fire: str | None = Field(
+        default=None,
+        description="id of a named rule, bound with $this=focus. Exactly one of on_fire "
+        "and on_fire_agent.",
+    )
+    on_fire_agent: str | None = Field(
+        default=None,
+        description="id of an agent endpoint: instead of running a rule, place a call to it "
+        "for each matching focus (see agent_task).",
+    )
+    agent_task: str | None = Field(default=None, description="what to ask the agent (on_fire_agent only)")
+    agent_context: str | None = Field(
+        default=None,
+        description="id of a named SELECT/CONSTRUCT run when each call is placed and sent "
+        "with it; bound to the focus if it declares a 'focus' anyURI parameter",
+    )
+    agent_target_graph: str | None = Field(
+        default=None, description="graph the agent's Turtle answer is proposed for (staged, never written)"
+    )
     review_required: bool = Field(
         default=True,
-        description="true stages the rule's output as a candidate for review; "
-        "false runs the rule for real, through its own write mode",
+        description="true stages the rule's output as a candidate for review (or, for an agent, "
+        "holds each call for a person's approval); false runs the rule for real, through its own "
+        "write mode (or lets a call to an endpoint with callReview=false be sent by the "
+        "scheduler)",
     )
     status: str = Field(default="Active", pattern="^(Active|Suspended|Deprecated)$")
     label: str | None = None
@@ -213,6 +236,62 @@ async def _resolve_parts(conn, client, animus, personas, condition_id: str, rule
     return condition, rule
 
 
+async def _resolve_agent_parts(
+    conn, client, animus, personas, condition_id: str, endpoint_id: str, context_id: str | None
+):
+    """The condition, agent endpoint and optional context query an agent trigger
+    names. Condition and context are subject to the same reachability as rules."""
+    person = _identified(animus)
+    queries = await load_named_queries(client, conn)
+    endpoints = await load_agent_endpoints(client, conn)
+    condition = queries.by_id(condition_id)
+    context = queries.by_id(context_id) if context_id else None
+
+    persona, _source = personas.get(person_id=person, dataset=conn.dataset)
+    reachable = await resolve_reachable(
+        _query_fn(client, conn), conn, persona=persona,
+        candidate_iris=[q.iri for q in queries.queries],
+    )
+    available = sorted(q.id for q in queries.queries if q.iri in reachable)
+    if condition is None or condition.iri not in reachable:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail={"error": "unknown_condition", "id": condition_id, "available": available},
+        )
+    if context_id and (context is None or context.iri not in reachable):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail={"error": "unknown_context_query", "id": context_id, "available": available},
+        )
+    endpoint = endpoints.by_id(endpoint_id)
+    if endpoint is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "unknown_agent_endpoint",
+                "id": endpoint_id,
+                "available": sorted(e.id for e in endpoints.endpoints),
+            },
+        )
+    return condition, endpoint, context
+
+
+async def _authorize_agent_definition(
+    conn, client, animus, settings, *, condition, endpoint, context, target_graph, review_required: bool
+) -> list[str]:
+    person = _identified(animus)
+    try:
+        return await authorize_agent_trigger(
+            _query_fn(client, conn), conn, person,
+            condition=condition, endpoint=endpoint, endpoint_id=endpoint.id,
+            context_query=context, target_graph=target_graph or "",
+            review_required=review_required,
+            settings=settings,
+        )
+    except TriggerDenied as exc:
+        raise _http(exc) from exc
+
+
 @router.get("/named-triggers")
 async def list_named_triggers(
     conn: ConnDep,
@@ -272,14 +351,26 @@ async def evaluate_named_trigger(
     if trig is None:
         raise _not_found(trigger_id, [t.id for t in result.triggers])
 
-    rules = await load_named_rules(client, conn)
-    rule = rules.by_id(trig.on_fire_rule_id)
-    if rule is not None:
-        await _authorize_firing(
-            conn, client, animus, rule=rule, review_required=trig.review_required
-        )
+    if trig.is_agent:
+        # An agent trigger writes to the call ledger (and, if it asks for an
+        # answer, the candidates graph and the target graph).
+        person = _identified(animus)
+        try:
+            await authorize_request(
+                _query_fn(client, conn), conn, person,
+                target_graph=trig.agent_target_graph or None,
+            )
+        except TriggerDenied as exc:
+            raise _http(exc) from exc
     else:
-        _identified(animus)
+        rules = await load_named_rules(client, conn)
+        rule = rules.by_id(trig.on_fire_rule_id)
+        if rule is not None:
+            await _authorize_firing(
+                conn, client, animus, rule=rule, review_required=trig.review_required
+            )
+        else:
+            _identified(animus)
 
     touched = frozenset(body.touched_predicates) if body.touched_predicates else None
     try:
@@ -307,11 +398,21 @@ async def register_named_trigger(
     animus: AnimusDep,
     personas: PersonasDep,
     cache: RegistryDep,
+    settings: SettingsDep,
 ) -> dict:
     """Register (or overwrite) a named trigger. See this module's docstring for
     the checks, and why they happen here and not at firing time."""
     registry = conn.graph("named-triggers")
     await _require_grant(conn, client, animus, registry)
+
+    if bool(body.on_fire) == bool(body.on_fire_agent):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "invalid_trigger",
+                "message": "name exactly one action: on_fire (a rule) or on_fire_agent (an agent endpoint)",
+            },
+        )
 
     try:
         watched = validate_watched_predicates(body.watched_predicates)
@@ -325,13 +426,24 @@ async def register_named_trigger(
             detail={"error": "invalid_trigger_kind", "expected": list(TRIGGER_KINDS)},
         )
 
-    condition, rule = await _resolve_parts(
-        conn, client, animus, personas, body.condition, body.on_fire
-    )
-    warnings = await _authorize_definition(
-        conn, client, animus, personas,
-        condition=condition, rule=rule, review_required=body.review_required,
-    )
+    rule = endpoint = context = None
+    if body.on_fire_agent:
+        condition, endpoint, context = await _resolve_agent_parts(
+            conn, client, animus, personas, body.condition, body.on_fire_agent, body.agent_context
+        )
+        warnings = await _authorize_agent_definition(
+            conn, client, animus, settings,
+            condition=condition, endpoint=endpoint, context=context,
+            target_graph=body.agent_target_graph, review_required=body.review_required,
+        )
+    else:
+        condition, rule = await _resolve_parts(
+            conn, client, animus, personas, body.condition, body.on_fire
+        )
+        warnings = await _authorize_definition(
+            conn, client, animus, personas,
+            condition=condition, rule=rule, review_required=body.review_required,
+        )
 
     node = trigger_node(conn, body.id)
     try:
@@ -340,7 +452,11 @@ async def register_named_trigger(
             trigger_id=body.id,
             trigger_kind=body.trigger_kind,
             condition=condition.id,
-            on_fire=rule.id,
+            on_fire=rule.id if rule else None,
+            agent_endpoint=endpoint.id if endpoint else None,
+            agent_task=body.agent_task,
+            agent_context=context.id if context else None,
+            agent_target_graph=body.agent_target_graph,
             review_required=body.review_required,
             status=body.status,
             label=body.label,
@@ -382,6 +498,7 @@ async def set_named_trigger_status(
     animus: AnimusDep,
     personas: PersonasDep,
     cache: RegistryDep,
+    settings: SettingsDep,
 ) -> dict:
     """Suspend, resume or deprecate a trigger. Making one Active again re-runs
     the registration checks: a switch that arms something is not a lesser act
@@ -395,7 +512,17 @@ async def set_named_trigger_status(
         raise _not_found(trigger_id, [t.id for t in result.triggers])
 
     warnings: list[str] = []
-    if body.status == "Active":
+    if body.status == "Active" and trig.is_agent:
+        condition, endpoint, context = await _resolve_agent_parts(
+            conn, client, animus, personas, trig.condition_id, trig.agent_endpoint,
+            trig.agent_context or None,
+        )
+        warnings = await _authorize_agent_definition(
+            conn, client, animus, settings,
+            condition=condition, endpoint=endpoint, context=context,
+            target_graph=trig.agent_target_graph, review_required=trig.review_required,
+        )
+    elif body.status == "Active":
         condition, rule = await _resolve_parts(
             conn, client, animus, personas, trig.condition_id, trig.on_fire_rule_id
         )

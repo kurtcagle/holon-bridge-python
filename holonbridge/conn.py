@@ -70,6 +70,15 @@ against the target *merged with* ``validation_context_graphs``. The
 ordinary ``shacl`` graph is unchanged and still validated against the
 target alone. See holonbridge/shacl.py for the mechanism.
 
+CHANGED 2026-11-01: added ``agents`` (the registry of ``hb:AgentEndpoint``
+entries: where the bridge may send a task, and how it authenticates) and
+``agent-calls`` (the ledger of ``hb:AgentCall`` entries: every task sent, on
+whose authority, and what came back). Two graphs rather than one because they
+are granted differently -- registering an endpoint is an administrative act,
+placing a call is an operational one -- and because the ledger holds request
+bodies, which contain graph data and so want the narrower read audience. See
+holonbridge/agents/__init__.py.
+
 CHANGED 2026-10-21: added the ``taxonomy`` graph role and made it a second
 validation context graph beside the ontology. A shape that checks a value
 against a controlled vocabulary (``sh:class skos:Concept``, scheme
@@ -108,6 +117,8 @@ GRAPH_ROLES: Final = (
     "named-triggers",
     "trigger-log",
     "candidates",
+    "agents",
+    "agent-calls",
     "pipelines",
     "messages",
     "projections",

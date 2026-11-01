@@ -48,6 +48,8 @@ SYSTEM_ROLES = (
     "named-triggers",
     "trigger-log",
     "candidates",
+    "agents",
+    "agent-calls",
     "pipelines",
     "projections",
     "projection-log",
