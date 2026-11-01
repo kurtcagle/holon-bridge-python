@@ -90,6 +90,9 @@ class RegStub(IdentityStub):
     async def post_graph(self, conn, graph_iri, turtle):
         return await self.domain.post_graph(conn, graph_iri, turtle)
 
+    async def put_graph(self, conn, graph_iri, turtle):
+        return None
+
     async def get_graph(self, conn, graph_iri):
         return await self.domain.get_graph(conn, graph_iri)
 

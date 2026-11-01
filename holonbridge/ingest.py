@@ -71,6 +71,8 @@ from . import write_lock
 from .acl import Animus, check_replace, check_write
 from .conn import Conn
 from .fuseki import FusekiClient, FusekiError
+from .touched import turtle_predicates
+from .trigger_hook import after_write
 
 
 async def write_turtle_to_graph(
@@ -199,6 +201,17 @@ async def write_turtle_to_graph(
                 await client.post_graph(conn, graph_iri, turtle)
         except FusekiError as exc:
             raise HTTPException(exc.status or 502, detail=exc.as_dict()) from exc
+
+    # After the lock is released: evaluating triggers can itself write. A
+    # "replace" removes whatever the graph held before, which a parse of the new
+    # content cannot account for, so it narrows nothing.
+    await after_write(
+        client,
+        conn,
+        graphs=[graph_iri],
+        touched=None if mode == "replace" else (lambda: turtle_predicates(turtle)),
+        source=f"write to <{graph_iri}>",
+    )
 
     return {
         "ok": True,

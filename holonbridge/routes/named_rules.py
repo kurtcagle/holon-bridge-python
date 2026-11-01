@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from ..acl import check_replace, check_write
 from ..deps import AnimusDep, ClientDep, ConnDep, PersonasDep, RegistryDep, SettingsDep
 from ..fuseki import FusekiError, FusekiTimeout
+from ..trigger_hook import after_write
 from ..named_rules import (
     RULE_STATUSES,
     WRITE_MODES,
@@ -315,6 +316,9 @@ async def _run(conn, client, rule, params, write_mode, timeout, target_graph=Non
     except FusekiError as exc:
         raise HTTPException(exc.status or 502, detail=exc.as_dict()) from exc
 
+    await after_write(
+        client, conn, graphs=[run.target_graph], source=f"named rule {rule.id!r}"
+    )
     return {**run.as_dict(), "executed": True}
 
 
@@ -413,6 +417,13 @@ async def graph_op(
         await client.update(conn, update)
     except FusekiError as exc:
         raise HTTPException(exc.status or 502, detail=exc.as_dict()) from exc
+
+    await after_write(
+        client,
+        conn,
+        graphs=[g for g in (body.target, body.source) if g],
+        source=f"graph-op {op}",
+    )
 
     return {
         "ok": True,

@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.21
+version: 1.0.22
 created: 2026-09-27
 updated: 2026-11-01
 author:
@@ -45,6 +45,28 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-11-01 (post-write trigger hook)
+
+- **State triggers now fire after every write path, not just fluent
+  transitions.** `push_turtle`, `/ingest`, `create_holon`, `approve_candidate`,
+  `POST /sparql/update`, `DELETE /graph`, `POST /graph-op`, running a named rule
+  or named update, and scheduler tasks that write all evaluate state triggers
+  once the write has committed (after the write lock is released; failures are
+  swallowed; writes made by a firing do not re-enter the evaluator).
+  Bookkeeping-only writes (registries, ledger, candidates, projection state) are
+  skipped. Bridge behaviour change: a deployment with state triggers will now see
+  them fire on writes that used to leave them idle.
+- **`watchedPredicate` narrowing is real.** The predicates a write touched are
+  derived from the Turtle or the SPARQL update's templates, and anything that
+  cannot be accounted for completely counts as unknown and narrows nothing.
+- **A trigger's definer is re-checked at firing.** Registering or activating a
+  trigger records `hev:armedBy`. When it is about to fire, that person's access
+  is checked again; if it is gone the focus is skipped
+  (`skipped-definer-unauthorised`), nothing is written to the ledger, and it
+  fires normally if access returns. Verdicts are cached for 30 seconds. New
+  setting `TRIGGERS_REQUIRE_DEFINER` refuses to fire triggers with no recorded
+  definer; off by default so hand-authored triggers keep working.
 
 ### 2026-11-01 (trigger registration)
 
@@ -506,6 +528,11 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-11-01-d a hb:ReleaseNote ;
+    dcterms:date "2026-11-01"^^xsd:date ;
+    rdfs:label "Post-write trigger hook on all data write paths; definer re-check at firing" ;
+    dcterms:description "State triggers are evaluated after push_turtle, /ingest, create_holon, approve_candidate, SPARQL update, DELETE /graph, graph-op, named rule and named update runs, and scheduler writes, not only after fluent transitions; bookkeeping-only writes are skipped and a firing does not re-enter the evaluator. watchedPredicate narrowing uses conservatively derived touched predicates (unknown means no narrowing). The person who registered or activated a trigger (hev:armedBy) has their access re-checked when it fires; a lapsed definer's focus is skipped without a ledger entry. New TRIGGERS_REQUIRE_DEFINER setting." .
 
 hb:release-2026-11-01-c a hb:ReleaseNote ;
     dcterms:date "2026-11-01"^^xsd:date ;

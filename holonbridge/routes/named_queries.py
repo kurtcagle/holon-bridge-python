@@ -89,6 +89,7 @@ from pydantic import BaseModel, Field
 from ..acl import check_replace, check_write, extract_graph_refs
 from ..deps import AnimusDep, ClientDep, ConnDep, PersonasDep, RegistryDep
 from ..fuseki import FusekiError
+from ..trigger_hook import after_write_update
 from ..named_queries import apply_query_params, load_named_queries
 from ..params import ParameterError, shacl_shape_for_query
 from ..sparql_kind import classify, form
@@ -326,6 +327,9 @@ async def run_named_query(
     try:
         if kind == "update":
             await client.update(conn, bound.sparql)
+            await after_write_update(
+                client, conn, bound.sparql, source=f"named update {query.id!r}"
+            )
             return {**envelope, "executed": True, "ok": True}
 
         if form(bound.sparql) in {"CONSTRUCT", "DESCRIBE"}:

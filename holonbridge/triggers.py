@@ -75,8 +75,11 @@ predicate changed.
 
 from __future__ import annotations
 
+import contextvars
 import logging
+import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -97,6 +100,7 @@ from .named_rules import (
 from .params import ParameterError
 from .rdfutil import collect, local_name, pick, truthy
 from .scheduler.vocab import TRIGGER_STATE, TRIGGER_TEMPORAL
+from .trigger_authz import TriggerDenied, authorize_definition
 from .turtle import escape_literal
 
 log = logging.getLogger("holonbridge.triggers")
@@ -122,6 +126,7 @@ _TRIGGER_FIELDS: dict[str, tuple[str, ...]] = {
     "on_fire_rule": ("onFire", "onFireRule", "rule"),
     "review_required": ("reviewRequired",),
     "status": ("triggerStatus", "status"),
+    "armed_by": ("armedBy",),
 }
 _WATCHED_PREDICATE_LINKS = ("watchedPredicate", "watchedPredicates")
 
@@ -140,6 +145,11 @@ class Trigger:
     label: str = ""
     description: str = ""
     watched_predicates: frozenset[str] = field(default_factory=frozenset)
+    #: The Person who last registered or re-activated it. The trigger runs as
+    #: the bridge, but only while this person could do what it does: their
+    #: access is re-checked at firing (``trigger_authz``). Empty for a trigger
+    #: that was hand-authored rather than registered through the API.
+    armed_by: str = ""
 
     @property
     def runnable(self) -> bool:
@@ -157,6 +167,7 @@ class Trigger:
             "reviewRequired": self.review_required,
             "triggerStatus": self.status,
             "watchedPredicates": sorted(self.watched_predicates),
+            "armedBy": self.armed_by or None,
         }
 
 
@@ -178,7 +189,7 @@ class TriggerFiring:
 
     trigger_id: str
     focus: str
-    outcome: str  # "proposed" | "executed" | "skipped-pending-candidate" | "failed"
+    outcome: str  # "proposed" | "executed" | "skipped-pending-candidate" | "skipped-definer-unauthorised" | "failed"
     candidate_iri: str | None = None
     detail: str = ""
 
@@ -286,6 +297,7 @@ async def load_named_triggers(
                 label=pick(props, _TRIGGER_FIELDS["label"]) or trigger_id,
                 description=pick(props, _TRIGGER_FIELDS["description"]) or "",
                 watched_predicates=frozenset(watched.get(iri, set())),
+                armed_by=pick(props, _TRIGGER_FIELDS["armed_by"]) or "",
             )
         )
 
@@ -743,15 +755,102 @@ async def _run_condition(
     return focus
 
 
+# --- re-checking the definer at firing -------------------------------------------
+
+#: How long a verdict on a trigger's definer is reused. The re-check is several
+#: queries per trigger and a state trigger is evaluated after every write, so it
+#: cannot run each time; this bounds how long a revoked grant keeps working.
+DEFINER_RECHECK_TTL_SECONDS = 30.0
+
+_recheck_cache: dict[tuple, tuple[float, str | None]] = {}
+_clock: Callable[[], float] = time.monotonic
+
+
+def clear_definer_cache() -> None:
+    """Forget cached verdicts (tests; also useful after an administrative change)."""
+    _recheck_cache.clear()
+
+
+async def _definer_denied(
+    client: FusekiClient, conn: Conn, trig: "Trigger", condition: NamedQuery, rule: NamedRule
+) -> str | None:
+    """Why this trigger may not fire right now, or ``None`` if it may.
+
+    A trigger runs as the bridge, but it was accepted on the strength of one
+    person's access. If that person can no longer do what it does -- the grant
+    was revoked, the delegation expired, the person was removed -- the trigger
+    must stop, not carry on with authority nobody holds any more. Nothing is
+    written to the ledger for a skipped focus, so it fires normally if access is
+    restored.
+
+    A trigger with no recorded definer was hand-authored, before registration
+    existed. It runs as it always did unless ``TRIGGERS_REQUIRE_DEFINER`` is set.
+    """
+    if not trig.armed_by:
+        from .config import get_settings  # noqa: PLC0415 - avoids an import cycle
+
+        if get_settings().triggers_require_definer:
+            return "no recorded definer, and TRIGGERS_REQUIRE_DEFINER is set"
+        return None
+
+    key = (
+        conn.base_url, conn.dataset, trig.iri, trig.armed_by, trig.review_required,
+        condition.sparql, rule.construct, rule.target_graph, rule.write_mode,
+    )
+    now = _clock()
+    cached = _recheck_cache.get(key)
+    if cached is not None and now - cached[0] < DEFINER_RECHECK_TTL_SECONDS:
+        return cached[1]
+
+    async def query_fn(query: str) -> dict:
+        return await client.select(conn, query)
+
+    verdict: str | None
+    try:
+        await authorize_definition(
+            query_fn, conn, trig.armed_by,
+            condition=condition, rule=rule, review_required=trig.review_required,
+        )
+        verdict = None
+    except TriggerDenied as exc:
+        verdict = f"definer <{trig.armed_by}> may no longer do this: {exc.reason}"
+    except (FusekiError, KeyError) as exc:
+        # Could not find out. Fail closed for now, but do not cache it: the
+        # next evaluation should ask again.
+        return f"could not verify definer <{trig.armed_by}>: {exc}"
+
+    _recheck_cache[key] = (now, verdict)
+    return verdict
+
+
+# --- re-entrancy ------------------------------------------------------------------
+
+#: True while a trigger evaluation is running in this task. A firing writes (it
+#: executes a rule, or stages a candidate), and every write path calls the
+#: post-write hook, which evaluates triggers: without this a trigger's own
+#: output would re-enter the evaluator it is running inside. Writes made *by* a
+#: firing therefore do not themselves fire state triggers; a rule whose output
+#: should set off another trigger is picked up by that trigger's next
+#: evaluation (the next ordinary write, or a TemporalTrigger sweep).
+_evaluating: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "holonbridge_evaluating_triggers", default=False
+)
+
+TouchedPredicates = "frozenset[str] | Callable[[], frozenset[str] | None] | None"
+
+
 async def evaluate_triggers(
     client: FusekiClient,
     conn: Conn,
     *,
     kind: str,
-    touched_predicates: frozenset[str] | None = None,
+    touched_predicates: frozenset[str] | Callable[[], frozenset[str] | None] | None = None,
     trigger_ids: frozenset[str] | None = None,
 ) -> list[TriggerFiring]:
     """Evaluate every Active trigger of ``kind`` and act on new matches.
+
+    Re-entrant calls (a firing's own writes reaching the post-write hook) return
+    ``[]``; see ``_evaluating``.
 
     ``trigger_ids``, when supplied, restricts evaluation to those triggers.
     The manual evaluate route passes the one trigger it was asked about:
@@ -760,9 +859,11 @@ async def evaluate_triggers(
 
     ``touched_predicates``, when supplied, narrows evaluation to triggers
     that declared at least one matching ``watchedPredicate`` — an available
-    optimisation a caller that knows what changed can opt into. The
-    ``fluent.py`` write hook does not supply it yet (see the module
-    docstring); every other caller is free to.
+    optimisation a caller that knows what changed can opt into. It may be a
+    callable, which is only called if some candidate trigger actually declares
+    watched predicates (working out what a write touched can mean parsing it);
+    a callable that returns ``None`` means "could not tell", and nothing is
+    narrowed. A trigger that declares none is always evaluated.
 
     For each trigger, each currently-matching focus node not already
     recorded in the firing log gets: a ``dry_run`` bind of the trigger's
@@ -776,16 +877,37 @@ async def evaluate_triggers(
     is re-armed (see the module docstring's "Re-arming"), so a focus whose
     condition goes false and later true again fires again.
     """
+    if _evaluating.get():
+        return []
+    token = _evaluating.set(True)
+    try:
+        return await _evaluate(
+            client, conn, kind=kind, touched_predicates=touched_predicates, trigger_ids=trigger_ids
+        )
+    finally:
+        _evaluating.reset(token)
+
+
+async def _evaluate(
+    client: FusekiClient,
+    conn: Conn,
+    *,
+    kind: str,
+    touched_predicates: frozenset[str] | Callable[[], frozenset[str] | None] | None,
+    trigger_ids: frozenset[str] | None,
+) -> list[TriggerFiring]:
     load = await load_named_triggers(client, conn)
     triggers = [t for t in load.triggers if t.runnable and t.trigger_kind == kind]
     if trigger_ids is not None:
         triggers = [t for t in triggers if t.id in trigger_ids]
-    if touched_predicates is not None:
-        triggers = [
-            t
-            for t in triggers
-            if not t.watched_predicates or t.watched_predicates & touched_predicates
-        ]
+    if touched_predicates is not None and any(t.watched_predicates for t in triggers):
+        touched = touched_predicates() if callable(touched_predicates) else touched_predicates
+        if touched is not None:
+            triggers = [
+                t
+                for t in triggers
+                if not t.watched_predicates or t.watched_predicates & touched
+            ]
 
     if not triggers:
         return []
@@ -831,12 +953,27 @@ async def evaluate_triggers(
             # fired" until the next evaluation manages to clear it.
             log.warning("trigger %s could not be re-armed: %s", trig.id, exc)
 
+        denial: str | None = None
+        checked = False
         for focus in matches:
             already = await client.select(
                 conn, _already_fired_ask(log_graph, trig.iri, focus)
             )
             if already.get("boolean"):
                 continue  # edge-triggered: this (trigger, focus) pair already fired
+
+            # Asked at most once per trigger per evaluation, and only when
+            # there is something to fire, so a quiet evaluation costs nothing.
+            if not checked:
+                denial = await _definer_denied(client, conn, trig, condition, rule)
+                checked = True
+                if denial:
+                    log.warning("trigger %s not fired: %s", trig.id, denial)
+            if denial:
+                firings.append(
+                    TriggerFiring(trig.id, focus, "skipped-definer-unauthorised", detail=denial)
+                )
+                continue
 
             try:
                 if trig.review_required:

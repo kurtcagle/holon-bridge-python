@@ -28,6 +28,7 @@ from ..named_rules import execute_named_rule, load_named_rules
 from ..pipeline import load_manifest, run_pipeline
 from ..messages import Message
 from ..shacl import validate_delta
+from ..trigger_hook import after_write
 from .model import (
     FiringRecord,
     Persona,
@@ -394,6 +395,19 @@ class Scheduler:
         return replace(self._admin, dataset=task.dataset_scope, overridden=True)
 
     async def _execute(
+        self, task: Task, persona: Persona | None, record: FiringRecord
+    ) -> None:
+        await self._execute_action(task, persona, record)
+        # A task that wrote domain data may have set off a state trigger, just
+        # as the same write through a route would. The graphs are not all known
+        # here (a pipeline touches several), so nothing is narrowed.
+        wrote = task.action_class == LLM_INVOCATION or task.action in {"rule", "pipeline", "payload"}
+        if wrote and record.outcome == "committed":
+            await after_write(
+                self._client, self._target_conn(task), source=f"scheduled task {task.id!r}"
+            )
+
+    async def _execute_action(
         self, task: Task, persona: Persona | None, record: FiringRecord
     ) -> None:
         conn = self._target_conn(task)

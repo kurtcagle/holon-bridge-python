@@ -42,3 +42,14 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "jena" in item.keywords:
             item.add_marker(skip)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_definer_verdicts():
+    """Verdicts on a trigger's definer are cached for a short while; do not let
+    one test's verdict answer another's."""
+    from holonbridge import triggers
+
+    triggers.clear_definer_cache()
+    yield
+    triggers.clear_definer_cache()
