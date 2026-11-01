@@ -69,7 +69,7 @@ def render_trigger_turtle(
     trigger_id: str,
     trigger_kind: str,
     condition: str,
-    on_fire: str,
+    on_fire: str | None,
     review_required: bool,
     status: str,
     label: str | None,
@@ -77,7 +77,19 @@ def render_trigger_turtle(
     watched_predicates: list[str],
     registered_at: str,
     armed_by: str | None = None,
+    agent_endpoint: str | None = None,
+    agent_task: str | None = None,
+    agent_context: str | None = None,
+    agent_target_graph: str | None = None,
 ) -> str:
+    if bool(on_fire) == bool(agent_endpoint):
+        raise InvalidTrigger("a trigger names exactly one action: a rule (onFire) or an agent (onFireAgent)")
+    if agent_endpoint and not (agent_task or "").strip():
+        raise InvalidTrigger("an agent trigger needs a task to give the agent")
+    if not agent_endpoint and (agent_task or agent_context or agent_target_graph):
+        raise InvalidTrigger("agentTask, agentContext and agentTargetGraph only apply to onFireAgent")
+    if agent_target_graph and not _SAFE_IRI.match(agent_target_graph):
+        raise InvalidTrigger(f"agent target graph {agent_target_graph!r} is not a usable absolute IRI")
     if trigger_kind not in TRIGGER_KINDS:
         raise InvalidTrigger(
             f"triggerKind must be one of {', '.join(TRIGGER_KINDS)}, not {trigger_kind!r}"
@@ -92,10 +104,18 @@ def render_trigger_turtle(
         f"<{hev}id> {literal(trigger_id)}",
         f"<{hev}triggerKind> {literal(trigger_kind)}",
         f"<{hev}condition> {literal(condition)}",
-        f"<{hev}onFire> {literal(on_fire)}",
         f"<{hev}reviewRequired> {literal('true' if review_required else 'false', datatype=_XSD_BOOLEAN)}",
         f"<{hev}triggerStatus> {literal(status)}",
     ]
+    if on_fire:
+        pairs.append(f"<{hev}onFire> {literal(on_fire)}")
+    else:
+        pairs.append(f"<{hev}onFireAgent> {literal(agent_endpoint)}")
+        pairs.append(f"<{hev}agentTask> {literal(agent_task)}")
+        if agent_context:
+            pairs.append(f"<{hev}agentContext> {literal(agent_context)}")
+        if agent_target_graph:
+            pairs.append(f"<{hev}agentTargetGraph> {literal(agent_target_graph)}")
     if label:
         pairs.append(f"<{hev}label> {literal(label)}")
     if description:

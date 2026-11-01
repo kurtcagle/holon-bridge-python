@@ -391,12 +391,16 @@ async def pipeline_run(
     await store.save(conn, message)
 
     if body.wait:
-        await _execute(conn, client, manifest, message, body.params, body.stop_on_error)
+        await _execute(
+            conn, client, manifest, message, body.params, body.stop_on_error, animus.person
+        )
         return message.as_dict()
 
     _spawn(
         request,
-        _execute(conn, client, manifest, message, body.params, body.stop_on_error),
+        _execute(
+            conn, client, manifest, message, body.params, body.stop_on_error, animus.person
+        ),
     )
     return {"messageId": message.id, "status": message.status, "pipeline": body.pipeline}
 
@@ -408,6 +412,7 @@ async def _execute(
     message: Message,
     params: dict,
     stop_on_error: bool,
+    requested_by: str | None = None,
 ) -> None:
     store = MessageStore(client)
     mark_running(message)
@@ -415,7 +420,8 @@ async def _execute(
 
     try:
         await run_pipeline(
-            conn, client, manifest, message, params=params, stop_on_error=stop_on_error
+            conn, client, manifest, message,
+            params=params, stop_on_error=stop_on_error, requested_by=requested_by,
         )
         failed = any(s.status == "Failed" for s in message.stages)
         mark_completed(message, failed=failed, error=message.error)
@@ -721,10 +727,12 @@ async def ingest(
     await store.save(conn, message)
 
     if body.wait:
-        await _execute(conn, client, manifest, message, body.params, True)
+        await _execute(conn, client, manifest, message, body.params, True, animus.person)
         return message.as_dict()
 
-    _spawn(request, _execute(conn, client, manifest, message, body.params, True))
+    _spawn(
+        request, _execute(conn, client, manifest, message, body.params, True, animus.person)
+    )
     return {"messageId": message.id, "status": message.status, "pipeline": body.pipeline}
 
 

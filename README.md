@@ -164,6 +164,15 @@ Invoke-RestMethod "$env:HB/graphs"   -Headers $h | Select-Object -Expand graphs
 | `DELETE` | `/named-trigger/{id}` | Remove a trigger; needs replace on the registry |
 | `POST` | `/named-trigger/{id}/evaluate` | Evaluate this one trigger now |
 | `POST` | `/named-triggers/reload` | Re-read the trigger registry |
+| `GET` | `/agent-endpoints`, `/agent-endpoint/{id}` | Registered agent endpoints (credential *references* only) |
+| `POST` | `/agent-endpoint` | Register or overwrite an endpoint; needs write on the agents graph |
+| `POST` | `/agent-endpoint/{id}/status` | Active / Suspended / Deprecated (Active re-checks egress and credentials) |
+| `DELETE` | `/agent-endpoint/{id}` | Remove an endpoint; needs replace on the agents graph |
+| `POST` | `/agent-endpoints/reload` | Re-read the agent registry |
+| `POST` | `/agent-call` | Place a call: recorded with its exact body, **nothing sent** |
+| `GET` | `/agent-calls`, `/agent-call/{id}` | The ledger; the detail shows the request body |
+| `POST` | `/agent-call/{id}/approve` · `/reject` · `/retry` | Send the stored body once / refuse it / resend a failed one |
+| `POST` | `/agent-calls/dispatch` | Send calls a policy approved (the `agent-dispatch` job does this on a timer) |
 | `GET` | `/projection/hooks` | Registered hooks, with problems flagged |
 | `GET` | `/projection/hook/{id}` | Hook detail and watermark size |
 | `POST` | `/projection/hook` | Register a hook |
@@ -919,6 +928,80 @@ access comes back. Notes:
   be traced to a person.
 - Activating a trigger transfers it to the activator: whoever arms it answers for
   it.
+
+### Agent endpoints: an outbound gateway with two human gates
+
+The bridge does not run agents. It keeps a **registry** of places a task may be
+sent (`hb:AgentEndpoint`, in `urn:{dataset}:agents`) and a **ledger** of every
+task it did send (`hb:AgentCall`, in `urn:{dataset}:agent-calls`). Two people
+stand around each call: one decides what *leaves*, one decides what *lands*.
+
+```
+request ──▶ PendingApproval ──approve──▶ Sending ──▶ Responded ──▶ candidate ──approve──▶ graph
+                 │                          │
+                 └──reject──▶ Rejected      └──▶ Failed ──retry──▶ Sending
+```
+
+- **What leaves.** Placing a call (`POST /agent-call`, MCP `request_agent_call`)
+  records it with the *exact* JSON body that would be sent, including the result
+  of any context query, and sends nothing. `GET /agent-call/{id}` shows that body;
+  `POST /agent-call/{id}/approve` sends those bytes and no others (the body's
+  digest is stored). Placing needs write access to the call ledger -- that grant
+  is what "may use agents" means -- plus read access to everything the context
+  query reads, and write access to the candidates graph and the target graph if
+  an answer is asked for.
+- **What lands.** An agent's reply is a 200 JSON object `{status, summary,
+  turtle?}`. Anything else is a recorded failure. If it carries Turtle and the
+  call named a target graph, the Turtle is **staged as a candidate** (the same
+  queue triggers and pipelines use, provenance `hb:proposedByAgentCall`) and
+  never written. Approving *that* is the ordinary ACL- and SHACL-gated merge.
+- **At most once.** Approval moves the call to `Sending` under the dataset write
+  lock *before* any bytes leave, and the HTTP call runs with the lock released.
+  Two racing approvals send once. A crash mid-send leaves `Sending`, not a
+  call that could go twice; `retry` resends it (immediately if `Failed`, after
+  the endpoint's timeout plus 60 seconds if `Sending`). The call id travels as
+  `Idempotency-Key`, so an agent that deduplicates recognises the retry.
+- **Credentials by reference.** An endpoint stores `credentialRef: env:NAME`
+  (and optionally `signingRef` for an HMAC over `timestamp.body`), never a
+  secret. The secret is read from the environment only while sending, is never
+  logged, stored or echoed, and an error names the reference, not the value.
+  `NAME` must start with `AGENT_CREDENTIAL_PREFIX` (default `HB_AGENT_`), and an
+  endpoint that carries a credential is refused unless its host is in
+  `AGENT_ALLOWLIST`. Without those two rules, anyone who could register an
+  endpoint could name `env:DATABASE_PASSWORD` and aim it at their own host.
+- **Egress** is the webhook policy under a different setting: https, public
+  addresses only, no credentials in the URL, redirects never followed (a
+  redirect is a failure), response size capped, total deadline enforced. The
+  endpoint is re-checked at every send, because it is data in the graph and the
+  allowlist can change after it was stored. DNS rebinding is the same documented
+  residual risk as for webhooks.
+
+**Three ways to place a call**
+
+| From | How | Who it is placed as | Approval |
+|---|---|---|---|
+| A person | `request_agent_call` | the caller | a person approves |
+| A trigger | `on_fire_agent` on `POST /named-trigger` (instead of `on_fire`), with `agent_task`, optional `agent_context` (a named query bound to the focus) and `agent_target_graph` | whoever armed the trigger, re-checked at firing exactly as for a rule trigger | held for a person **unless both** the trigger's `reviewRequired` is `false` **and** the endpoint's `callReview` is `false` |
+| A pipeline | a stage with `build:transformer "agent"`, `build:agentEndpoint`, `build:promptText` (the task) and optionally `build:agentContext` / `build:targetGraph` | whoever ran the pipeline | always a person; the stage ends `Deferred` with the call id |
+
+A temporal trigger with an agent action is how a *schedule* places calls (the
+`trigger-sweep` maintenance job evaluates it). A scheduled **pipeline** has no
+person, so an agent stage in it fails with a message saying so rather than
+placing a call as nobody.
+
+A call queued by policy waits as `Approved`. Nothing is sent from inside the
+write or sweep that caused it; the scheduler's `agent-dispatch` maintenance job
+(a task with `maintenance="agent-dispatch"`), or `POST /agent-calls/dispatch`,
+sends them, after re-checking that the requester may still place the call and
+that the endpoint is still active. Without that job scheduled, policy-approved
+calls simply wait. A trigger does not stack a second call for a focus while one
+is still open.
+
+Not in this slice: the scheduler's action-class and ODRL capability gates do not
+yet cover agent calls, and calls are not yet written to the audit graph beyond
+the ledger itself. Toolset/persona reachability is not applied to endpoints.
+Asynchronous agents (a 202 and a later callback) are not supported: a reply is
+the response to the request or it is a failure.
 
 ### Three guards against runaway firing
 

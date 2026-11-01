@@ -192,6 +192,18 @@ class Settings:
     # person was hand-authored; by default it keeps running as before. Turn this
     # on to refuse to fire any trigger that cannot be traced to a person.
     triggers_require_definer: bool = False
+    # Hosts an agent endpoint may point at (``AGENT_ALLOWLIST``; same entry
+    # syntax as the webhook allowlist, deliberately a separate setting: what a
+    # projection may be pushed to and what an agent may be sent are different
+    # trust decisions). Empty means the default policy -- https, public
+    # addresses only -- and, in that case, an endpoint may not carry
+    # credentials at all: a credential only travels to a host the operator
+    # listed. See agents/policy.py.
+    agent_allowlist: tuple[str, ...] = ()
+    # Credential references (``env:NAME``) must name an environment variable
+    # starting with this prefix. Without it, anyone who can register an
+    # endpoint could aim ``env:DATABASE_PASSWORD`` at a host of their choosing.
+    agent_credential_prefix: str = "HB_AGENT_"
     # Creation is refused once the backend already hosts this many datasets.
     # There is deliberately no way to drop one through the bridge, so this is
     # the backstop against a runaway loop (or a mistaken script) filling the
@@ -287,6 +299,10 @@ class Settings:
             dataset_creators=parse_dataset_creators(os.getenv("DATASET_CREATORS")),
             webhook_allowlist=parse_allowlist(os.getenv("WEBHOOK_ALLOWLIST")),
             triggers_require_definer=_flag("TRIGGERS_REQUIRE_DEFINER", False),
+            agent_allowlist=parse_allowlist(os.getenv("AGENT_ALLOWLIST")),
+            agent_credential_prefix=(
+                os.getenv("AGENT_CREDENTIAL_PREFIX") or "HB_AGENT_"
+            ).strip(),
             max_datasets=int(os.getenv("MAX_DATASETS", "50")),
             snapshot_dir=Path(os.environ["SNAPSHOT_DIR"]) if os.getenv("SNAPSHOT_DIR") else None,
             snapshot_max_bytes=int(os.getenv("SNAPSHOT_MAX_BYTES", "50000000")),

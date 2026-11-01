@@ -88,12 +88,16 @@ async def register_named_trigger(
     id: str,
     trigger_kind: str,
     condition: str,
-    on_fire: str,
+    on_fire: str | None = None,
     review_required: bool = True,
     status: str = "Active",
     label: str | None = None,
     description: str | None = None,
     watched_predicates: list[str] | None = None,
+    on_fire_agent: str | None = None,
+    agent_task: str | None = None,
+    agent_context: str | None = None,
+    agent_target_graph: str | None = None,
 ) -> dict:
     """Register (or overwrite) a named trigger.
 
@@ -114,6 +118,18 @@ async def register_named_trigger(
     ``review_required=false``, write access to the rule's target graph (and
     replace access when the rule reconciles wholesale). A condition or rule
     you cannot reach is reported as unknown.
+
+    **Agent action.** Give ``on_fire_agent`` (an agent endpoint id, see
+    ``register_agent_endpoint``) *instead of* ``on_fire`` to place a call to an
+    external agent for each focus. ``agent_task`` is what it is asked;
+    ``agent_context`` is the id of a named SELECT/CONSTRUCT whose result
+    travels with the call (bound to the focus if it declares a ``focus``
+    anyURI parameter); ``agent_target_graph`` is where its Turtle answer is
+    *proposed* (staged as a candidate, never written). Calls are placed as you,
+    and wait for a person's approval unless both ``review_required=false`` and
+    the endpoint has ``call_review=false``. You need write access to the call
+    ledger, the candidates graph and the target graph. Exactly one of
+    ``on_fire`` and ``on_fire_agent``.
     """
     return await _call(
         "POST",
@@ -128,6 +144,10 @@ async def register_named_trigger(
             "label": label,
             "description": description,
             "watched_predicates": watched_predicates or [],
+            "on_fire_agent": on_fire_agent,
+            "agent_task": agent_task,
+            "agent_context": agent_context,
+            "agent_target_graph": agent_target_graph,
         },
     )
 

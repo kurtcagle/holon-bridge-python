@@ -63,6 +63,11 @@ class EndpointRefused(ValueError):
 @dataclass(frozen=True)
 class EgressPolicy:
     allowlist: tuple[str, ...] = ()
+    #: The operator setting this policy's allowlist comes from, and what to call
+    #: it in messages. Webhooks and agent endpoints share the mechanism but not
+    #: the list, and a refusal must point at the setting that would change it.
+    setting: str = "WEBHOOK_ALLOWLIST"
+    label: str = "webhook allowlist"
 
 
 def parse_allowlist(raw: str | None) -> tuple[str, ...]:
@@ -154,11 +159,11 @@ async def check_endpoint(
     if policy.allowlist:
         if any(_entry_matches(entry, host, port) for entry in policy.allowlist):
             return
-        raise EndpointRefused(f"{host}:{port} is not on the webhook allowlist")
+        raise EndpointRefused(f"{host}:{port} is not on the {policy.label}")
 
     if scheme != "https":
         raise EndpointRefused(
-            "endpoint must use https (list the host in WEBHOOK_ALLOWLIST to allow plain http)"
+            f"endpoint must use https (list the host in {policy.setting} to allow plain http)"
         )
 
     literal = host
@@ -175,5 +180,5 @@ async def check_endpoint(
         if reason:
             raise EndpointRefused(
                 f"{host} resolves to a non-public address ({reason}); "
-                "list the host in WEBHOOK_ALLOWLIST to allow it deliberately"
+                f"list the host in {policy.setting} to allow it deliberately"
             )
