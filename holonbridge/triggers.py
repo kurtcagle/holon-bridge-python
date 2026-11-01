@@ -749,8 +749,14 @@ async def evaluate_triggers(
     *,
     kind: str,
     touched_predicates: frozenset[str] | None = None,
+    trigger_ids: frozenset[str] | None = None,
 ) -> list[TriggerFiring]:
     """Evaluate every Active trigger of ``kind`` and act on new matches.
+
+    ``trigger_ids``, when supplied, restricts evaluation to those triggers.
+    The manual evaluate route passes the one trigger it was asked about:
+    evaluating by ``kind`` alone fired every other Active trigger of that kind
+    as a side effect, which a caller authorised for one trigger had no claim to.
 
     ``touched_predicates``, when supplied, narrows evaluation to triggers
     that declared at least one matching ``watchedPredicate`` — an available
@@ -772,6 +778,8 @@ async def evaluate_triggers(
     """
     load = await load_named_triggers(client, conn)
     triggers = [t for t in load.triggers if t.runnable and t.trigger_kind == kind]
+    if trigger_ids is not None:
+        triggers = [t for t in triggers if t.id in trigger_ids]
     if touched_predicates is not None:
         triggers = [
             t
