@@ -76,6 +76,7 @@ def render_trigger_turtle(
     description: str | None,
     watched_predicates: list[str],
     registered_at: str,
+    armed_by: str | None = None,
 ) -> str:
     if trigger_kind not in TRIGGER_KINDS:
         raise InvalidTrigger(
@@ -100,6 +101,10 @@ def render_trigger_turtle(
     if description:
         pairs.append(f"<{hev}description> {literal(description)}")
     pairs.extend(f"<{hev}watchedPredicate> <{iri}>" for iri in watched_predicates)
+    if armed_by:
+        if not _SAFE_IRI.match(armed_by):
+            raise InvalidTrigger(f"armed_by {armed_by!r} is not a usable absolute IRI")
+        pairs.append(f"<{hev}armedBy> <{armed_by}>")
     pairs.append(f"<{hev}registeredAt> {literal(registered_at, datatype=_XSD_DATETIME)}")
     return f"{subject}\n    " + " ;\n    ".join(pairs) + " ."
 
@@ -116,14 +121,28 @@ def deletion_update(registry: str, node: str) -> str:
     return f"DELETE WHERE {{ GRAPH <{registry}> {{ <{node}> ?p ?o }} }}"
 
 
-def status_update(registry: str, node: str, status: str) -> str:
+def status_update(
+    registry: str, node: str, status: str, *, armed_by: str | None = None
+) -> str:
     """Set the status, removing it under whichever alias it was authored with
-    (the loader accepts ``triggerStatus`` and ``status``)."""
+    (the loader accepts ``triggerStatus`` and ``status``).
+
+    ``armed_by`` is passed when the change arms the trigger (making it Active):
+    whoever does that takes over responsibility for it, and is the person whose
+    access is re-checked when it fires.
+    """
     if status not in TRIGGER_STATUSES:
         raise InvalidTrigger(f"status must be one of {', '.join(TRIGGER_STATUSES)}")
+    if armed_by is not None and not _SAFE_IRI.match(armed_by):
+        raise InvalidTrigger(f"armed_by {armed_by!r} is not a usable absolute IRI")
+    arming = f' || STRENDS(STR(?p), "armedBy")' if armed_by else ""
+    new_arm = f"<{node}> <{HEV_NAMESPACE}armedBy> <{armed_by}> ." if armed_by else ""
     return f"""DELETE {{ GRAPH <{registry}> {{ <{node}> ?p ?o }} }}
 WHERE {{ GRAPH <{registry}> {{
   <{node}> ?p ?o .
-  FILTER( STRENDS(STR(?p), "triggerStatus") || STRENDS(STR(?p), "/status") || STRENDS(STR(?p), "#status") )
+  FILTER( STRENDS(STR(?p), "triggerStatus") || STRENDS(STR(?p), "/status") || STRENDS(STR(?p), "#status"){arming} )
 }} }} ;
-INSERT DATA {{ GRAPH <{registry}> {{ <{node}> <{HEV_NAMESPACE}triggerStatus> {literal(status)} }} }}"""
+INSERT DATA {{ GRAPH <{registry}> {{
+  <{node}> <{HEV_NAMESPACE}triggerStatus> {literal(status)} .
+  {new_arm}
+}} }}"""

@@ -187,6 +187,11 @@ class Settings:
     # means the default policy: https only, public addresses only. See
     # egress.py for the entry syntax and the reasoning.
     webhook_allowlist: tuple[str, ...] = ()
+    # A trigger registered through the API records who armed it, and that
+    # person's access is re-checked when it fires. A trigger with no recorded
+    # person was hand-authored; by default it keeps running as before. Turn this
+    # on to refuse to fire any trigger that cannot be traced to a person.
+    triggers_require_definer: bool = False
     # Creation is refused once the backend already hosts this many datasets.
     # There is deliberately no way to drop one through the bridge, so this is
     # the backstop against a runaway loop (or a mistaken script) filling the
@@ -281,6 +286,7 @@ class Settings:
             dataset_claimants=parse_dataset_claimants(os.getenv("DATASET_CLAIMANTS")),
             dataset_creators=parse_dataset_creators(os.getenv("DATASET_CREATORS")),
             webhook_allowlist=parse_allowlist(os.getenv("WEBHOOK_ALLOWLIST")),
+            triggers_require_definer=_flag("TRIGGERS_REQUIRE_DEFINER", False),
             max_datasets=int(os.getenv("MAX_DATASETS", "50")),
             snapshot_dir=Path(os.environ["SNAPSHOT_DIR"]) if os.getenv("SNAPSHOT_DIR") else None,
             snapshot_max_bytes=int(os.getenv("SNAPSHOT_MAX_BYTES", "50000000")),

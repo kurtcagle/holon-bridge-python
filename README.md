@@ -862,11 +862,63 @@ Manual evaluation (`POST /named-trigger/{id}/evaluate`) now runs only the
 trigger asked for (it used to run every Active trigger of the same kind and
 filter the answer) and needs the same write access a firing exercises.
 
-Not covered: the list and get routes still do not narrow by persona, and a
-trigger evaluated by the automatic path (a fluent write, the scheduler's
-`trigger-sweep`) runs without re-checking its definer, who may since have lost
-the access they had at registration. Closing that needs the definer recorded on
-the trigger and re-checked at firing, which is a larger change.
+Not covered: the list and get routes still do not narrow by persona.
+
+### Triggers fire after every write, and re-check who armed them
+
+**What fires them.** A state trigger used to be evaluated only after a fluent
+transition, so a trigger over data written any other way sat idle until a fluent
+happened to change. Every route that writes domain data now evaluates state
+triggers once the write has committed: `push_turtle` / `/ingest` /
+`create_holon` / `approve_candidate` (all through `write_turtle_to_graph`),
+`POST /sparql/update`, `DELETE /graph`, `POST /graph-op`, running a named rule,
+running a named update, and scheduler tasks that write (rule, pipeline,
+payload, LLM proposal). The hook runs *after* the write lock is released, never
+changes the write's outcome (a failure is logged and swallowed), and is not
+recursive: writes made by a firing do not themselves fire state triggers. A rule
+whose output should set off another trigger is picked up by that trigger's next
+evaluation.
+
+Not hooked, on purpose: the registries (named queries, rules, projections,
+triggers, pipelines), the audit log, identity and delegation administration, the
+message store, projection and scheduler bookkeeping, SHACL scratch graphs, and
+snapshot restore. A write whose graphs are all bookkeeping graphs (registries,
+trigger ledger, candidates, projection state, sequences, shapes) is skipped; if
+the graphs are not known, triggers are evaluated.
+
+**`watchedPredicate` now does something.** A trigger that declares watched
+predicates is evaluated only when the write touched one of them. What a write
+touched is derived conservatively: parsed from the Turtle, or from the
+INSERT/DELETE templates of a SPARQL update. Anything that cannot be accounted
+for completely, such as RDF 1.2 syntax, a variable or path predicate, a
+`replace` (which also removes what was there), CLEAR/DROP/COPY/MOVE/ADD, or text
+that does not parse, counts as "unknown", and nothing is narrowed. A trigger that
+declares no watched predicates is always evaluated. Narrowing is therefore an
+optimisation that can only cost a query, never a missed firing, provided the
+trigger's declared predicates cover what its condition depends on.
+
+**Who a firing answers to.** A trigger runs as the bridge, but it was accepted on
+the strength of one person's access, recorded as `hev:armedBy` when it is
+registered or re-activated. When it is about to fire, that person's access is
+checked again with the registration checks (read access to the condition and
+rule, and the write the trigger performs). If they can no longer do it, because
+the grant was revoked, a delegation lapsed, or they were removed, the focus is
+skipped with outcome `skipped-definer-unauthorised` and a warning is logged.
+Nothing is written to the ledger for a skipped focus, so it fires normally if
+access comes back. Notes:
+
+- The check is only made when there is something to fire, and a verdict is reused
+  for 30 seconds, so a revocation takes effect within that window.
+- If the check itself fails (the store is unreachable), the focus is skipped for
+  now and the failure is not cached.
+- Toolset/persona reachability is not re-checked at firing: it depends on the
+  person's current session persona, which a firing does not have. It remains a
+  registration-time check.
+- A trigger with no recorded definer (hand-authored Turtle) runs as before.
+  Set `TRIGGERS_REQUIRE_DEFINER=true` to refuse to fire any trigger that cannot
+  be traced to a person.
+- Activating a trigger transfers it to the activator: whoever arms it answers for
+  it.
 
 ### Three guards against runaway firing
 

@@ -48,6 +48,7 @@ from .. import audit
 from ..acl import analyse_graph_refs, authorize_query, authorize_update
 from ..deps import AnimusDep, ClientDep, ConnDep
 from ..fuseki import FusekiError
+from ..trigger_hook import after_write_update
 from ..sparql_kind import classify
 
 router = APIRouter(prefix="/sparql", tags=["sparql"])
@@ -159,4 +160,5 @@ async def update(
         await client.update(conn, body.update)
     except FusekiError as exc:
         raise HTTPException(exc.status or 502, detail=exc.as_dict()) from exc
+    await after_write_update(client, conn, body.update, source="POST /sparql/update")
     return {"ok": True, "dataset": conn.dataset}

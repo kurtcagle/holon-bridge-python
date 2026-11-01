@@ -58,6 +58,7 @@ from .. import delegation as dg
 from ..acl import authorize_query, check_replace, extract_graph_refs
 from ..deps import AnimusDep, ClientDep, ConnDep, SettingsDep
 from ..fuseki import FusekiError
+from ..trigger_hook import after_write
 from ..ingest import write_turtle_to_graph
 from ..turtle import TurtleSyntaxError, parse
 
@@ -223,4 +224,5 @@ async def drop_graph(
         await client.drop_graph(conn, iri)
     except FusekiError as exc:
         raise HTTPException(exc.status or 502, detail=exc.as_dict()) from exc
+    await after_write(client, conn, graphs=[iri], source=f"DELETE /graph <{iri}>")
     return {"ok": True, "dropped": iri, "dataset": conn.dataset}

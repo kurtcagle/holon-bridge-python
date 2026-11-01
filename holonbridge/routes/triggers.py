@@ -42,21 +42,23 @@ still require ``AnimusDep``, they just don't yet narrow by persona.
 
 from __future__ import annotations
 
-import re
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from .. import audit
-from ..acl import authorize_query, check_replace, check_write, is_admin
 from ..deps import AnimusDep, ClientDep, ConnDep, PersonasDep, RegistryDep
 from ..fuseki import FusekiError
-from ..named_queries import apply_query_params, load_named_queries
-from ..named_rules import RuleError, bind_rule, load_named_rules
-from ..params import ParameterError
-from ..sparql_kind import form
+from ..named_queries import load_named_queries
+from ..named_rules import load_named_rules
 from ..toolset import resolve_reachable
+from ..trigger_authz import (
+    TriggerDenied,
+    authorize_definition,
+    authorize_firing,
+    require_grant,
+)
 from ..trigger_registry import (
     InvalidTrigger,
     deletion_update,
@@ -110,13 +112,6 @@ class TriggerStatusRequest(BaseModel):
     status: str = Field(..., pattern="^(Active|Suspended|Deprecated)$")
 
 
-#: Stands in for the focus node when a rule is bound only to be inspected.
-_PROBE_FOCUS = "urn:holonbridge:trigger-probe"
-
-#: Write modes that reconcile a whole graph rather than add to it.
-_WHOLESALE_MODES = {"replace", "sync", "supersede"}
-
-
 def _not_found(trigger_id: str, available_ids: list[str]) -> HTTPException:
     return HTTPException(
         status.HTTP_404_NOT_FOUND,
@@ -126,6 +121,10 @@ def _not_found(trigger_id: str, available_ids: list[str]) -> HTTPException:
 
 
 # --- access -------------------------------------------------------------------
+#
+# The checks themselves live in ``trigger_authz`` so the firing path can ask the
+# same questions of the person who armed a trigger. These are the HTTP-shaped
+# wrappers: a TriggerDenied becomes the response it describes.
 
 
 def _query_fn(client, conn):
@@ -141,15 +140,45 @@ def _identified(animus) -> str:
     return animus.person
 
 
+def _http(exc: TriggerDenied) -> HTTPException:
+    if exc.status in (401, 403):
+        audit.annotate(reason=exc.reason)
+    return HTTPException(exc.status, detail=exc.detail)
+
+
 async def _require_grant(conn, client, animus, graph: str, *, replace: bool = False) -> None:
     person = _identified(animus)
-    check = check_replace if replace else check_write
-    decision = await check(_query_fn(client, conn), conn.holons_graph, person=person, target=graph)
-    if not decision.allowed:
-        audit.annotate(reason=decision.reason)
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN, detail=f"{decision.reason} (graph: {graph})"
+    try:
+        await require_grant(_query_fn(client, conn), conn, person, graph, replace=replace)
+    except TriggerDenied as exc:
+        raise _http(exc) from exc
+
+
+async def _authorize_firing(conn, client, animus, *, rule, review_required: bool) -> None:
+    person = _identified(animus)
+    try:
+        await authorize_firing(
+            _query_fn(client, conn), conn, person, rule=rule, review_required=review_required
         )
+    except TriggerDenied as exc:
+        raise _http(exc) from exc
+
+
+async def _authorize_definition(
+    conn, client, animus, personas, *, condition, rule, review_required: bool
+) -> list[str]:
+    person = _identified(animus)
+    try:
+        return await authorize_definition(
+            _query_fn(client, conn),
+            conn,
+            person,
+            condition=condition,
+            rule=rule,
+            review_required=review_required,
+        )
+    except TriggerDenied as exc:
+        raise _http(exc) from exc
 
 
 async def _resolve_parts(conn, client, animus, personas, condition_id: str, rule_id: str):
@@ -182,106 +211,6 @@ async def _resolve_parts(conn, client, animus, personas, condition_id: str, rule
             detail={"error": "unknown_rule", "id": rule_id, "available": reachable_rules},
         )
     return condition, rule
-
-
-async def _authorize_definition(
-    conn, client, animus, personas, *, condition, rule, review_required: bool
-) -> list[str]:
-    """Everything a trigger would later do as the bridge, checked against the
-    caller who is defining it. Returns warnings (non-fatal observations)."""
-    person = _identified(animus)
-    query_fn = _query_fn(client, conn)
-    warnings: list[str] = []
-
-    try:
-        condition_sparql = apply_query_params(condition, {}).sparql
-    except ParameterError as exc:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            detail={"error": "condition_needs_parameters", "message": str(exc)},
-        ) from exc
-    if form(condition_sparql) != "SELECT":
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error": "condition_not_select",
-                "message": f"condition {condition.id!r} is a {form(condition_sparql)}; "
-                "a trigger condition must be a SELECT projecting ?focus",
-            },
-        )
-    if "?focus" not in condition_sparql and "$focus" not in condition_sparql:
-        warnings.append(f"condition {condition.id!r} never mentions ?focus; it will match nothing")
-    if re.search(r"\bLIMIT\b", condition_sparql, re.IGNORECASE):
-        warnings.append(
-            f"condition {condition.id!r} carries a LIMIT; a truncated result looks like a "
-            "falling edge and re-arms the rows it cut off"
-        )
-
-    try:
-        rule_sparql = bind_rule(rule, {"$this": _PROBE_FOCUS})
-    except (RuleError, ParameterError) as exc:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            detail={"error": "rule_not_bindable", "message": str(exc)},
-        ) from exc
-    if form(rule_sparql) not in {"CONSTRUCT", "DESCRIBE"}:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error": "rule_not_construct",
-                "message": f"rule {rule.id!r} is a {form(rule_sparql)}; a rule must CONSTRUCT",
-            },
-        )
-    if not rule.runnable:
-        warnings.append(f"rule {rule.id!r} is {rule.status.lower()}; the trigger will fail until it is Active")
-
-    # The trigger reads both as the bridge, so the definer must be able to.
-    if not await is_admin(query_fn, conn.holons_graph, person=person):
-        for label, sparql, ident in (
-            ("condition", condition_sparql, condition.id),
-            ("rule", rule_sparql, rule.id),
-        ):
-            decision = await authorize_query(
-                query_fn,
-                conn.holons_graph,
-                person=person,
-                sparql_text=sparql,
-                persona_of_graph=conn.persona_for_graph,
-            )
-            if not decision.allowed:
-                audit.annotate(reason=decision.reason)
-                raise HTTPException(
-                    status.HTTP_403_FORBIDDEN,
-                    detail={
-                        "error": f"{label}_not_readable",
-                        "message": f"{label} {ident!r} reads something this caller may not read: "
-                        f"{decision.reason}",
-                    },
-                )
-
-    await _authorize_firing(conn, client, animus, rule=rule, review_required=review_required)
-    return warnings
-
-
-async def _authorize_firing(conn, client, animus, *, rule, review_required: bool) -> None:
-    """The write a firing performs. A reviewed trigger only stages a candidate
-    (approving it is its own gated write); an auto-executing one writes the
-    rule's target graph through the rule's own write mode."""
-    if review_required:
-        await _require_grant(conn, client, animus, conn.graph("candidates"))
-        return
-    target = rule.target_graph
-    if not target:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error": "rule_has_no_target",
-                "message": f"rule {rule.id!r} names no target graph, so it cannot run unreviewed",
-            },
-        )
-    await _require_grant(conn, client, animus, target)
-    if rule.write_mode.lower() in _WHOLESALE_MODES:
-        await _require_grant(conn, client, animus, target, replace=True)
 
 
 @router.get("/named-triggers")
@@ -418,6 +347,7 @@ async def register_named_trigger(
             description=body.description,
             watched_predicates=watched,
             registered_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            armed_by=animus.person,
         )
     except InvalidTrigger as exc:
         raise HTTPException(
@@ -476,7 +406,16 @@ async def set_named_trigger_status(
 
     audit.annotate(graphs=[registry])
     try:
-        await client.update(conn, status_update(registry, trig.iri, body.status))
+        await client.update(
+            conn,
+            status_update(
+                registry,
+                trig.iri,
+                body.status,
+                # Arming a trigger makes its access yours to answer for.
+                armed_by=animus.person if body.status == "Active" else None,
+            ),
+        )
     except FusekiError as exc:
         raise HTTPException(exc.status or 502, detail=exc.as_dict()) from exc
 
