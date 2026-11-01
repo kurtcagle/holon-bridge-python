@@ -77,7 +77,9 @@ async def ingest(
     Supply exactly one of ``turtle`` (inline Turtle), ``databook`` (inline
     DataBook document — extracts the primary ``turtle``/``turtle12`` block),
     ``source_graph`` (already in the store), or ``source_url`` (fetched once,
-    then sniffed as a DataBook or raw Turtle). Validation runs under the same
+    then sniffed as a DataBook or raw Turtle; https and public addresses only,
+    unless the operator has listed the host in ``FETCH_ALLOWLIST``, and a
+    refused URL fails the ingest with ``refused: ...``). Validation runs under the same
     gate as push, so ingestion is not a way around it — including
     ``reduction_rule_id``, which reduces the candidate write to its current
     state before validating, the same as on ``push_turtle``.

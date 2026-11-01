@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.24
+version: 1.0.25
 created: 2026-09-27
 updated: 2026-11-01
 author:
@@ -45,6 +45,19 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-11-01 (ingest from a URL: outbound policy)
+
+- **`source_url` can no longer reach anywhere.** `POST /ingest` / the `ingest`
+  MCP tool fetched any URL with redirects followed and no size limit, so a graph
+  writer (or an LLM steered by a document) could aim the bridge at Fuseki, the
+  cloud metadata address or the private network. The URL and every redirect hop
+  now pass the webhook egress policy (https, public addresses, no credentials in
+  the URL) unless `FETCH_ALLOWLIST` lists the host, in which case only listed
+  hosts are reachable. The body is capped by `FETCH_MAX_BYTES` (default 10 MiB,
+  after decompression), and errors name the kind of failure rather than the
+  library's detail. **Breaking** for plain-`http`, private-address and
+  `user:pass@` URLs. DNS rebinding is not closed (same limit as webhooks).
 
 ### 2026-11-01 (agent calls: scheduler gates and audit)
 
@@ -572,6 +585,12 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-11-01-g a hb:ReleaseNote ;
+    dcterms:date "2026-11-01"^^xsd:date ;
+    rdfs:label "Ingest source_url passes the outbound egress policy; size cap" ;
+    dcterms:description "fetch_source (used by /ingest source_url) now checks the URL and each of up to three redirect hops against the egress policy (https only, public addresses only, no credentials in the URL; or the operator's FETCH_ALLOWLIST, which restricts the fetch to listed hosts and exempts them from the https/public rules). The body is streamed and refused past FETCH_MAX_BYTES (default 10 MiB, counted after decompression). Error text names the failure kind, not the client library's detail, and strips userinfo. Breaking for plain-http, private-address and credentialed URLs. DNS rebinding remains an open limit." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/78> .
 
 hb:release-2026-11-01-f a hb:ReleaseNote ;
     dcterms:date "2026-11-01"^^xsd:date ;

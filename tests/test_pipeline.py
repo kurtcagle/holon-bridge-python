@@ -802,6 +802,25 @@ def test_ingest_source_url_fetch_failure_is_recorded(client, monkeypatch):
     assert "HTTP 404" in response.json()["detail"]["message"]
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://169.254.169.254/latest/meta-data/",
+        "https://127.0.0.1:3030/ds/sparql",
+        "http://example.org/plain.ttl",
+    ],
+)
+def test_ingest_source_url_cannot_reach_internal_or_plain_http_targets(client, stub, url):
+    # The real fetch runs here (no monkeypatch): the policy is what is under test.
+    response = client.post(
+        "/ingest", json={"source_url": url, "graph_iri": "urn:ds:holons"}, headers=auth()
+    )
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["error"] == "ingest_failed" and "refused" in detail["message"]
+    assert stub.pushed == []  # nothing was written
+
+
 def test_ingest_still_needs_exactly_one_source_with_new_shapes(client):
     too_many = client.post(
         "/ingest",
