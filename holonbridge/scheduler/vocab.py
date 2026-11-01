@@ -32,7 +32,15 @@ SCHEDULER_GRAPHS: Final = (
 READ_ONLY_QUERY: Final = "ReadOnlyQuery"
 GRAPH_WRITE: Final = "GraphWrite"
 LLM_INVOCATION: Final = "LLMInvocation"
-ACTION_CLASSES: Final = (READ_ONLY_QUERY, GRAPH_WRITE, LLM_INVOCATION)
+#: CHANGED 2026-11-01: sending calls to external agents. An outbound network
+#: call carrying dataset content is neither a read nor a graph write, so a
+#: persona needs this capability of its own.
+AGENT_CALL: Final = "AgentCall"
+ACTION_CLASSES: Final = (READ_ONLY_QUERY, GRAPH_WRITE, LLM_INVOCATION, AGENT_CALL)
+
+#: Maintenance jobs that send calls to agents. A task running one *needs*
+#: ``AgentCall`` whatever class it declared: see ``Task.required_class``.
+AGENT_DISPATCH_JOBS: Final = ("agent-dispatch", "dispatch-agent-calls")
 
 #: Lifecycle, mirroring hb:ruleStatus so the two read the same way.
 TASK_STATUSES: Final = ("Active", "Suspended", "Deprecated")

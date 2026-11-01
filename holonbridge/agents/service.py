@@ -44,7 +44,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 from .. import write_lock
-from ..config import Settings
+from ..config import Settings, get_settings
 from ..conn import Conn
 from ..fuseki import FusekiClient, FusekiError
 from ..named_queries import NamedQuery, apply_query_params
@@ -52,6 +52,7 @@ from ..params import ParameterError
 from ..sparql_kind import form
 from ..trigger_authz import TriggerDenied, authorize_reads, require_grant
 from ..turtle import TurtleSyntaxError, looks_like_rdf12, parse
+from . import audit as agent_audit
 from . import ledger
 from .ledger import CallStore
 from .model import (
@@ -74,6 +75,9 @@ from .sender import AgentSender, HttpAgentSender, Reply, SendFailed
 
 log = logging.getLogger("holonbridge.agents")
 
+#: Why a call was not sent when its audit entry could not be written.
+AUDIT_UNAVAILABLE = "the audit log could not be written, so the call was not sent"
+
 QueryFn = Callable[[str], Awaitable[dict]]
 
 #: How much of an agent's reply is kept in the ledger when it is an error.
@@ -91,6 +95,12 @@ class CallStateError(RuntimeError):
 
 class CallInvalid(ValueError):
     """The request cannot become a call as given. Safe to show the caller."""
+
+
+class QueueFull(CallInvalid):
+    """Too many calls to one endpoint are already open. A kind of
+    :class:`CallInvalid` so every caller already handles it, but nothing is wrong
+    with the request itself: a route says 429, not 400."""
 
 
 def now() -> str:
@@ -251,6 +261,15 @@ async def request_call(
     except Exception as exc:  # EndpointRefused -- reported as a property of the request
         raise CallInvalid(f"endpoint {endpoint.id!r} cannot be used: {exc}") from exc
 
+    cap = (settings or get_settings()).agent_max_open_calls
+    if cap:
+        open_now = await (store or CallStore(client)).open_count(conn, endpoint.id)
+        if open_now >= cap:
+            raise QueueFull(
+                f"{open_now} calls to endpoint {endpoint.id!r} are already open "
+                f"(AGENT_MAX_OPEN_CALLS={cap}); approve, reject or dispatch some first"
+            )
+
     context_sparql = bind_context(context_query, focus) if context_query else None
 
     async def query_fn(q: str) -> dict:
@@ -299,6 +318,17 @@ async def request_call(
         approved_at=requested_at if queued else "",
     )
     await (store or CallStore(client)).put(conn, call)
+    via = (
+        f"trigger {via_trigger}" if via_trigger
+        else f"pipeline {via_pipeline}/{via_stage}" if via_pipeline
+        else "request"
+    )
+    await agent_audit.record(
+        client, conn, "placed", "allowed", call,
+        actor=requested_by, endpoint=endpoint,
+        reason=f"{via}; {'queued by policy' if queued else 'awaiting approval'}",
+        authorised_reason="policy approval" if queued else None,
+    )
     return call
 
 
@@ -369,9 +399,15 @@ async def approve_call(
         },
         store=store,
     )
+    await agent_audit.record(
+        client, conn, "approved", "allowed", call, actor=approver, endpoint=endpoint,
+        reason=f"requested by {call.requested_by}",
+    )
     if not send_now:
         return call
-    return await send_call(client, conn, call_id, endpoint=endpoint, sender=sender, store=store)
+    return await send_call(
+        client, conn, call_id, endpoint=endpoint, sender=sender, store=store, source="approval"
+    )
 
 
 async def reject_call(
@@ -383,7 +419,7 @@ async def reject_call(
     reason: str = "",
     store: CallStore | None = None,
 ) -> Call:
-    return await _transition(
+    call = await _transition(
         client, conn, call_id,
         allowed=(PENDING, APPROVED),
         action="reject",
@@ -393,6 +429,11 @@ async def reject_call(
         },
         store=store,
     )
+    await agent_audit.record(
+        client, conn, "rejected", "allowed", call, actor=rejecter,
+        reason=reason[:200] or None,
+    )
+    return call
 
 
 async def retry_call(
@@ -418,7 +459,9 @@ async def retry_call(
         },
         store=store,
     )
-    return await send_call(client, conn, call_id, endpoint=endpoint, sender=sender, store=store)
+    return await send_call(
+        client, conn, call_id, endpoint=endpoint, sender=sender, store=store, source="retry"
+    )
 
 
 async def send_call(
@@ -429,8 +472,14 @@ async def send_call(
     endpoint: Endpoint,
     sender: AgentSender | None = None,
     store: CallStore | None = None,
+    source: str = "approval",
 ) -> Call:
-    """Claim an ``Approved`` call, send it, and settle the outcome."""
+    """Claim an ``Approved`` call, send it, and settle the outcome.
+
+    The ``send`` audit entry is written after the claim and before the send. If
+    the audit level calls for it and it cannot be written, the call is failed
+    unsent (it can be retried once the log is back): see ``agents/audit.py``.
+    """
     store = store or CallStore(client)
     sender = sender or HttpAgentSender()
 
@@ -444,15 +493,30 @@ async def send_call(
     # ``replace`` updates the call it is handed, so this already reads Sending.
     call = claimed
 
+    sender_of_record = call.approved_by or call.requested_by
+    if not await agent_audit.record(
+        client, conn, "send", "allowed", call, actor=sender_of_record, endpoint=endpoint,
+        reason=f"{source}; requested by {call.requested_by}",
+    ):
+        return await _fail(store, conn, call, AUDIT_UNAVAILABLE)
+
     try:
         reply = await sender.send(endpoint, call, call.body)
     except SendFailed as exc:
-        return await _fail(store, conn, call, str(exc))
+        done = await _fail(store, conn, call, str(exc))
     except Exception as exc:  # noqa: BLE001 - a sender bug must not strand the call in Sending
         log.exception("agent call %s: sender raised", call.id)
-        return await _fail(store, conn, call, f"sender error: {type(exc).__name__}")
+        done = await _fail(store, conn, call, f"sender error: {type(exc).__name__}")
+    else:
+        done = await _settle(client, conn, store, call, endpoint, reply)
 
-    return await _settle(client, conn, store, call, endpoint, reply)
+    ok = done.status == RESPONDED
+    await agent_audit.record(
+        client, conn, "result", "allowed" if ok else "error", done,
+        actor=sender_of_record, endpoint=endpoint, status=done.http_status or (200 if ok else 502),
+        reason=(done.response_summary if ok else done.error)[:200] or None,
+    )
+    return done
 
 
 async def _fail(
@@ -551,6 +615,7 @@ async def dispatch_approved(
     sender: AgentSender | None = None,
     limit: int = 10,
     store: CallStore | None = None,
+    source: str = "dispatch",
 ) -> dict[str, Any]:
     """Send calls that were approved by policy. Run by the scheduler, never
     inside a request.
@@ -575,6 +640,7 @@ async def dispatch_approved(
                 client, conn, store, call,
                 f"endpoint {call.endpoint_id!r} is "
                 f"{'unknown' if endpoint is None else endpoint.status.lower()}",
+                source=source,
             )
             failed += 1
             continue
@@ -586,6 +652,7 @@ async def dispatch_approved(
             await _claim_and_fail(
                 client, conn, store, call,
                 f"requester <{call.requested_by}> may no longer place this call: {exc.reason}",
+                source=source,
             )
             failed += 1
             continue
@@ -593,9 +660,14 @@ async def dispatch_approved(
             continue  # could not find out; leave it queued for the next run
 
         try:
-            done = await send_call(client, conn, call.id, endpoint=endpoint, sender=sender, store=store)
+            done = await send_call(
+                client, conn, call.id, endpoint=endpoint, sender=sender, store=store, source=source
+            )
         except CallStateError:
             continue  # someone else took it
+        if done.error == AUDIT_UNAVAILABLE:
+            failed += 1  # claimed but never sent: not an outbound call, so not counted as one
+            continue
         sent += 1
         if done.status == RESPONDED:
             responded += 1
@@ -605,7 +677,8 @@ async def dispatch_approved(
 
 
 async def _claim_and_fail(
-    client: FusekiClient, conn: Conn, store: CallStore, call: Call, reason: str
+    client: FusekiClient, conn: Conn, store: CallStore, call: Call, reason: str,
+    *, source: str = "dispatch",
 ) -> None:
     """Fail a queued call without sending it. Goes through the same claim so it
     cannot race a concurrent sender."""
@@ -619,3 +692,7 @@ async def _claim_and_fail(
     except CallStateError:
         return
     log.warning("agent call %s not sent: %s", call.id, reason)
+    await agent_audit.record(
+        client, conn, "dispatch refused", "denied", call, actor=call.requested_by,
+        status=403, reason=f"{source}: {reason}"[:300],
+    )

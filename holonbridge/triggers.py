@@ -943,6 +943,11 @@ async def _definer_denied(
         return f"could not verify definer <{trig.armed_by}>: {exc}"
 
     _recheck_cache[key] = (now, verdict)
+    if verdict and trig.is_agent:
+        # A new refusal, not a cached one: leave a trace in the audit log.
+        from .agents.audit import record_trigger_refused  # noqa: PLC0415
+
+        await record_trigger_refused(client, conn, trig, verdict)
     return verdict
 
 

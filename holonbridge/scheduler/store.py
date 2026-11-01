@@ -275,19 +275,27 @@ WHERE  {{ OPTIONAL {{ GRAPH <{TASKS_GRAPH}> {{ <{task.iri}> <{SCHED}lastFired> ?
     async def firings_today(
         self, conn: Conn, *, subject_iri: str, predicate: str, day: str
     ) -> int:
-        """Count billable firings for a task or persona on a given day."""
+        """Billable units used by a task or persona on a given day.
+
+        One per firing, except where a firing recorded ``sched:units`` (an
+        ``agent-dispatch`` firing uses one per call sent). Records written before
+        units existed have none and count as one each.
+        """
         outcomes = ", ".join(f'"{o}"' for o in BILLABLE_OUTCOMES)
         query = graph_query(
-            "SELECT (COUNT(?rec) AS ?c)",
+            "SELECT (SUM(COALESCE(?units, 1)) AS ?c)",
             PROVENANCE_GRAPH,
             f"""    ?rec <{SCHED}{predicate}> <{subject_iri}> ;
          <{SCHED}firedAt> ?ts ;
          <{SCHED}outcome> ?outcome .
+    OPTIONAL {{ ?rec <{SCHED}units> ?units }}
     FILTER( STRSTARTS(STR(?ts), "{day}") )
     FILTER( ?outcome IN ({outcomes}) )""",
         )
         rows = (await self._client.select(conn, query))["results"]["bindings"]
-        return int(rows[0]["c"]["value"]) if rows else 0
+        if not rows or "c" not in rows[0]:
+            return 0
+        return int(float(rows[0]["c"]["value"]))
 
     # --- provenance -----------------------------------------------------------
 
@@ -304,6 +312,11 @@ WHERE  {{ OPTIONAL {{ GRAPH <{TASKS_GRAPH}> {{ <{task.iri}> <{SCHED}lastFired> ?
                 f"      <{SCHED}triplesWritten> {literal(str(firing.triples_written), datatype=INT)} ;",
                 f"      <{SCHED}durationMs> {literal(str(firing.duration_ms), datatype=INT)} ;",
             ]
+            + (
+                [f"      <{SCHED}units> {literal(str(firing.units), datatype=INT)} ;"]
+                if firing.units != 1
+                else []
+            )
             + (
                 [f"      <{SCHED}persona> <{firing.persona_iri}> ;"]
                 if firing.persona_iri

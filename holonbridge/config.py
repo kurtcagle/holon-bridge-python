@@ -204,6 +204,11 @@ class Settings:
     # starting with this prefix. Without it, anyone who can register an
     # endpoint could aim ``env:DATABASE_PASSWORD`` at a host of their choosing.
     agent_credential_prefix: str = "HB_AGENT_"
+    # Most calls that may be open (awaiting approval, queued, or sending) to one
+    # endpoint at a time; a request beyond that is refused with 429. A trigger
+    # whose condition matches thousands of nodes would otherwise write thousands
+    # of calls, each carrying a request body, into the ledger. 0 = no limit.
+    agent_max_open_calls: int = 200
     # Creation is refused once the backend already hosts this many datasets.
     # There is deliberately no way to drop one through the bridge, so this is
     # the backstop against a runaway loop (or a mistaken script) filling the
@@ -303,6 +308,7 @@ class Settings:
             agent_credential_prefix=(
                 os.getenv("AGENT_CREDENTIAL_PREFIX") or "HB_AGENT_"
             ).strip(),
+            agent_max_open_calls=max(0, int(os.getenv("AGENT_MAX_OPEN_CALLS", "200"))),
             max_datasets=int(os.getenv("MAX_DATASETS", "50")),
             snapshot_dir=Path(os.environ["SNAPSHOT_DIR"]) if os.getenv("SNAPSHOT_DIR") else None,
             snapshot_max_bytes=int(os.getenv("SNAPSHOT_MAX_BYTES", "50000000")),

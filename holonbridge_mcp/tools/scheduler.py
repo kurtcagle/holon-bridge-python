@@ -44,10 +44,17 @@ async def create_scheduled_task(
 
     Declare exactly one action: ``sparql``, ``rule``, ``pipeline``,
     ``projection`` (fire a projection hook), ``maintenance``
-    (``projection-sweep``), or ``payload``.
+    (``projection-sweep``, ``trigger-sweep``, or ``agent-dispatch``), or
+    ``payload``.
     ``dataset_scope`` is the dataset the task acts on — distinct from the admin
     dataset its definition lives in. A task naming a persona may only perform
     action classes in that persona's capability set.
+
+    ``agent-dispatch`` sends the agent calls a policy approved. It must be
+    created with ``action_class="AgentCall"``, a persona needs that capability
+    to run it whatever class the task declares, and the ODRL daily ``count``
+    on its task or persona policy bounds the *calls sent* per day, not the
+    number of times the job ran.
     """
     return await _call(
         "POST",
