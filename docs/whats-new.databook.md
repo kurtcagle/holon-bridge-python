@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.20
+version: 1.0.21
 created: 2026-09-27
 updated: 2026-11-01
 author:
@@ -45,6 +45,23 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-11-01 (trigger registration)
+
+- **Triggers can now be registered, re-statused and deleted through the
+  bridge: `POST /named-trigger`, `POST /named-trigger/{id}/status`,
+  `DELETE /named-trigger/{id}` (MCP: `register_named_trigger`,
+  `set_named_trigger_status`, `delete_named_trigger`).** Previously a trigger
+  could only be installed by pushing hand-authored Turtle. A trigger acts later
+  as the bridge with nobody calling it, so registration checks that the caller
+  could do what it will do: write on the registry; a reachable SELECT condition
+  and CONSTRUCT rule that the caller may read; write on the candidates graph
+  for a reviewed trigger, or write (and replace, for wholesale rules) on the
+  rule's target graph for an auto-executing one. Re-activating re-checks.
+- **Manual trigger evaluation is scoped and gated.** `POST
+  /named-trigger/{id}/evaluate` ran every Active trigger of the same kind and
+  filtered the answer, so evaluating one fired the others. It now runs only
+  the one trigger, and needs the write access a firing exercises.
 
 ### 2026-11-01
 
@@ -489,6 +506,11 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-11-01-c a hb:ReleaseNote ;
+    dcterms:date "2026-11-01"^^xsd:date ;
+    rdfs:label "Named-trigger registration API with registration-time ACL" ;
+    dcterms:description "POST /named-trigger, POST /named-trigger/{id}/status and DELETE /named-trigger/{id}, with MCP tools register_named_trigger, set_named_trigger_status and delete_named_trigger. Registration is definer's-rights: the caller needs write on the trigger registry, a reachable SELECT condition and CONSTRUCT rule they may read, and write access to the candidates graph (reviewed) or the rule's target graph, plus replace for wholesale rules (auto-executing). Re-activation re-checks. Manual evaluation now runs only the named trigger and needs the same write access." .
 
 hb:release-2026-11-01-a a hb:ReleaseNote ;
     dcterms:date "2026-11-01"^^xsd:date ;

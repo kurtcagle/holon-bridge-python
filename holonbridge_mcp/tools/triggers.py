@@ -9,6 +9,12 @@ periodic "trigger-sweep" maintenance job. A reviewRequired=true trigger's
 firing stages its rule's literal output as a Turtle candidate (see
 ``tools/candidates.py``) instead of writing it immediately.
 
+CHANGED 2026-11-01: added ``register_named_trigger``,
+``set_named_trigger_status`` and ``delete_named_trigger``. Registration is
+definer's rights -- the trigger later acts as the bridge, with nobody calling
+it -- so the bridge checks at registration that the caller could do what the
+trigger will do (see ``routes/triggers.py``).
+
 Not yet Toolset/persona-reachability-gated on the bridge side, same as
 named-queries/named-rules were before PR #9 -- routes/triggers.py notes
 this as deferred, not dropped.
@@ -75,3 +81,71 @@ async def evaluate_named_trigger(
 async def reload_named_triggers() -> dict:
     """Re-read the named-trigger registry, discarding the cached copy."""
     return await _call("POST", "/named-triggers/reload")
+
+
+@mcp.tool()
+async def register_named_trigger(
+    id: str,
+    trigger_kind: str,
+    condition: str,
+    on_fire: str,
+    review_required: bool = True,
+    status: str = "Active",
+    label: str | None = None,
+    description: str | None = None,
+    watched_predicates: list[str] | None = None,
+) -> dict:
+    """Register (or overwrite) a named trigger.
+
+    ``trigger_kind`` is ``StateTrigger`` (evaluated after a fluent write) or
+    ``TemporalTrigger`` (evaluated by the scheduler's trigger-sweep).
+    ``condition`` is the id of a registered named query: a SELECT projecting
+    ``?focus``. ``on_fire`` is the id of a registered named rule, bound with
+    ``$this`` set to each focus node. A focus fires once while its condition
+    holds, and again after the condition has gone false and true.
+
+    ``review_required`` (default true) stages the rule's output in the
+    candidate queue for approval. ``false`` runs the rule for real, through
+    its own write mode, with nobody reviewing it first.
+
+    The trigger will run as the bridge, not as you, so the bridge checks now
+    what you could do yourself: write access to the trigger registry; read
+    access to everything the condition and rule read; and, for
+    ``review_required=false``, write access to the rule's target graph (and
+    replace access when the rule reconciles wholesale). A condition or rule
+    you cannot reach is reported as unknown.
+    """
+    return await _call(
+        "POST",
+        "/named-trigger",
+        json_body={
+            "id": id,
+            "trigger_kind": trigger_kind,
+            "condition": condition,
+            "on_fire": on_fire,
+            "review_required": review_required,
+            "status": status,
+            "label": label,
+            "description": description,
+            "watched_predicates": watched_predicates or [],
+        },
+    )
+
+
+@mcp.tool()
+async def set_named_trigger_status(trigger_id: str, status: str) -> dict:
+    """Set a trigger to ``Active``, ``Suspended`` or ``Deprecated``.
+
+    Making a trigger Active re-runs the registration checks against you: a
+    switch that arms something is not a lesser act than registering it.
+    """
+    return await _call(
+        "POST", f"/named-trigger/{trigger_id}/status", json_body={"status": status}
+    )
+
+
+@mcp.tool()
+async def delete_named_trigger(trigger_id: str) -> dict:
+    """Remove a trigger. Needs replace access to the trigger registry. Its
+    firing history stays in the ledger."""
+    return await _call("DELETE", f"/named-trigger/{trigger_id}")

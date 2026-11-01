@@ -157,6 +157,13 @@ Invoke-RestMethod "$env:HB/graphs"   -Headers $h | Select-Object -Expand graphs
 | `GET` | `/scheduler/quarantine` | Proposals held back by validation |
 | `POST` | `/scheduler/reload` | Re-read tasks and personas |
 | `POST` | `/scheduler/tick` | Run one pass immediately |
+| `GET` | `/named-triggers` | Registered triggers, `?trigger_status=` |
+| `GET` | `/named-trigger/{id}` | One trigger |
+| `POST` | `/named-trigger` | Register or overwrite a trigger (checked as below) |
+| `POST` | `/named-trigger/{id}/status` | Suspend, resume, deprecate (resuming re-checks) |
+| `DELETE` | `/named-trigger/{id}` | Remove a trigger; needs replace on the registry |
+| `POST` | `/named-trigger/{id}/evaluate` | Evaluate this one trigger now |
+| `POST` | `/named-triggers/reload` | Re-read the trigger registry |
 | `GET` | `/projection/hooks` | Registered hooks, with problems flagged |
 | `GET` | `/projection/hook/{id}` | Hook detail and watermark size |
 | `POST` | `/projection/hook` | Register a hook |
@@ -815,6 +822,51 @@ focus matches it fires again. Details worth knowing:
 - The candidate's `hev:proposedFromFiring` now points at the firing that was
   actually recorded; the two IRIs used to be minted separately, so the link
   dangled.
+
+### Registering a trigger, and why the checks happen then
+
+A trigger is definer's rights in the strictest sense: once it exists the bridge
+evaluates its condition and runs (or stages) its rule *as itself*, on a write
+or a sweep, with nobody calling. So there is no caller to check at firing time,
+and the checks happen at `POST /named-trigger` (MCP: `register_named_trigger`)
+instead. The trigger names a **condition** (a registered named SELECT projecting
+`?focus`) and an **action** (a registered named rule, bound with `$this` set to
+each focus), and registering requires that the caller could do what the trigger
+will do:
+
+- `holon:grantsWrite` on the trigger registry (`urn:{dataset}:named-triggers`).
+- Both the condition and the rule must exist and be reachable from the caller's
+  persona. One the caller cannot reach is reported as unknown, as elsewhere, so
+  a restricted tool never confirms its own existence. The condition must be a
+  SELECT and the rule a CONSTRUCT.
+- The caller must be able to *read* what the condition and the rule read (the
+  same graph-level check as an ad-hoc query), since the trigger would otherwise
+  read it as the bridge on their behalf. Admins bypass.
+- A **reviewed** trigger (`review_required` true, the default) stages its
+  output as a candidate, so the caller needs write access to the candidates
+  graph; approving the candidate is its own gated write by the approver, and
+  only ever merges.
+- An **auto-executing** trigger (`review_required` false) writes with nobody
+  reviewing it, so the caller needs write access to the rule's target graph,
+  and replace access as well when the rule reconciles wholesale
+  (`Replace`, `Sync`, `Supersede`).
+
+Making a trigger Active again (`POST /named-trigger/{id}/status`) re-runs the
+same checks, so a suspended auto-executing trigger cannot be switched back on by
+someone who could not have registered it; suspending or deprecating needs only
+the registry grant. Deleting needs replace on the registry. Overwriting a
+trigger keeps its IRI, so its firing history carries over: change a trigger's
+condition and a focus that fired under the old one is still treated as handled.
+
+Manual evaluation (`POST /named-trigger/{id}/evaluate`) now runs only the
+trigger asked for (it used to run every Active trigger of the same kind and
+filter the answer) and needs the same write access a firing exercises.
+
+Not covered: the list and get routes still do not narrow by persona, and a
+trigger evaluated by the automatic path (a fluent write, the scheduler's
+`trigger-sweep`) runs without re-checking its definer, who may since have lost
+the access they had at registration. Closing that needs the definer recorded on
+the trigger and re-checked at firing, which is a larger change.
 
 ### Three guards against runaway firing
 
