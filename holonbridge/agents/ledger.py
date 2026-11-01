@@ -95,11 +95,12 @@ class CallStore:
         node = call_node(conn, call.id)
         values = {attr: getattr(call, attr) for attr in _PROPS}
         pairs = [f"a <{HB}{CALL_CLASS_SUFFIX}>"] + _pairs(values)
+        body = " ;\n    ".join(pairs)  # not inline: a backslash in an f-string expression is a SyntaxError before 3.12
         await self._client.update(
             conn,
             f"""INSERT DATA {{ GRAPH <{graph}> {{
 <{node}>
-    {" ;\n    ".join(pairs)} .
+    {body} .
 }} }}""",
         )
 
@@ -118,9 +119,10 @@ class CallStore:
         statement = f"""DELETE {{ GRAPH <{graph}> {{ <{node}> ?p ?o }} }}
 WHERE {{ GRAPH <{graph}> {{ <{node}> ?p ?o . VALUES ?p {{ {predicates} }} }} }}"""
         if insert:
+            body = " ;\n    ".join(insert)
             statement += f""" ;
 INSERT DATA {{ GRAPH <{graph}> {{
-<{node}> {" ;\n    ".join(insert)} .
+<{node}> {body} .
 }} }}"""
         await self._client.update(conn, statement)
         for attr, value in changes.items():
