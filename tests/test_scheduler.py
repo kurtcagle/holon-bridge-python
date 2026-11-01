@@ -23,6 +23,8 @@ from holonbridge.scheduler.store import PolicyUnresolvable, SchedulerStore
 from holonbridge.scheduler.vocab import PROVENANCE_GRAPH, SCHED, TASKS_GRAPH, graph_query
 from holonbridge.server import create_app
 
+from ._identity import IdentityStub, auth as identity_auth
+
 TOKEN = "test-token"
 HB = "https://w3id.org/holonbridge/"
 ODRL = "http://www.w3.org/ns/odrl/2/"
@@ -63,8 +65,10 @@ def persona_rows(*capabilities: str) -> list[dict]:
     return rows
 
 
-class SchedStub:
+class SchedStub(IdentityStub):
     def __init__(self) -> None:
+        super().__init__()
+        self.admin = True  # the route tests are about the scheduler, not the gate
         self.tasks = task_rows()
         self.personas = persona_rows("ReadOnlyQuery", "GraphWrite")
         self.policy_count: str | None = "10"
@@ -77,6 +81,9 @@ class SchedStub:
         self.activity_rows: list[dict] = []
 
     async def select(self, conn, query, *, default_graph=None):
+        infra = self.infra_select(query)
+        if infra is not None:
+            return infra
         self.queries.append(query)
         if "odrl:permission" in query:
             if self.policy_raises:
@@ -146,7 +153,7 @@ async def scheduler(stub: SchedStub) -> Scheduler:
 
 
 def auth() -> dict[str, str]:
-    return {"Authorization": f"Bearer {TOKEN}"}
+    return identity_auth(TOKEN)
 
 
 # --- the structural guard -----------------------------------------------------
@@ -468,16 +475,17 @@ async def test_task_writes_escape_windows_paths(stub):
 # --- routes -------------------------------------------------------------------
 
 
-def test_routes_report_503_when_the_scheduler_is_off():
+def test_routes_report_503_when_the_scheduler_is_off(stub):
     app = create_app(Settings(bearer_token=TOKEN, scheduler_enabled=False))
     with TestClient(app) as test_client:
+        app.state.fuseki = stub
         response = test_client.get("/scheduler/status", headers=auth())
         assert response.status_code == 503
         assert response.json()["detail"]["error"] == "scheduler_disabled"
 
 
 def test_activity_refuses_a_since_without_a_timezone(stub):
-    app = create_app(Settings(bearer_token=TOKEN))
+    app = create_app(Settings(bearer_token=TOKEN, fuseki_dataset="admin"))
     with TestClient(app) as test_client:
         app.state.fuseki = stub
         app.state.scheduler = Scheduler(stub, admin_conn=admin_conn())
@@ -495,7 +503,7 @@ def test_activity_refuses_a_since_without_a_timezone(stub):
 
 
 def test_create_task_needs_exactly_one_action(stub):
-    app = create_app(Settings(bearer_token=TOKEN))
+    app = create_app(Settings(bearer_token=TOKEN, fuseki_dataset="admin"))
     with TestClient(app) as test_client:
         app.state.fuseki = stub
         app.state.scheduler = Scheduler(stub, admin_conn=admin_conn())
@@ -511,18 +519,62 @@ def test_create_task_needs_exactly_one_action(stub):
         assert none.status_code == 400 and both.status_code == 400
 
 
-def test_scheduler_routes_are_pinned_to_the_admin_dataset(stub):
-    app = create_app(Settings(bearer_token=TOKEN))
+def test_scheduler_routes_refuse_a_request_aimed_at_another_dataset(stub):
+    """Identity is resolved per dataset, so an admin of 'worldtest' says nothing
+    about the process-level scheduler on 'admin'."""
+    app = create_app(Settings(bearer_token=TOKEN, fuseki_dataset="admin"))
     with TestClient(app) as test_client:
         app.state.fuseki = stub
         app.state.scheduler = Scheduler(stub, admin_conn=admin_conn())
 
-        body = test_client.get(
+        response = test_client.get(
             "/scheduler/status",
             headers={**auth(), "X-Dataset-Override": "worldtest"},
-        ).json()
-        assert body["dataset"] == "admin"
-        assert body["callerDataset"] == "worldtest"
+        )
+        assert response.status_code == 403
+        assert response.json()["detail"]["error"] == "scheduler_requires_admin_dataset"
+
+        ok = test_client.get("/scheduler/status", headers=auth())
+        assert ok.status_code == 200
+        assert ok.json()["dataset"] == "admin"
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("get", "/scheduler/status", None),
+        ("get", "/scheduler/tasks", None),
+        ("get", "/scheduler/task/census", None),
+        ("post", "/scheduler/task", {"id": "x", "sparql": "SELECT * WHERE {?s ?p ?o}"}),
+        ("post", "/scheduler/task/census/status", {"status": "Suspended"}),
+        ("post", "/scheduler/task/census/fire", None),
+        ("get", "/scheduler/activity", None),
+        ("get", "/scheduler/quarantine", None),
+        ("post", "/scheduler/reload", None),
+        ("post", "/scheduler/tick", None),
+    ],
+)
+def test_every_scheduler_route_is_admin_only(stub, method, path, body):
+    stub.admin = False
+    app = create_app(Settings(bearer_token=TOKEN, fuseki_dataset="admin"))
+    with TestClient(app) as test_client:
+        app.state.fuseki = stub
+        app.state.scheduler = Scheduler(stub, admin_conn=admin_conn())
+        response = getattr(test_client, method)(
+            path, headers=auth(), **({"json": body} if body is not None else {})
+        )
+    assert response.status_code == 403, path
+    assert response.json()["detail"]["error"] == "admin_required"
+    assert stub.updates == []  # nothing was written on a refused request
+
+
+def test_the_scheduler_routes_need_an_identity(stub):
+    app = create_app(Settings(bearer_token=TOKEN, fuseki_dataset="admin"))
+    with TestClient(app) as test_client:
+        app.state.fuseki = stub
+        app.state.scheduler = Scheduler(stub, admin_conn=admin_conn())
+        bare = {"Authorization": f"Bearer {TOKEN}"}
+        assert test_client.get("/scheduler/status", headers=bare).status_code == 401
 
 
 # --- proposer -----------------------------------------------------------------

@@ -17,6 +17,8 @@ from holonbridge.projection import ProjectionError, ProjectionHook, ProjectionRu
 from holonbridge.projection.vocab import scope_graph
 from holonbridge.server import create_app
 
+from ._identity import IdentityStub, auth as identity_auth
+
 TOKEN = "test-token"
 PROJ = "https://w3id.org/holon/projection#"
 
@@ -43,10 +45,11 @@ def hook_rows(**overrides: str) -> list[dict]:
     return [_row(h=iri, p=f"{PROJ}{k}", o=v) for k, v in props.items() if v]
 
 
-class ProjStub:
+class ProjStub(IdentityStub):
     """Answers delta counts from a scripted plan and records every write."""
 
     def __init__(self) -> None:
+        super().__init__()
         self.hooks = hook_rows()
         self.additions = 5
         self.retractions = 2
@@ -58,6 +61,9 @@ class ProjStub:
         self.delivery_rows: list[dict] = []
 
     async def select(self, conn, query, *, default_graph=None):
+        infra = self.infra_select(query)
+        if infra is not None:
+            return infra
         if "COUNT(*)" in query:
             if "NOT EXISTS" not in query:
                 return {"results": {"bindings": [{"n": {"value": str(self.slice_size)}}]}}
@@ -155,7 +161,7 @@ def client(stub: ProjStub):
 
 
 def auth() -> dict[str, str]:
-    return {"Authorization": f"Bearer {TOKEN}"}
+    return identity_auth(TOKEN)
 
 
 # --- the delta ----------------------------------------------------------------
@@ -426,3 +432,149 @@ def test_sweep_route(client, stub):
     ).json()
     assert body["ok"] is True
     assert "cutoff" in body
+
+
+# --- access control -----------------------------------------------------------
+
+NEW_HOOK = {
+    "id": "fresh",
+    "target": "postgres://analytics",
+    "scope": SCOPE,
+    "change_mode": "append",
+    "delivery": "pull",
+}
+
+BARE = {"Authorization": f"Bearer {TOKEN}"}
+
+ROUTES = [
+    ("get", "/projection/hooks", None),
+    ("get", "/projection/hook/pg", None),
+    ("post", "/projection/hook", NEW_HOOK),
+    ("post", "/projection/hook/pg/status", {"status": "Suspended"}),
+    ("delete", "/projection/hook/pg", None),
+    ("post", "/projection/hook/pg/run", {}),
+    ("post", "/projection/hook/pg/reset", None),
+    ("post", "/projection/sweep", {}),
+    ("get", "/projection/deliveries", None),
+    ("get", "/projection/delivery/nope", None),
+    ("post", "/projection/delivery/nope/ack", None),
+    ("post", "/projection/delivery/nope/reject", {}),
+]
+
+
+def call(client, method, path, body, headers):
+    kwargs = {"json": body} if body is not None else {}
+    return getattr(client, method)(path, headers=headers, **kwargs)
+
+
+@pytest.mark.parametrize(("method", "path", "body"), ROUTES)
+def test_every_projection_route_needs_an_identity(client, method, path, body):
+    assert call(client, method, path, body, BARE).status_code == 401
+
+
+#: Routes that operate the registry. Delete is separate (it needs the stricter
+#: replace grant); the list/get routes need an identity only.
+OPERATING = [
+    ("post", "/projection/hook", NEW_HOOK),
+    ("post", "/projection/hook/pg/status", {"status": "Suspended"}),
+    ("post", "/projection/hook/pg/run", {}),
+    ("post", "/projection/hook/pg/reset", None),
+    ("post", "/projection/sweep", {}),
+    ("post", "/projection/delivery/nope/ack", None),
+    ("post", "/projection/delivery/nope/reject", {}),
+]
+
+
+@pytest.mark.parametrize(("method", "path", "body"), OPERATING)
+def test_operating_routes_need_a_write_grant(client, stub, method, path, body):
+    stub.write_grant = False
+    response = call(client, method, path, body, auth())
+    assert response.status_code == 403, path
+    assert stub.updates == []
+
+
+def test_registering_needs_a_write_grant_on_the_registry_graph(client, stub):
+    stub.write_grant = False
+    response = client.post("/projection/hook", json=NEW_HOOK, headers=auth())
+    assert response.status_code == 403
+    assert "urn:ds:projections" in response.json()["detail"]
+    assert stub.updates == []
+
+
+def test_a_writer_can_register(client, stub):
+    response = client.post("/projection/hook", json=NEW_HOOK, headers=auth())
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert any("fresh" in u for u in stub.updates)
+
+
+def test_deleting_needs_the_stricter_replace_grant(client, stub):
+    stub.replace_grant = False
+    denied = client.delete("/projection/hook/pg", headers=auth())
+    assert denied.status_code == 403
+    assert stub.updates == []
+
+    stub.replace_grant = True
+    assert client.delete("/projection/hook/pg", headers=auth()).status_code == 200
+
+
+def test_a_writer_without_replace_can_still_run_and_suspend(client, stub):
+    stub.replace_grant = False
+    assert client.post("/projection/hook/pg/run", json={}, headers=auth()).status_code == 200
+    assert (
+        client.post("/projection/hook/pg/status", json={"status": "Suspended"}, headers=auth())
+        .status_code == 200
+    )
+
+
+def test_listing_needs_an_identity_but_no_grant(client, stub):
+    stub.write_grant = False
+    assert client.get("/projection/hooks", headers=auth()).status_code == 200
+    assert client.get("/projection/deliveries", headers=auth()).status_code == 200
+
+
+def test_a_scope_that_reaches_graphs_it_does_not_name_is_refused_to_non_admins(client, stub):
+    hook = {**NEW_HOOK, "scope": "CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }"}
+    denied = client.post("/projection/hook", json=hook, headers=auth())
+    assert denied.status_code == 403
+    assert denied.json()["detail"]["error"] == "scope_not_readable"
+    assert stub.updates == []
+
+    stub.admin = True
+    assert client.post("/projection/hook", json=hook, headers=auth()).status_code == 200
+
+
+def test_a_stored_hook_with_an_unreadable_scope_will_not_run_for_a_non_admin(client, stub):
+    stub.hooks = hook_rows(
+        construct="CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }"
+    )
+    response = client.post("/projection/hook/pg/run", json={}, headers=auth())
+    assert response.status_code == 403
+    assert stub.constructs == []
+
+
+def test_a_webhook_to_a_private_address_is_refused_at_registration(client, stub):
+    hook = {**NEW_HOOK, "delivery": "webhook", "endpoint": "https://169.254.169.254/x"}
+    response = client.post("/projection/hook", json=hook, headers=auth())
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "endpoint_refused"
+    assert stub.updates == []
+
+
+def test_a_webhook_over_plain_http_is_refused_by_default(client, stub):
+    hook = {**NEW_HOOK, "delivery": "webhook", "endpoint": "http://hooks.example.com/x"}
+    assert client.post("/projection/hook", json=hook, headers=auth()).status_code == 400
+
+
+def test_an_allowlisted_webhook_is_accepted(stub):
+    app = create_app(Settings(bearer_token=TOKEN, webhook_allowlist=("n8n.internal:5678",)))
+    with TestClient(app) as test_client:
+        app.state.fuseki = stub
+        hook = {**NEW_HOOK, "delivery": "webhook", "endpoint": "http://n8n.internal:5678/hook"}
+        assert test_client.post("/projection/hook", json=hook, headers=auth()).status_code == 200
+
+
+def test_a_caller_who_cannot_write_learns_nothing_about_the_egress_policy(client, stub):
+    stub.write_grant = False
+    hook = {**NEW_HOOK, "delivery": "webhook", "endpoint": "https://169.254.169.254/x"}
+    assert client.post("/projection/hook", json=hook, headers=auth()).status_code == 403

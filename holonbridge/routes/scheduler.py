@@ -1,5 +1,15 @@
 """Scheduler routes.
 
+CHANGED 2026-11-01: every route here is admin-only, reads included. They were
+gated by the bearer token alone, so anyone holding it could create a task (an
+``LLMInvocation``, a ``UpdateRule`` or a payload write with the scheduler's
+own authority), fire it, or read the provenance trail. A task runs as the
+process, not as its creator, so creating one is a privilege escalation unless
+only an admin can do it. The caller must resolve to a Person who holds the
+admin (or owner) role on the *admin dataset*; a caller whose request is
+pointed at another dataset by ``X-Dataset-Override`` is refused, because
+their identity was resolved there and says nothing about this one.
+
 Every route here works against the admin dataset, whatever the caller has
 selected. The scheduler is process-level: one registry, one provenance trail.
 A caller with `X-Dataset-Override` set to their own dataset must not get a
@@ -14,7 +24,9 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
-from ..deps import ClientDep, ConnDep, SettingsDep
+from .. import audit
+from ..acl import is_admin
+from ..deps import AnimusDep, ClientDep, ConnDep, SettingsDep
 from ..fuseki import FusekiError
 from ..params import ParameterError, render_term
 from ..scheduler import Scheduler, Task, task_iri
@@ -38,6 +50,43 @@ def _scheduler(request: Request) -> Scheduler:
             detail={
                 "error": "scheduler_disabled",
                 "message": "set SCHEDULER_ENABLED=true to enable the scheduler",
+            },
+        )
+    return scheduler
+
+
+async def _require_admin(request: Request, conn, client, animus) -> Scheduler:
+    """The scheduler, if it is enabled and the caller is an admin of its dataset.
+
+    Order matters: identity first (so an anonymous caller learns nothing about
+    whether the scheduler is enabled), then the scheduler, then the dataset.
+    """
+    if animus.person is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="unresolved identity")
+    scheduler = _scheduler(request)
+    admin = scheduler.admin_conn
+    if conn.dataset != admin.dataset or conn.bank_name != admin.bank_name:
+        audit.annotate(reason="scheduler routes target the admin dataset")
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": "scheduler_requires_admin_dataset",
+                "message": "scheduler routes are admin-only and act on the admin "
+                f"dataset ({admin.dataset!r}); this request is for {conn.dataset!r}",
+            },
+        )
+
+    async def query_fn(query: str) -> dict:
+        return await client.select(conn, query)
+
+    if not await is_admin(query_fn, conn.holons_graph, person=animus.person):
+        audit.annotate(reason="admin role required")
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": "admin_required",
+                "message": "the scheduler runs tasks with the bridge's own authority, "
+                "so only an admin may inspect or operate it",
             },
         )
     return scheduler
@@ -70,8 +119,10 @@ class StatusRequest(BaseModel):
 
 
 @router.get("/status")
-async def scheduler_status(request: Request, conn: ConnDep) -> dict:
-    scheduler = _scheduler(request)
+async def scheduler_status(
+    request: Request, conn: ConnDep, client: ClientDep, animus: AnimusDep
+) -> dict:
+    scheduler = await _require_admin(request, conn, client, animus)
     return {
         **scheduler.status(),
         "graphs": list(SCHEDULER_GRAPHS),
@@ -85,9 +136,12 @@ async def scheduler_status(request: Request, conn: ConnDep) -> dict:
 @router.get("/tasks")
 async def list_tasks(
     request: Request,
+    conn: ConnDep,
+    client: ClientDep,
+    animus: AnimusDep,
     task_status: str | None = Query(default=None, pattern="^(Active|Suspended|Deprecated)$"),
 ) -> dict:
-    scheduler = _scheduler(request)
+    scheduler = await _require_admin(request, conn, client, animus)
     tasks = scheduler.tasks
     if task_status:
         tasks = [t for t in tasks if t.status == task_status]
@@ -100,8 +154,10 @@ async def list_tasks(
 
 
 @router.get("/task/{task_id}")
-async def get_task(task_id: str, request: Request) -> dict:
-    scheduler = _scheduler(request)
+async def get_task(
+    task_id: str, request: Request, conn: ConnDep, client: ClientDep, animus: AnimusDep
+) -> dict:
+    scheduler = await _require_admin(request, conn, client, animus)
     task = scheduler.task(task_id)
     if task is None:
         raise HTTPException(
@@ -117,9 +173,14 @@ async def get_task(task_id: str, request: Request) -> dict:
 
 @router.post("/task")
 async def create_task(
-    body: CreateTaskRequest, request: Request, client: ClientDep, settings: SettingsDep
+    body: CreateTaskRequest,
+    request: Request,
+    conn: ConnDep,
+    client: ClientDep,
+    animus: AnimusDep,
+    settings: SettingsDep,
 ) -> dict:
-    scheduler = _scheduler(request)
+    scheduler = await _require_admin(request, conn, client, animus)
 
     declared = [
         name
@@ -206,9 +267,14 @@ async def create_task(
 
 @router.post("/task/{task_id}/status")
 async def set_task_status(
-    task_id: str, body: StatusRequest, request: Request, client: ClientDep
+    task_id: str,
+    body: StatusRequest,
+    request: Request,
+    conn: ConnDep,
+    client: ClientDep,
+    animus: AnimusDep,
 ) -> dict:
-    scheduler = _scheduler(request)
+    scheduler = await _require_admin(request, conn, client, animus)
     task = scheduler.task(task_id)
     if task is None:
         raise HTTPException(
@@ -224,14 +290,16 @@ async def set_task_status(
 
 
 @router.post("/task/{task_id}/fire")
-async def fire_task(task_id: str, request: Request) -> dict:
+async def fire_task(
+    task_id: str, request: Request, conn: ConnDep, client: ClientDep, animus: AnimusDep
+) -> dict:
     """Fire a task now, out of band.
 
     Tagged ``invocationSource: manual`` and deliberately outside the daily
     scheduled allowance — a manual run is an operator decision, not one of the
     task's own automatic firings.
     """
-    scheduler = _scheduler(request)
+    scheduler = await _require_admin(request, conn, client, animus)
     task = scheduler.task(task_id)
     if task is None:
         raise HTTPException(
@@ -249,14 +317,16 @@ async def fire_task(task_id: str, request: Request) -> dict:
 @router.get("/activity")
 async def activity(
     request: Request,
+    conn: ConnDep,
     client: ClientDep,
+    animus: AnimusDep,
     since: str | None = Query(
         default=None,
         description="ISO-8601 with a timezone, e.g. 2026-07-27T00:00:00Z",
     ),
     limit: int = Query(default=50, ge=1, le=500),
 ) -> dict:
-    scheduler = _scheduler(request)
+    scheduler = await _require_admin(request, conn, client, animus)
     if since:
         try:
             # An unqualified dateTime compares indeterminately against the
@@ -278,28 +348,36 @@ async def activity(
 
 @router.get("/quarantine")
 async def quarantine(
-    request: Request, client: ClientDep, limit: int = Query(default=50, ge=1, le=200)
+    request: Request,
+    conn: ConnDep,
+    client: ClientDep,
+    animus: AnimusDep,
+    limit: int = Query(default=50, ge=1, le=200),
 ) -> dict:
-    scheduler = _scheduler(request)
+    scheduler = await _require_admin(request, conn, client, animus)
     held = await SchedulerStore(client).quarantined(scheduler.admin_conn, limit)
     return {"count": len(held), "quarantined": held}
 
 
 @router.post("/reload")
-async def reload(request: Request) -> dict:
+async def reload(
+    request: Request, conn: ConnDep, client: ClientDep, animus: AnimusDep
+) -> dict:
     """Re-read tasks and personas without a restart.
 
     Without this a newly created task sits inert until the process restarts,
     which is a surprising thing for a scheduler to do.
     """
-    scheduler = _scheduler(request)
+    scheduler = await _require_admin(request, conn, client, animus)
     return {"ok": True, **(await scheduler.reload())}
 
 
 @router.post("/tick")
-async def tick(request: Request) -> dict:
+async def tick(
+    request: Request, conn: ConnDep, client: ClientDep, animus: AnimusDep
+) -> dict:
     """Run one pass immediately, for testing and operator use."""
-    scheduler = _scheduler(request)
+    scheduler = await _require_admin(request, conn, client, animus)
     fired = await scheduler.tick()
     return {"ok": True, "fired": len(fired), "records": [r.as_dict() for r in fired]}
 

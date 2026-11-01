@@ -30,6 +30,7 @@ import httpx
 from datetime import datetime, timedelta, timezone
 
 from ..conn import Conn
+from ..egress import EgressPolicy, EndpointRefused, check_endpoint
 from ..fuseki import FusekiClient, FusekiError
 from ..named_queries import apply_query_params, load_named_queries
 from ..sparql_kind import form
@@ -60,15 +61,43 @@ class HttpSender:
     everything else out of the bridge.
     """
 
-    def __init__(self, timeout: float = 30.0) -> None:
+    def __init__(self, timeout: float = 30.0, *, policy: EgressPolicy | None = None) -> None:
         self._timeout = timeout
+        self._policy = policy
+
+    def _effective_policy(self) -> EgressPolicy:
+        if self._policy is not None:
+            return self._policy
+        # Read at send time, not at construction: runners are built in several
+        # places (routes, the scheduler, pipeline stages) and every one of them
+        # must see the operator's current setting.
+        from ..config import get_settings  # noqa: PLC0415 - avoids an import cycle
+
+        return EgressPolicy(allowlist=get_settings().webhook_allowlist)
 
     async def send(self, hook: ProjectionHook, envelope: Envelope) -> str:
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+        # Checked here as well as at registration: a hook's endpoint is data in
+        # the graph, so it can arrive by a route that never ran the
+        # registration check, and the allowlist can change after it was stored.
+        try:
+            await check_endpoint(hook.endpoint, self._effective_policy())
+        except EndpointRefused as exc:
+            raise ProjectionError(f"endpoint refused: {exc}") from exc
+
+        # Redirects are not followed: a permitted host must not be able to
+        # bounce the bridge to one that is not.
+        async with httpx.AsyncClient(
+            timeout=self._timeout, follow_redirects=False
+        ) as client:
             response = await client.post(
                 hook.endpoint,
                 json=envelope.as_dict(),
                 headers={"Content-Type": "application/json"},
+            )
+        if 300 <= response.status_code < 400:
+            raise ProjectionError(
+                f"{hook.endpoint} answered {response.status_code} (redirect); "
+                "redirects are not followed, so nothing was delivered"
             )
         if response.status_code >= 400:
             raise ProjectionError(

@@ -31,6 +31,22 @@ what turns "still true" into "was already handled", the same edge-detection
 job ``hev:invalidatedAt``/``hev:supersedes`` chains do for fluent history,
 scoped here to trigger firings instead.
 
+**Re-arming.** An edge needs a falling side as well as a rising one. Each
+evaluation compares the ledger's live firings for a trigger against the
+focus nodes its condition matches *now*; a firing whose focus no longer
+matches is stamped ``hev:clearedAt`` and stops counting as "already
+handled", so the next time that focus matches the trigger fires for it
+again. Firings are never deleted — a cleared firing stays in the ledger as
+history, and the "already fired" ``ASK`` simply ignores it. Two cautions
+follow from this. A condition query that *fails* clears nothing (an
+evaluation that could not run says nothing about whether the condition went
+false), and a condition must not carry its own ``LIMIT``: a focus that is
+still true but pushed out of a truncated result would look like one that
+went false, and be re-armed. If a re-armed focus still has a ``Pending``
+candidate from its earlier proposal, no second one is staged until that
+candidate has been approved or rejected — re-arming must not be able to
+flood the review queue, which is the problem the ledger exists to prevent.
+
 **Why ``reviewRequired`` defaults matter.** A trigger whose rule targets
 ``holons`` — the dataset's own ground truth — mutates the thing everyone
 else reads through ``get_holon``. The default (``review_required=True``)
@@ -162,7 +178,7 @@ class TriggerFiring:
 
     trigger_id: str
     focus: str
-    outcome: str  # "proposed" | "executed" | "skipped-already-fired" | "failed"
+    outcome: str  # "proposed" | "executed" | "skipped-pending-candidate" | "failed"
     candidate_iri: str | None = None
     detail: str = ""
 
@@ -281,13 +297,87 @@ async def load_named_triggers(
 
 
 def _already_fired_ask(log_graph: str, trigger_iri: str, focus: str) -> str:
+    """Is there a *live* firing for this (trigger, focus)? A firing stamped
+    ``hev:clearedAt`` (see :func:`_rearm`) no longer counts."""
     return f"""PREFIX hev: <{HEV_NAMESPACE}>
 ASK {{
   GRAPH <{log_graph}> {{
     ?firing hev:firedTrigger <{trigger_iri}> ;
             hev:firedFor <{focus}> .
+    FILTER NOT EXISTS {{ ?firing hev:clearedAt ?cleared }}
   }}
 }}"""
+
+
+def _live_firings_query(log_graph: str, trigger_iri: str) -> str:
+    return f"""PREFIX hev: <{HEV_NAMESPACE}>
+SELECT ?firing ?focus
+WHERE {{
+  GRAPH <{log_graph}> {{
+    ?firing hev:firedTrigger <{trigger_iri}> ;
+            hev:firedFor ?focus .
+    FILTER NOT EXISTS {{ ?firing hev:clearedAt ?cleared }}
+  }}
+}}"""
+
+
+def _clear_firings_update(log_graph: str, firing_iris: list[str]) -> str:
+    now = datetime.now(timezone.utc).isoformat()
+    triples = "\n".join(
+        f'    <{iri}> hev:clearedAt "{now}"^^xsd:dateTime .' for iri in firing_iris
+    )
+    return f"""PREFIX hev: <{HEV_NAMESPACE}>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+INSERT DATA {{
+  GRAPH <{log_graph}> {{
+{triples}
+  }}
+}}"""
+
+
+def _pending_candidate_ask(candidates_graph: str, trigger_iri: str, focus: str) -> str:
+    return f"""PREFIX hev: <{HEV_NAMESPACE}>
+PREFIX holon: <https://w3id.org/holon/>
+ASK {{
+  GRAPH <{candidates_graph}> {{
+    ?candidate a holon:CandidateStatus ;
+               hev:proposedByTrigger <{trigger_iri}> ;
+               hev:proposedFor <{focus}> ;
+               hev:candidateStatusValue "Pending" .
+  }}
+}}"""
+
+
+async def _rearm(
+    client: FusekiClient,
+    conn: Conn,
+    *,
+    log_graph: str,
+    trigger: Trigger,
+    matches: set[str],
+) -> int:
+    """Stamp ``hev:clearedAt`` on every live firing whose focus no longer
+    matches the trigger's condition, and return how many were cleared.
+
+    The falling edge of the edge-triggered contract (see the module
+    docstring). Called only after the condition ran successfully, with the
+    full set of currently-matching focus nodes.
+    """
+    rows = (await client.select(conn, _live_firings_query(log_graph, trigger.iri)))[
+        "results"
+    ]["bindings"]
+    stale = sorted(
+        {row["firing"]["value"] for row in rows if row["focus"]["value"] not in matches}
+    )
+    if not stale:
+        return 0
+    await client.update(conn, _clear_firings_update(log_graph, stale))
+    log.info(
+        "trigger %s re-armed %d focus node(s) whose condition no longer holds",
+        trigger.id,
+        len(stale),
+    )
+    return len(stale)
 
 
 async def _record_firing(
@@ -299,8 +389,12 @@ async def _record_firing(
     focus: str,
     outcome: str,
     candidate_iri: str | None,
+    firing_iri: str | None = None,
 ) -> str:
-    firing_iri = f"{conn.graph('trigger-log')}:{uuid.uuid4().hex}"
+    """Record one firing. ``firing_iri`` lets the caller mint the IRI first and
+    hand the same one to the candidate it stages, so ``hev:proposedFromFiring``
+    points at the firing that was actually recorded."""
+    firing_iri = firing_iri or f"{log_graph}:{uuid.uuid4().hex}"
     now = datetime.now(timezone.utc).isoformat()
     clauses = [
         "a hev:TriggerFiring",
@@ -671,6 +765,10 @@ async def evaluate_triggers(
     or a real ``execute_named_rule`` call (not), then a firing-log record
     either way, so the same focus node is never proposed or executed twice
     for the same trigger while its condition remains true.
+
+    Before acting on matches, any live firing whose focus no longer matches
+    is re-armed (see the module docstring's "Re-arming"), so a focus whose
+    condition goes false and later true again fires again.
     """
     load = await load_named_triggers(client, conn)
     triggers = [t for t in load.triggers if t.runnable and t.trigger_kind == kind]
@@ -715,6 +813,16 @@ async def evaluate_triggers(
             )
             continue
 
+        # The falling edge: anything that fired before and no longer matches
+        # is re-armed. Only reached when the condition actually ran, so a
+        # failed evaluation (the ``continue`` above) never clears a firing.
+        try:
+            await _rearm(client, conn, log_graph=log_graph, trigger=trig, matches=set(matches))
+        except (FusekiError, KeyError) as exc:
+            # Not fatal: the worst case is a focus that stays "already
+            # fired" until the next evaluation manages to clear it.
+            log.warning("trigger %s could not be re-armed: %s", trig.id, exc)
+
         for focus in matches:
             already = await client.select(
                 conn, _already_fired_ask(log_graph, trig.iri, focus)
@@ -724,6 +832,24 @@ async def evaluate_triggers(
 
             try:
                 if trig.review_required:
+                    # A re-armed focus may still have the proposal from its
+                    # previous firing waiting for review. Do not stack another
+                    # on top of it; try again once that one is resolved.
+                    outstanding = await client.select(
+                        conn,
+                        _pending_candidate_ask(conn.graph("candidates"), trig.iri, focus),
+                    )
+                    if outstanding.get("boolean"):
+                        firings.append(
+                            TriggerFiring(
+                                trig.id,
+                                focus,
+                                "skipped-pending-candidate",
+                                detail="an earlier proposal for this focus is still Pending",
+                            )
+                        )
+                        continue
+
                     sparql = bind_rule(rule, {"$this": focus})
                     # Read-only: computes what the rule would produce
                     # without touching any live graph, the same operation
@@ -747,6 +873,7 @@ async def evaluate_triggers(
                         focus=focus,
                         outcome="proposed",
                         candidate_iri=candidate_iri,
+                        firing_iri=firing_iri,
                     )
                     firings.append(
                         TriggerFiring(trig.id, focus, "proposed", candidate_iri=candidate_iri)
