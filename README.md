@@ -799,6 +799,41 @@ with any scope and any endpoint and read the dataset out through it. Now:
   (DNS rebinding). Not closed here; pinning the connection to the checked
   address would be the complete fix.
 
+### `source_url` is an outbound request too
+
+`POST /ingest` with a `source_url` (and the `ingest` MCP tool) makes the bridge
+GET a URL the caller chose. The caller needs only write access to the target
+graph, and an LLM driving the tool can be steered to a URL by a document it is
+reading, so this is the same exposure as a webhook: the bridge sits next to
+Fuseki, the cloud metadata service and whatever else listens on a private
+address. The fetch therefore passes the webhook policy, on the URL **and on every
+redirect hop**:
+
+- Default: `https` only, no credentials in the URL, every resolved address
+  public. Loopback, private, link-local (including `169.254.169.254`), CGNAT and
+  reserved ranges are refused, as are hosts that do not resolve.
+- `FETCH_ALLOWLIST` (same entry syntax as `WEBHOOK_ALLOWLIST`, a separate
+  setting) restricts the fetch to those hosts and nothing else; a listed host is
+  exempt from the `https` and public-address rules, which is how a deployment
+  ingests from a service on its own network on purpose.
+- Up to three redirects are followed, each one re-checked; a redirect to an
+  internal address is refused before it is requested.
+- The body is streamed and abandoned past `FETCH_MAX_BYTES` (default 10 MiB),
+  counted after decompression, so neither a huge body nor a small one that
+  expands can fill the bridge's memory.
+- Errors say what kind of failure it was (`refused: ...`, `HTTP 404`, `timed
+  out`, `request failed (ConnectError)`), not the client library's account of
+  it, and never repeat credentials from the URL. Refusals are by policy, before
+  any connection, so the fetch cannot be used to probe addresses outside the
+  allowlist. (An allowlisted host *can* still be probed: an entry without a port
+  allows any port, and the error kind distinguishes a refused connection from an
+  HTTP answer. List ports where that matters.)
+
+**Upgrading:** `source_url` values that use plain `http`, point at private
+addresses, or carry `user:password@` in the URL stop working until the host is
+listed in `FETCH_ALLOWLIST` (credentials in the URL are refused even then). The
+DNS-rebinding limit above applies here too.
+
 This also closes the two loose ends from the previous slices. A pipeline stage
 with an `external` transformer that names a hook now executes instead of
 deferring, and a scheduler task can name a hook as its action. Both stop at

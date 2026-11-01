@@ -553,7 +553,10 @@ class IngestRequest(BaseModel):
         default=None,
         description=(
             "fetch a remote source: a DataBook (frontmatter present) or "
-            "raw Turtle, detected from what is fetched"
+            "raw Turtle, detected from what is fetched. The URL (and any "
+            "redirect) must pass the outbound policy: https and public "
+            "addresses only unless the operator lists the host in "
+            "FETCH_ALLOWLIST; responses over FETCH_MAX_BYTES are refused"
         ),
     )
     graph_iri: str | None = Field(

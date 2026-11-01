@@ -192,6 +192,16 @@ class Settings:
     # person was hand-authored; by default it keeps running as before. Turn this
     # on to refuse to fire any trigger that cannot be traced to a person.
     triggers_require_definer: bool = False
+    # Hosts ``/ingest`` may fetch a ``source_url`` from (``FETCH_ALLOWLIST``;
+    # same entry syntax). Empty means the default policy: https only, public
+    # addresses only, no credentials in the URL. When set, ONLY these hosts can
+    # be reached (and a listed host is exempt from the https / public rules --
+    # the way to ingest from a service on your own network). Applies to every
+    # redirect hop too. See fetch.py and egress.py.
+    fetch_allowlist: tuple[str, ...] = ()
+    # Largest response ``source_url`` will read, in bytes, counted after
+    # decompression. Larger responses are abandoned and the ingest fails.
+    fetch_max_bytes: int = 10 * 1024 * 1024
     # Hosts an agent endpoint may point at (``AGENT_ALLOWLIST``; same entry
     # syntax as the webhook allowlist, deliberately a separate setting: what a
     # projection may be pushed to and what an agent may be sent are different
@@ -303,6 +313,8 @@ class Settings:
             dataset_claimants=parse_dataset_claimants(os.getenv("DATASET_CLAIMANTS")),
             dataset_creators=parse_dataset_creators(os.getenv("DATASET_CREATORS")),
             webhook_allowlist=parse_allowlist(os.getenv("WEBHOOK_ALLOWLIST")),
+            fetch_allowlist=parse_allowlist(os.getenv("FETCH_ALLOWLIST")),
+            fetch_max_bytes=max(1, int(os.getenv("FETCH_MAX_BYTES", str(10 * 1024 * 1024)))),
             triggers_require_definer=_flag("TRIGGERS_REQUIRE_DEFINER", False),
             agent_allowlist=parse_allowlist(os.getenv("AGENT_ALLOWLIST")),
             agent_credential_prefix=(
