@@ -70,6 +70,7 @@ process:
   again if it matches later; a new proposal is not stacked on a still-Pending
   candidate for the same focus. Also fixed: a candidate's
   `hev:proposedFromFiring` pointed at an IRI that was never recorded.
+  [PR #73](https://github.com/kurtcagle/holon-bridge-python/pull/73)
 
 ### 2026-10-27
 
@@ -492,12 +493,14 @@ process:
 hb:release-2026-11-01-a a hb:ReleaseNote ;
     dcterms:date "2026-11-01"^^xsd:date ;
     rdfs:label "Projection and scheduler routes access-controlled; webhook egress policy" ;
-    dcterms:description "Projection routes now require a resolved identity, holon:grantsWrite on the projections graph to operate hooks (grantsReplace to delete) and read access to the hook's scope; scheduler routes are admin-only on the admin dataset. Webhook endpoints must pass an egress policy (https, public addresses, no credentials, no redirects, or WEBHOOK_ALLOWLIST) at registration and at send. Breaking for plain-http and private webhook targets." .
+    dcterms:description "Projection routes now require a resolved identity, holon:grantsWrite on the projections graph to operate hooks (grantsReplace to delete) and read access to the hook's scope; scheduler routes are admin-only on the admin dataset. Webhook endpoints must pass an egress policy (https, public addresses, no credentials, no redirects, or WEBHOOK_ALLOWLIST) at registration and at send. Breaking for plain-http and private webhook targets." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/73> .
 
 hb:release-2026-11-01-b a hb:ReleaseNote ;
     dcterms:date "2026-11-01"^^xsd:date ;
     rdfs:label "Trigger re-arming on the falling edge" ;
-    dcterms:description "A (trigger, focus) pair that fired can now fire again once its condition has gone false and then true. Cleared firings are stamped hev:clearedAt rather than deleted, a failing condition clears nothing, and a new proposal is not stacked on a Pending candidate for the same focus. Fixes a dangling hev:proposedFromFiring link." .
+    dcterms:description "A (trigger, focus) pair that fired can now fire again once its condition has gone false and then true. Cleared firings are stamped hev:clearedAt rather than deleted, a failing condition clears nothing, and a new proposal is not stacked on a Pending candidate for the same focus. Fixes a dangling hev:proposedFromFiring link." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/73> .
 
 hb:release-2026-10-26-a a hb:ReleaseNote ;
     dcterms:date "2026-10-26"^^xsd:date ;
