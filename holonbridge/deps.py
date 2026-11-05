@@ -63,7 +63,6 @@ from .config import BankStore, Settings
 from .conn import DATASET_OVERRIDE_HEADER, Conn, resolve_conn
 from .cache import RegistryCache
 from .claim import claimant as claim_eligibility, is_unclaimed
-from .fuseki import FusekiClient
 from .store import Store
 from .persona_state import PersonaStore
 
