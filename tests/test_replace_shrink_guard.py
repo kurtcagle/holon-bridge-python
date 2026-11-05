@@ -150,7 +150,11 @@ async def test_the_guard_is_off_unless_the_caller_asks_for_it():
     out = await _write(client, _payload(1))
     assert "triplesBefore" not in out
     assert client.graphs[TARGET] == 1
-    assert not any(c[0] in ("select", "post") for c in client.calls)
+    # The guard counts the target's triples first. Other selects (the state-trigger
+    # hook now reads the trigger registry after every write) are not the guard.
+    assert not any(
+        c[0] == "post" or (c[0] == "select" and "COUNT" in c[1].upper()) for c in client.calls
+    )
 
 
 @pytest.mark.asyncio
