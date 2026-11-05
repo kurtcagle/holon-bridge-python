@@ -437,3 +437,57 @@ def test_validation_helpers():
             review_required=True, status="Active", label=None, description=None,
             watched_predicates=[], registered_at="2026-11-01T00:00:00+00:00",
         )
+
+
+# --- approve and reject over HTTP keep the decision record -----------------------
+
+
+async def _stage_candidate(stub: RegStub) -> str:
+    from holonbridge.conn import Conn as _Conn
+
+    conn = _Conn(base_url="http://x", dataset="ds", overridden=False, bank_name="local")
+    await evaluate_triggers(stub.domain, conn, kind=TRIGGER_STATE)
+    iri = next(iter(stub.domain._candidates))
+    return iri.rsplit(":", 1)[1]
+
+
+def test_approve_over_http_records_the_reviewer_and_the_reason(client, stub):
+    import asyncio
+
+    stub.admin = True
+    cid = asyncio.run(_stage_candidate(stub))
+
+    response = client.post(f"/candidate/{cid}/approve", json={"reason": "looks right"}, headers=hdrs())
+
+    assert response.status_code == 200, response.text
+    record = next(iter(stub.domain._candidates.values()))
+    assert record["candidateStatusValue"] == "Approved"
+    assert record["approvedBy"]
+    assert record["decisionReason"] == "looks right"
+
+
+def test_reject_over_http_works_without_a_body(client, stub):
+    import asyncio
+
+    stub.admin = True
+    cid = asyncio.run(_stage_candidate(stub))
+
+    response = client.post(f"/candidate/{cid}/reject", headers=hdrs())
+
+    assert response.status_code == 200, response.text
+    record = next(iter(stub.domain._candidates.values()))
+    assert record["candidateStatusValue"] == "Rejected"
+    assert record["rejectedBy"]
+    assert "decisionReason" not in record
+
+
+def test_a_reason_over_1000_characters_is_a_422_and_the_candidate_stays_pending(client, stub):
+    import asyncio
+
+    stub.admin = True
+    cid = asyncio.run(_stage_candidate(stub))
+
+    response = client.post(f"/candidate/{cid}/approve", json={"reason": "x" * 1001}, headers=hdrs())
+
+    assert response.status_code == 422
+    assert next(iter(stub.domain._candidates.values()))["candidateStatusValue"] == "Pending"

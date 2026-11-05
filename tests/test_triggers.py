@@ -220,9 +220,11 @@ _CANDIDATE_CREATE = re.compile(
     r'hev:proposedTurtle "([^"]*)" ;\s*'
     r'hev:proposedRule "([^"]*)" ;'
 )
-_CANDIDATE_STATUS_SET = re.compile(
-    r'INSERT \{ GRAPH <[^>]+> \{ <([^>]+)> hev:candidateStatusValue "([^"]+)" \} \}'
+_CANDIDATE_DECIDE = re.compile(
+    r'DELETE \{ GRAPH <[^>]+> \{ <([^>]+)> hev:candidateStatusValue "Pending" \} \} '
+    r"INSERT \{ GRAPH <[^>]+> \{ <[^>]+> (.*) \} \} WHERE"
 )
+_DECISION_PART = re.compile(r'hev:(\w+) (<[^>]+>|"(?:[^"\\]|\\.)*")(?:\^\^xsd:dateTime)?')
 _PIPELINE_CANDIDATE_CREATE = re.compile(
     r"GRAPH <[^>]+> \{ <([^>]+)> a holon:CandidateStatus ;\s*"
     r'hev:proposedByPipeline "([^"]*)" ;\s*'
@@ -360,11 +362,15 @@ class TriggerStub:
             }
             return
 
-        status_set = _CANDIDATE_STATUS_SET.search(normalised)
-        if status_set:
-            iri, status = status_set.groups()
-            if iri in self._candidates:
-                self._candidates[iri]["candidateStatusValue"] = status
+        decided = _CANDIDATE_DECIDE.search(normalised)
+        if decided:
+            iri, body = decided.groups()
+            record = self._candidates.get(iri)
+            # The update is guarded on the candidate still being Pending: a
+            # second decision matches nothing, as it would on a real store.
+            if record is not None and record.get("candidateStatusValue") == "Pending":
+                for name, value in _DECISION_PART.findall(body):
+                    record[name] = _unescape_literal(value[1:-1])
 
     async def post_graph(self, conn, graph_iri, turtle):
         self.pushed.append((graph_iri, turtle))
@@ -614,6 +620,115 @@ async def test_approving_a_non_pending_candidate_is_refused(stub, conn, animus):
     stale = await get_candidate(stub, conn, hit.iri)  # now Approved
     with pytest.raises(CandidateError):
         await approve_candidate(stub, conn, stale, animus=animus)
+
+
+# --- the decision record ---------------------------------------------------------
+
+
+async def _pending_candidate(stub, conn):
+    await evaluate_triggers(stub, conn, kind=TRIGGER_STATE)
+    candidates = await list_candidates(stub, conn, status="Pending")
+    return next(c for c in candidates if c.trigger_iri.endswith("min-age-violation"))
+
+
+@pytest.mark.asyncio
+async def test_a_pending_candidate_has_no_decision_record(stub, conn):
+    hit = await _pending_candidate(stub, conn)
+    assert (hit.decided_by, hit.decided_at, hit.decision_reason, hit.decision_id) == ("",) * 4
+
+
+@pytest.mark.asyncio
+async def test_approve_keeps_who_when_and_why(stub, conn, animus):
+    hit = await _pending_candidate(stub, conn)
+
+    await approve_candidate(stub, conn, hit, animus=animus, reason="  checked against the source  ")
+
+    done = await get_candidate(stub, conn, hit.iri)
+    assert done.status == "Approved"
+    assert done.decided_by == animus.person
+    assert done.decided_at.endswith("+00:00") and done.decided_at[:4].isdigit()
+    assert done.decision_reason == "checked against the source"
+    assert done.decision_id
+    assert done.decided_by_real == ""  # not acting as anyone else
+    assert done.summary()["decidedBy"] == animus.person
+
+
+@pytest.mark.asyncio
+async def test_approve_without_a_reason_records_none(stub, conn, animus):
+    hit = await _pending_candidate(stub, conn)
+    await approve_candidate(stub, conn, hit, animus=animus)
+    assert (await get_candidate(stub, conn, hit.iri)).decision_reason == ""
+
+
+@pytest.mark.asyncio
+async def test_reject_keeps_who_when_and_why(stub, conn, animus):
+    hit = await _pending_candidate(stub, conn)
+
+    await reject_candidate(stub, conn, hit, animus=animus, reason='wrong "scope"')
+
+    done = await get_candidate(stub, conn, hit.iri)
+    assert done.status == "Rejected"
+    assert done.decided_by == animus.person
+    assert done.decision_reason == 'wrong "scope"'
+    assert not any(g == hit.target_graph for g, _ in stub.pushed)
+
+
+@pytest.mark.asyncio
+async def test_acting_as_records_the_real_reviewer_too(stub, conn):
+    hit = await _pending_candidate(stub, conn)
+    acting = Animus(
+        external_id="admin-1",
+        external_id_type="Test",
+        person="urn:ds:person:reviewer",
+        real_person="urn:ds:person:admin",
+        acting_as=True,
+    )
+
+    await approve_candidate(stub, conn, hit, animus=acting)
+
+    done = await get_candidate(stub, conn, hit.iri)
+    assert done.decided_by == "urn:ds:person:reviewer"
+    assert done.decided_by_real == "urn:ds:person:admin"
+
+
+@pytest.mark.asyncio
+async def test_a_second_decision_on_a_stale_view_is_refused_and_changes_nothing(stub, conn, animus):
+    hit = await _pending_candidate(stub, conn)  # both reviewers hold this Pending view
+    await approve_candidate(stub, conn, hit, animus=animus, reason="first")
+    first = await get_candidate(stub, conn, hit.iri)
+
+    with pytest.raises(CandidateError):
+        await reject_candidate(stub, conn, hit, animus=animus, reason="second")
+
+    after = await get_candidate(stub, conn, hit.iri)
+    assert after.status == "Approved"
+    assert after.decision_reason == "first"
+    assert after.decision_id == first.decision_id
+
+
+@pytest.mark.asyncio
+async def test_a_reason_that_is_too_long_is_refused_before_anything_is_written(stub, conn, animus):
+    hit = await _pending_candidate(stub, conn)
+    pushed_before = len(stub.pushed)
+
+    with pytest.raises(CandidateError):
+        await approve_candidate(stub, conn, hit, animus=animus, reason="x" * 1001)
+
+    assert len(stub.pushed) == pushed_before  # the merge did not run
+    assert (await get_candidate(stub, conn, hit.iri)).status == "Pending"
+
+
+@pytest.mark.asyncio
+async def test_a_reviewer_identity_that_is_not_a_plain_iri_is_refused_before_the_merge(stub, conn):
+    hit = await _pending_candidate(stub, conn)
+    pushed_before = len(stub.pushed)
+    odd = Animus(external_id="x", external_id_type="Test", person="urn:ds:person:a> } DROP ALL #")
+
+    with pytest.raises(CandidateError):
+        await approve_candidate(stub, conn, hit, animus=odd)
+
+    assert len(stub.pushed) == pushed_before
+    assert (await get_candidate(stub, conn, hit.iri)).status == "Pending"
 
 
 # --- pipeline-originated candidates ----------------------------------------------

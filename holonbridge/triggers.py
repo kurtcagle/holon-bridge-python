@@ -668,6 +668,15 @@ class Candidate:
     #: ``hb:AgentCall`` (see :func:`propose_agent_candidate`).
     agent_call_iri: str = ""
     agent_id: str = ""
+    #: The decision record, written once by :func:`approve_candidate` or
+    #: :func:`reject_candidate` and empty while the candidate is Pending:
+    #: who decided (``hev:approvedBy`` / ``hev:rejectedBy``), when, why, and,
+    #: for an admin acting as someone else, the real person.
+    decided_by: str = ""
+    decided_at: str = ""
+    decision_reason: str = ""
+    decided_by_real: str = ""
+    decision_id: str = ""
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -684,6 +693,10 @@ class Candidate:
             "message": self.message_iri,
             "agentCall": self.agent_call_iri,
             "agent": self.agent_id,
+            "decidedBy": self.decided_by,
+            "decidedAt": self.decided_at,
+            "decisionReason": self.decision_reason,
+            "decidedByReal": self.decided_by_real,
         }
 
     def detail(self) -> dict[str, Any]:
@@ -716,6 +729,11 @@ async def list_candidates(
             message_iri=pick(props, ("proposedFromMessage",)) or "",
             agent_call_iri=pick(props, ("proposedByAgentCall",)) or "",
             agent_id=pick(props, ("proposedByAgent",)) or "",
+            decided_by=pick(props, ("approvedBy",)) or pick(props, ("rejectedBy",)) or "",
+            decided_at=pick(props, ("decidedAt",)) or "",
+            decision_reason=pick(props, ("decisionReason",)) or "",
+            decided_by_real=pick(props, ("decidedByReal",)) or "",
+            decision_id=pick(props, ("decisionId",)) or "",
         )
         if status is None or cand.status == status:
             out.append(cand)
@@ -734,17 +752,83 @@ class CandidateError(RuntimeError):
     """A candidate cannot be resolved as requested."""
 
 
-async def _set_candidate_status(
-    client: FusekiClient, conn: Conn, *, candidate: Candidate, status: str
+#: Longest reason a reviewer may record with a decision.
+MAX_DECISION_REASON_CHARS = 1000
+
+_UNSAFE_IRI_CHARS = set('<>"{}|^`\\ \t\r\n')
+
+
+def _decision_iri(value: str) -> str:
+    """An identity IRI that is safe to write between angle brackets."""
+    if not value or any(ch in _UNSAFE_IRI_CHARS for ch in value):
+        raise CandidateError("the reviewer identity is not a plain IRI")
+    return value
+
+
+def _check_decision_inputs(animus: Animus | None, reason: str | None) -> None:
+    """Refuse a bad reason or reviewer identity before anything is written."""
+    if len((reason or "").strip()) > MAX_DECISION_REASON_CHARS:
+        raise CandidateError(f"the reason is longer than {MAX_DECISION_REASON_CHARS} characters")
+    for value in (getattr(animus, "person", None), getattr(animus, "real_person", None)):
+        if value:
+            _decision_iri(value)
+
+
+async def _decide_candidate(
+    client: FusekiClient,
+    conn: Conn,
+    *,
+    candidate: Candidate,
+    status: str,
+    animus: Animus | None,
+    reason: str | None,
 ) -> None:
+    """Close a Pending candidate and keep the decision on its record.
+
+    The candidate used to carry only its status, overwritten in place, so
+    once it read "Approved" or "Rejected" nothing said who decided, when or
+    why (the write an approval triggers is audited, but separately and after
+    the fact). Now one update replaces the status and adds the reviewer, the
+    time, an optional reason and, when an admin is acting as someone else, the
+    real person, using the same ``approvedBy`` / ``rejectedBy`` terms the
+    agent-call ledger already uses.
+
+    The update is guarded on the candidate still being Pending, and the
+    result is read back: two reviewers who both saw Pending cannot both
+    record a decision, and the loser gets a :class:`CandidateError` instead of
+    a silent overwrite. The read back compares a per-decision id, not the
+    timestamp, because stores normalise ``xsd:dateTime`` text differently.
+    """
     registry = conn.graph("candidates")
+    _check_decision_inputs(animus, reason)
+    reason = (reason or "").strip()
+    decision_id = uuid.uuid4().hex
+    now = datetime.now(timezone.utc).isoformat()
+    who = "approvedBy" if status == "Approved" else "rejectedBy"
+    parts = [
+        f'hev:candidateStatusValue "{status}"',
+        f'hev:decisionId "{decision_id}"',
+        f'hev:decidedAt "{now}"^^xsd:dateTime',
+    ]
+    person = getattr(animus, "person", None)
+    if person:
+        parts.append(f"hev:{who} <{_decision_iri(person)}>")
+    real = getattr(animus, "real_person", None)
+    if getattr(animus, "acting_as", False) and real:
+        parts.append(f"hev:decidedByReal <{_decision_iri(real)}>")
+    if reason:
+        parts.append(f'hev:decisionReason "{escape_literal(reason)}"')
     await client.update(
         conn,
         f"""PREFIX hev: <{HEV_NAMESPACE}>
-DELETE {{ GRAPH <{registry}> {{ <{candidate.iri}> hev:candidateStatusValue ?old }} }}
-INSERT {{ GRAPH <{registry}> {{ <{candidate.iri}> hev:candidateStatusValue "{status}" }} }}
-WHERE  {{ GRAPH <{registry}> {{ <{candidate.iri}> hev:candidateStatusValue ?old }} }}""",
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+DELETE {{ GRAPH <{registry}> {{ <{candidate.iri}> hev:candidateStatusValue "Pending" }} }}
+INSERT {{ GRAPH <{registry}> {{ <{candidate.iri}> {" ; ".join(parts)} }} }}
+WHERE  {{ GRAPH <{registry}> {{ <{candidate.iri}> hev:candidateStatusValue "Pending" }} }}""",
     )
+    fresh = await get_candidate(client, conn, candidate.iri)
+    if fresh is None or fresh.decision_id != decision_id:
+        raise CandidateError("the candidate was decided by someone else first")
 
 
 async def approve_candidate(
@@ -754,6 +838,7 @@ async def approve_candidate(
     *,
     animus: Animus,
     shapes_graph: str | None = None,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     """Merge exactly the Turtle the candidate staged into its target graph.
 
@@ -796,6 +881,7 @@ async def approve_candidate(
     """
     if candidate.status != "Pending":
         raise CandidateError(f"candidate is already {candidate.status}")
+    _check_decision_inputs(animus, reason)  # before the merge, so a bad input writes nothing
 
     if candidate.turtle.strip():
         result = await write_turtle_to_graph(
@@ -820,16 +906,25 @@ async def approve_candidate(
             "validation": None,
         }
 
-    await _set_candidate_status(client, conn, candidate=candidate, status="Approved")
+    await _decide_candidate(
+        client, conn, candidate=candidate, status="Approved", animus=animus, reason=reason
+    )
     return result
 
 
 async def reject_candidate(
-    client: FusekiClient, conn: Conn, candidate: Candidate
+    client: FusekiClient,
+    conn: Conn,
+    candidate: Candidate,
+    *,
+    animus: Animus | None = None,
+    reason: str | None = None,
 ) -> None:
     if candidate.status != "Pending":
         raise CandidateError(f"candidate is already {candidate.status}")
-    await _set_candidate_status(client, conn, candidate=candidate, status="Rejected")
+    await _decide_candidate(
+        client, conn, candidate=candidate, status="Rejected", animus=animus, reason=reason
+    )
 
 
 # --- evaluation ------------------------------------------------------------------

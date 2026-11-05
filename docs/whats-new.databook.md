@@ -2,9 +2,9 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.25
+version: 1.0.26
 created: 2026-09-27
-updated: 2026-11-01
+updated: 2026-11-05
 author:
   - name: Kurt Cagle
     iri: https://holongraph.com/people/kurt-cagle
@@ -45,6 +45,27 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-11-05 (candidate decisions are recorded)
+
+- **A candidate now keeps who decided it, when and why.** Approving or
+  rejecting a candidate only overwrote `hev:candidateStatusValue`, so a
+  decided candidate said nothing about the reviewer, the time or the reason
+  (the write an approval triggers is audited separately, after the fact). The
+  decision is now one guarded update that replaces the status and adds
+  `hev:approvedBy` or `hev:rejectedBy` (the same terms the agent-call ledger
+  uses), `hev:decidedAt`, an optional `hev:decisionReason` (up to 1000
+  characters), `hev:decidedByReal` when an admin is acting as someone else, and
+  a `hev:decisionId`. The update only matches a candidate that is still
+  Pending and is read back, so two reviewers who both saw Pending cannot both
+  record a decision: the second gets a 409. A bad reason or reviewer identity is
+  refused before the approval's merge runs. `POST /candidate/{id}/approve` and
+  `/reject` and the matching MCP tools take an optional `reason`; candidate
+  listings and detail show `decidedBy`, `decidedAt`, `decisionReason` and
+  `decidedByReal`. Candidates decided before this change have no record. Not
+  changed: the approval's merge and the status update are still two steps, so a
+  failure between them leaves a merged candidate Pending (the merge is additive
+  and safe to repeat).
 
 ### 2026-11-01 (ingest from a URL: outbound policy)
 
@@ -585,6 +606,12 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-11-05-a a hb:ReleaseNote ;
+    dcterms:date "2026-11-05"^^xsd:date ;
+    rdfs:label "Candidates keep who approved or rejected them, when and why" ;
+    dcterms:description "approve_candidate and reject_candidate replace the candidate's status in one update guarded on it still being Pending and add approvedBy or rejectedBy, decidedAt, an optional decisionReason, decidedByReal for an admin acting as someone else, and a decisionId; the result is read back, so a second reviewer gets a 409 instead of overwriting the first. The approve and reject routes and MCP tools take an optional reason." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pulls> .
 
 hb:release-2026-11-01-g a hb:ReleaseNote ;
     dcterms:date "2026-11-01"^^xsd:date ;
