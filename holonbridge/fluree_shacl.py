@@ -50,7 +50,7 @@ from .conn import Conn
 FLUREE_BIN_ENV = "FLUREE_BIN"
 #: Install path used when ``FLUREE_BIN`` is unset. ``fluree`` on PATH is not
 #: acceptable: a launchd job has a minimal PATH.
-DEFAULT_FLUREE_BIN = "/Users/ben/.local/opt/fluree/4.2.4/fluree"
+DEFAULT_FLUREE_BIN = os.path.join(os.path.expanduser("~"), ".local", "opt", "fluree", "4.2.4", "fluree")
 #: Seconds one ``fluree validate`` call may take.
 FLUREE_TIMEOUT_ENV = "FLUREE_VALIDATE_TIMEOUT"
 DEFAULT_TIMEOUT = 60.0
