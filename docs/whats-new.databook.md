@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.28
+version: 1.0.29
 created: 2026-09-27
 updated: 2026-11-07
 author:
@@ -45,6 +45,19 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-11-07 (env audit script)
+
+- **`scripts/env_audit.py` lists a `.env`'s variables and finds orphans without
+  reading values:
+  [PR #82](https://github.com/kurtcagle/holon-bridge-python/pull/82).**
+  Run it where the real `.env` lives; the report has names, descriptions and file
+  locations only, and a test holds it to that with sentinel secrets. It sorts
+  names into current (the Python code reads them, found by AST including helper
+  functions), used only by scripts, orphan candidates, read-by-code-but-undefined,
+  and documented-but-unread. "Orphan" means nothing in this repository refers to
+  the name, so a variable used by Fuseki, ngrok or a launcher still needs a human
+  check. A test also fails if `.env.example` documents a name nothing refers to.
 
 ### 2026-11-07 (JSON-LD input and output)
 
@@ -644,6 +657,12 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-11-07-c a hb:ReleaseNote ;
+    dcterms:date "2026-11-07"^^xsd:date ;
+    rdfs:label "env_audit.py: audit a .env by name, not value, and find orphaned variables" ;
+    dcterms:description "scripts/env_audit.py --env FILE reads only the variable names in a .env (nothing after the = is stored or reported, not even whether it is empty) and writes a markdown or JSON report: current variables with descriptions and where the code reads them, variables used only by shell or PowerShell scripts, orphan candidates, variables the code reads that the file lacks, and variables .env.example documents that nothing reads. Reads are found with the AST, including helper functions such as _flag. Descriptions come from .env.example, then the comment beside the code. Orphan means no reference in this repository; Fuseki, ngrok or launcher use needs a manual check, and agent credentials referenced as env:NAME from the graph are handled as the HB_AGENT_ family. A sentinel-secrets test covers every output; another fails when .env.example documents an unreferenced variable." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/82> .
 
 hb:release-2026-11-07-b a hb:ReleaseNote ;
     dcterms:date "2026-11-07"^^xsd:date ;
