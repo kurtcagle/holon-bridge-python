@@ -1209,6 +1209,25 @@ nothing — plenty of setups supply real environment variables directly and
 have no file at all — but an explicit path is a promise, and a broken one
 should say so immediately.
 
+### Auditing a `.env` without exposing it
+
+`python scripts/env_audit.py --env /path/to/.env` lists every variable the file
+defines with a description, and says which ones the code still reads. It reads
+names only: no value, and nothing derived from one (not even whether it is
+empty), is stored or printed, and a test runs it over a file of sentinel secrets
+to hold it to that. Run it where the real `.env` lives and share the report, not
+the file. `--format json` and `--out FILE` are there for pasting or diffing.
+
+The report has five parts: defined and read (current); used only by scripts;
+orphan candidates (defined, referenced nowhere in the repository); read by the
+code but not defined (the default applies); and documented in `.env.example` but
+not read. "Orphan" is a candidate, not a verdict. The tool sees this repository
+only, so a variable used by Fuseki, ngrok or a launcher looks orphaned here, and
+`env:NAME` credentials registered on agent endpoints live in the graph (the
+`HB_AGENT_` family is treated as current for that reason). Descriptions come from
+`.env.example`, then from the comment beside the code that reads the variable;
+one marked † is a nearby comment that may describe a group.
+
 ### Credentials: one token, one role, and claiming a dataset
 
 A token to the REST bridge is exactly one of three kinds, and the bridge refuses
