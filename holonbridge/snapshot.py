@@ -53,7 +53,7 @@ import os
 import re
 import shutil
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -103,6 +103,24 @@ def _dir(settings: Settings, dataset: str) -> Path:
 
 def _id_for(created_at: datetime) -> str:
     return created_at.strftime("%Y%m%dT%H%M%SZ")
+
+
+def id_time(snap_id: str) -> datetime:
+    """The UTC time an id (``20261028T041706Z`` or ``...Z-2``) was minted."""
+    return datetime.strptime(snap_id[:16], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+
+
+def expired_ids(ids: list[str], max_age_days: int, now: datetime | None = None) -> list[str]:
+    """Ids older than ``max_age_days``, oldest first. ``ids`` is oldest first.
+
+    The newest id is never returned, however old: an age limit must not be able to
+    leave a dataset with no snapshot or export at all (the same reasoning as refusing
+    to snapshot an empty dataset). 0 turns the limit off.
+    """
+    if max_age_days <= 0 or len(ids) < 2:
+        return []
+    cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=max_age_days)
+    return [i for i in ids[:-1] if id_time(i) < cutoff]
 
 
 def _unused_id(directory: Path, base: str) -> str:
@@ -254,10 +272,11 @@ async def take(client: FusekiClient, conn: Conn, settings: Settings, *, by: str)
     # Only now, with the new one safely in place, drop the oldest beyond the limit.
     ids = snapshot_ids(settings, conn.dataset)
     keep = max(1, settings.snapshot_keep)
-    for old in ids[:-keep]:
+    drop = set(ids[:-keep]) | set(expired_ids(ids, settings.snapshot_max_age_days))
+    for old in drop:
         shutil.rmtree(directory / old, ignore_errors=True)
 
-    return Taken(conn.dataset, snap_id, len(contents), total, created_at, kept=min(len(ids), keep))
+    return Taken(conn.dataset, snap_id, len(contents), total, created_at, kept=len(ids) - len(drop))
 
 
 @dataclass(frozen=True)

@@ -658,8 +658,21 @@ class AuditMiddleware(BaseHTTPMiddleware):
                 and outcome == "allowed"
                 and (
                     template.startswith("/audit")
-                    or template in ("/admin/dataset/initialise", "/admin/dataset/shapes", "/admin/dataset/snapshot", "/admin/dataset/restore", "/datasets")
+                    or template in (
+                        "/admin/dataset/initialise",
+                        "/admin/dataset/shapes",
+                        "/admin/dataset/snapshot",
+                        "/admin/dataset/restore",
+                        "/admin/dataset/export",
+                        "/admin/dataset/export/{export_id}/link",
+                        "/datasets",
+                    )
                 )
+            )
+            # A download on a valid signed link is a read, but it hands the whole dataset to
+            # whoever holds the link, so like the mutations above it is not left to the level.
+            forced = forced or (
+                outcome == "allowed" and template == "/admin/dataset/export/{dataset}/{export_id}/download"
             )
             if not forced and not should_record(level, outcome, mutation, security_read):
                 return

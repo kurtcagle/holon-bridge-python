@@ -21,6 +21,10 @@ CHANGED 2026-10-27: added ``seed_dataset_shapes``, for a dataset that came back
 empty (an in-memory one after a Fuseki restart). Same gate as ``create_dataset``.
 Also ``snapshot_dataset`` / ``restore_dataset``: checkpoint a dataset's graphs to
 files before a restart and put them back after.
+
+CHANGED 2026-11-07: added ``export_dataset`` / ``list_exports`` / ``export_download_link``:
+the whole dataset as one zipped TriG file, fetchable on a link that expires. Unlike a
+snapshot it is portable, and unlike a snapshot it can leave the bridge's host.
 """
 
 from __future__ import annotations
@@ -255,3 +259,60 @@ async def list_snapshots() -> dict:
     metadata only, never contents.
     """
     return await _call("GET", "/admin/dataset/snapshots")
+
+
+@mcp.tool()
+async def export_dataset(link_ttl_seconds: int | None = None) -> dict:
+    """Write the ACTIVE dataset as ONE zipped TriG file you can fetch and keep somewhere else.
+
+    A snapshot (``snapshot_dataset``) is a checkpoint on the bridge's own disk, for a
+    restore into the same host; nothing returns it, so it is lost with the host. An export
+    is portable: ``{id}.trig.zip`` holds every graph as a TriG ``GRAPH`` block (and the
+    default graph, if it has triples) plus a ``manifest.json`` with a sha256, and any triple
+    store can load it. Blank nodes are kept distinct per graph. Graphs pass through as text,
+    so RDF 1.2 triple terms are not parsed or lost.
+
+    The response carries an expiring download link when the operator has set
+    ``EXPORT_SIGNING_KEY`` (``downloadPath``, plus ``downloadUrl`` if
+    ``EXPORT_PUBLIC_BASE_URL`` is set); without it, ``linkError`` says so and the file stays on
+    the host under ``SNAPSHOT_DIR/{dataset}/exports/``. ``link_ttl_seconds`` shortens or
+    lengthens the link (60 to 86400; default 15 minutes). Anyone holding a live link can
+    download the export, which contains identity, delegation and audit graphs, so treat the
+    link and the file as secret.
+
+    Needs admin on the dataset. Keeps the newest ``SNAPSHOT_KEEP`` exports and drops any older
+    than the operator's ``SNAPSHOT_MAX_AGE_DAYS`` (never the newest). Refuses an empty
+    dataset, and one over ``EXPORT_MAX_BYTES``. Off unless the operator set ``SNAPSHOT_DIR``.
+    Acts on the active dataset -- ``switch_dataset`` first.
+    """
+    body: dict = {}
+    if link_ttl_seconds is not None:
+        body["linkTtlSeconds"] = link_ttl_seconds
+    return await _call("POST", "/admin/dataset/export", json_body=body)
+
+
+@mcp.tool()
+async def list_exports() -> dict:
+    """List the ACTIVE dataset's exports, newest first (id, time, who, size, sha256).
+
+    Use an id with ``export_download_link`` to get a fresh link to an earlier export.
+    Needs admin on the dataset. Metadata only, never contents; ``linksEnabled`` says whether
+    the operator has turned download links on.
+    """
+    return await _call("GET", "/admin/dataset/exports")
+
+
+@mcp.tool()
+async def export_download_link(export_id: str, ttl_seconds: int | None = None) -> dict:
+    """Make a fresh expiring download link for an existing export of the ACTIVE dataset.
+
+    ``export_id`` is from ``list_exports`` or ``export_dataset``. ``ttl_seconds`` is 60 to
+    86400 (default: the operator's ``EXPORT_LINK_TTL``, 15 minutes). The link names one file
+    and needs no token, so whoever holds it can fetch the export until it expires: share it
+    accordingly. Needs admin on the dataset, and every link made is audited. 503 when the
+    operator has not set ``EXPORT_SIGNING_KEY``.
+    """
+    body: dict = {}
+    if ttl_seconds is not None:
+        body["ttlSeconds"] = ttl_seconds
+    return await _call("POST", f"/admin/dataset/export/{export_id}/link", json_body=body)

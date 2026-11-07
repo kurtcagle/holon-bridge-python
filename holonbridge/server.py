@@ -29,6 +29,7 @@ from .routes import (
     dataset_admin,
     dataset_claim,
     dataset_create,
+    dataset_export,
     dataset_snapshot,
     delegation,
     events,
@@ -130,6 +131,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(dataset_claim.router)
     app.include_router(dataset_create.router)
     app.include_router(dataset_snapshot.router)
+    app.include_router(dataset_export.router)
     app.include_router(delegation.router)
     app.include_router(audit_routes.router)
     app.include_router(named_queries.router)

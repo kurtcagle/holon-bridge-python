@@ -163,6 +163,21 @@ class FusekiClient:
             raise FusekiError(response.status_code, response.text.strip(), endpoint=url)
         return response.text
 
+    async def get_graph_ntriples(self, conn: Conn, graph_iri: str | None) -> str:
+        """One named graph (or the default graph when ``graph_iri`` is ``None``) as
+        N-Triples. Line-based and prefix-free, which is what lets an export wrap it
+        in a TriG ``GRAPH`` block without the bridge ever parsing it."""
+        target = "default" if graph_iri is None else urlencode({"graph": graph_iri})
+        url = f"{conn.gsp_endpoint}?{target}"
+        response = await self._client.get(
+            url, headers=self._headers(conn, {"Accept": "application/n-triples"})
+        )
+        if response.status_code == 404:
+            return ""
+        if response.status_code >= 400:
+            raise FusekiError(response.status_code, response.text.strip(), endpoint=url)
+        return response.text
+
     async def drop_graph(self, conn: Conn, graph_iri: str) -> None:
         await self.update(conn, f"DROP SILENT GRAPH <{graph_iri}>")
 

@@ -243,6 +243,10 @@ class GraphStoreStub:
     async def get_graph(self, conn, graph_iri):
         return self.ds.get_context(URIRef(graph_iri)).serialize(format="turtle")
 
+    async def get_graph_ntriples(self, conn, graph_iri):
+        graph = self.ds.default_context if graph_iri is None else self.ds.get_context(URIRef(graph_iri))
+        return graph.serialize(format="nt")
+
     async def post_graph(self, conn, graph_iri, turtle):
         self.ds.get_context(URIRef(graph_iri)).parse(data=turtle, format="turtle")
 
