@@ -44,7 +44,8 @@ from pydantic import BaseModel, Field
 from ..databook import DataBook
 from ..deps import AnimusDep, ClientDep, ConnDep, SettingsDep
 from ..ingest import write_turtle_to_graph
-from ..turtle import TurtleSyntaxError, from_json_ld, parse
+from ..jsonld import json_ld_to_turtle
+from ..turtle import TurtleSyntaxError, parse
 
 router = APIRouter(tags=["events"])
 
@@ -122,7 +123,7 @@ async def create_message(
 
     if block.lang == "json-ld":
         try:
-            turtle_payload = from_json_ld(block.body)
+            turtle_payload = await json_ld_to_turtle(block.body, settings=settings)
         except TurtleSyntaxError as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     else:

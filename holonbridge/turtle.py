@@ -91,20 +91,16 @@ def parse(turtle: str, *, base: str | None = None) -> Graph:
 def from_json_ld(text: str, *, base: str | None = None) -> str:
     """Convert a JSON-LD payload to Turtle.
 
-    Used by create_holon and create_message when a DataBook's matched
-    block is ``json-ld`` rather than ``turtle``/``turtle12`` -- the result
-    goes on to the same ``write_turtle_to_graph`` path either way, so
-    Fuseki only ever receives ``text/turtle``. Raises
-    :class:`TurtleSyntaxError` on a payload rdflib cannot parse as
-    JSON-LD, same failure type ``parse`` raises for Turtle, so callers can
-    catch one exception regardless of which serialisation a block used.
+    Delegates to :func:`holonbridge.jsonld.from_json_ld_local`: remote
+    ``@context`` references and named graphs are refused rather than fetched or
+    silently dropped. Request handlers should call
+    :func:`holonbridge.jsonld.json_ld_to_turtle` instead, which also honours
+    ``JSONLD_FETCH_CONTEXTS``. Raises :class:`TurtleSyntaxError` (or its
+    subclass ``JsonLdError``), the same failure type ``parse`` raises for Turtle.
     """
-    graph = Graph()
-    try:
-        graph.parse(data=text, format="json-ld", publicID=base)
-    except Exception as exc:  # rdflib raises a range of parser errors
-        raise TurtleSyntaxError(f"could not parse json-ld payload: {exc}") from exc
-    return graph.serialize(format="turtle")
+    from .jsonld import from_json_ld_local
+
+    return from_json_ld_local(text, base=base)
 
 
 def serialise(graph: Graph) -> str:

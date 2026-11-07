@@ -49,15 +49,18 @@ route). ``GET /graphs`` (names and triple counts only) is unchanged.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query, status
+from typing import Literal
+
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .. import audit
 from .. import delegation as dg
 from ..acl import authorize_query, check_replace, extract_graph_refs
 from ..deps import AnimusDep, ClientDep, ConnDep, SettingsDep
-from ..fuseki import FusekiError
+from ..fuseki import JSONLD, FusekiError
+from ..jsonld import JsonLdError, json_ld_to_turtle, render, settings_for, to_http
 from ..trigger_hook import after_write
 from ..ingest import write_turtle_to_graph
 from ..turtle import TurtleSyntaxError, parse
@@ -71,7 +74,23 @@ ORDER BY ?g"""
 
 
 class PushRequest(BaseModel):
-    turtle: str = Field(..., min_length=1)
+    turtle: str | None = Field(
+        default=None,
+        min_length=1,
+        description="the payload (Turtle, or JSON-LD when format is json-ld)",
+    )
+    data: str | None = Field(
+        default=None,
+        min_length=1,
+        description="synonym for turtle, for a payload that is not Turtle",
+    )
+    format: Literal["turtle", "json-ld"] = Field(
+        default="turtle",
+        description=(
+            "serialisation of the payload. json-ld is converted to Turtle by the "
+            "bridge (default graph only; remote @context refused)"
+        ),
+    )
     graph_iri: str = Field(..., min_length=1)
     shapes_graph: str | None = None
     mode: str = Field(default="merge", pattern="^(merge|replace)$")
@@ -84,6 +103,16 @@ class PushRequest(BaseModel):
             "CONSTRUCT needs to look like."
         ),
     )
+
+    @model_validator(mode="after")
+    def _one_payload(self) -> PushRequest:
+        if (self.turtle is None) == (self.data is None):
+            raise ValueError("send the payload in exactly one of 'turtle' or 'data'")
+        return self
+
+    @property
+    def payload(self) -> str:
+        return self.turtle if self.turtle is not None else self.data  # type: ignore[return-value]
 
 
 @router.get("/graphs")
@@ -114,8 +143,14 @@ async def list_graphs(
 
 @router.get("/graph", response_class=PlainTextResponse)
 async def get_graph(
-    conn: ConnDep, client: ClientDep, animus: AnimusDep, iri: str = Query(...)
-) -> str:
+    conn: ConnDep,
+    client: ClientDep,
+    animus: AnimusDep,
+    request: Request,
+    iri: str = Query(...),
+    format: Literal["turtle", "json-ld"] = Query(default="turtle"),
+    jsonld_form: Literal["compact", "expanded"] = Query(default="compact"),
+) -> Response:
     """Return one named graph as Turtle, under the same read rules as
     ``POST /sparql/select`` -- see the module docstring's 2026-09-30 note.
 
@@ -159,25 +194,44 @@ async def get_graph(
         )
 
     try:
-        return await client.get_graph(conn, safe)
+        rendered = await render(
+            lambda: client.get_graph(conn, safe),
+            lambda: client.get_graph(conn, safe, accept=JSONLD),
+            fmt=format,
+            form=jsonld_form,
+            settings=settings_for(request),
+        )
     except FusekiError as exc:
         raise HTTPException(exc.status or 502, detail=exc.as_dict()) from exc
+    except JsonLdError as exc:
+        raise to_http(exc) from exc
+    headers = {"X-JSONLD-Engine": rendered.engine} if rendered.engine else None
+    media = rendered.media_type if format == "json-ld" else "text/plain"
+    return PlainTextResponse(rendered.text, media_type=media, headers=headers)
 
 
 @router.post("/graph/push")
 async def push_turtle(
     body: PushRequest, conn: ConnDep, client: ClientDep, settings: SettingsDep, animus: AnimusDep
 ) -> dict:
-    # Optional local pre-parse. Off by default: rdflib cannot read Turtle 1.2,
-    # so Jena stays the syntax authority unless the operator opts in.
-    if settings.parse_mode == "local":
+    if body.format == "json-ld":
+        # Converted once, here, so the single GSP write path stays Turtle.
         try:
-            parse(body.turtle)
-        except TurtleSyntaxError as exc:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+            turtle_payload = await json_ld_to_turtle(body.payload, settings=settings)
+        except JsonLdError as exc:
+            raise to_http(exc) from exc
+    else:
+        turtle_payload = body.payload
+        # Optional local pre-parse. Off by default: rdflib cannot read Turtle 1.2,
+        # so Jena stays the syntax authority unless the operator opts in.
+        if settings.parse_mode == "local":
+            try:
+                parse(turtle_payload)
+            except TurtleSyntaxError as exc:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     return await write_turtle_to_graph(
-        turtle=body.turtle,
+        turtle=turtle_payload,
         graph_iri=body.graph_iri,
         mode=body.mode,
         shapes_graph=body.shapes_graph,

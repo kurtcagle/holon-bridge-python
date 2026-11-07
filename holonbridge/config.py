@@ -202,6 +202,17 @@ class Settings:
     # Largest response ``source_url`` will read, in bytes, counted after
     # decompression. Larger responses are abandoned and the ingest fails.
     fetch_max_bytes: int = 10 * 1024 * 1024
+    # JSON-LD (holonbridge/jsonld.py). A JSON-LD payload may name a remote
+    # ``@context``; by default the bridge refuses those rather than fetch them
+    # (``JSONLD_FETCH_CONTEXTS``). Turned on, each context is fetched through the
+    # same egress policy as ``/ingest`` (``FETCH_ALLOWLIST``) and inlined.
+    jsonld_fetch_contexts: bool = False
+    # Largest JSON-LD document read (input) or produced (output), in bytes.
+    jsonld_max_bytes: int = 5 * 1024 * 1024
+    # Which engine writes JSON-LD output: ``rdflib`` (in-process; the default) or
+    # ``jena`` (asks Fuseki for ``application/ld+json``, falling back to rdflib
+    # when Fuseki cannot produce it).
+    jsonld_output_engine: str = "rdflib"
     # Hosts an agent endpoint may point at (``AGENT_ALLOWLIST``; same entry
     # syntax as the webhook allowlist, deliberately a separate setting: what a
     # projection may be pushed to and what an agent may be sent are different
@@ -330,6 +341,9 @@ class Settings:
             webhook_allowlist=parse_allowlist(os.getenv("WEBHOOK_ALLOWLIST")),
             fetch_allowlist=parse_allowlist(os.getenv("FETCH_ALLOWLIST")),
             fetch_max_bytes=max(1, int(os.getenv("FETCH_MAX_BYTES", str(10 * 1024 * 1024)))),
+            jsonld_fetch_contexts=_flag("JSONLD_FETCH_CONTEXTS", False),
+            jsonld_max_bytes=max(1, int(os.getenv("JSONLD_MAX_BYTES", str(5 * 1024 * 1024)))),
+            jsonld_output_engine=_jsonld_engine(os.getenv("JSONLD_OUTPUT_ENGINE")),
             triggers_require_definer=_flag("TRIGGERS_REQUIRE_DEFINER", False),
             agent_allowlist=parse_allowlist(os.getenv("AGENT_ALLOWLIST")),
             agent_credential_prefix=(
@@ -431,6 +445,13 @@ class BankStore:
             raise KeyError(name)
         self._active = name
         return self._banks[name]
+
+
+def _jsonld_engine(raw: str | None) -> str:
+    value = (raw or "rdflib").strip().lower()
+    if value not in ("rdflib", "jena"):
+        raise ValueError(f"JSONLD_OUTPUT_ENGINE must be 'rdflib' or 'jena', not {raw!r}")
+    return value
 
 
 @lru_cache(maxsize=1)

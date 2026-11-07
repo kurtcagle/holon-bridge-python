@@ -80,8 +80,18 @@ async def sparql_select(query: str, graph: str | None = None) -> dict:
 
 
 @mcp.tool()
-async def sparql_construct(query: str, graph: str | None = None) -> str | dict:
-    """Run a SPARQL CONSTRUCT or DESCRIBE. Returns Turtle.
+async def sparql_construct(
+    query: str,
+    graph: str | None = None,
+    format: str = "turtle",
+    jsonld_form: str = "compact",
+) -> str | dict:
+    """Run a SPARQL CONSTRUCT or DESCRIBE. Returns Turtle, or JSON-LD.
+
+    ``format`` is ``turtle`` (default) or ``json-ld``. For JSON-LD,
+    ``jsonld_form`` is ``compact`` (the result's prefixes as the ``@context``)
+    or ``expanded`` (full IRIs, no context). JSON-LD cannot express RDF 1.2
+    triple terms; a result that contains one is refused -- use ``turtle``.
 
     On a refusal (for example a 403 for a graph you may not read) this
     returns the bridge's error object instead of Turtle, hence the
@@ -89,7 +99,15 @@ async def sparql_construct(query: str, graph: str | None = None) -> str | dict:
     failed FastMCP's output validation and hid the bridge's reason.
     """
     return await _call(
-        "POST", "/sparql/construct", json_body={"query": query, "graph": graph}, text=True
+        "POST",
+        "/sparql/construct",
+        json_body={
+            "query": query,
+            "graph": graph,
+            "format": format,
+            "jsonld_form": jsonld_form,
+        },
+        text=True,
     )
 
 
@@ -123,6 +141,37 @@ async def push_turtle(
         "/graph/push",
         json_body={
             "turtle": turtle,
+            "graph_iri": graph_iri,
+            "shapes_graph": shapes_graph,
+            "mode": mode,
+            "reduction_rule_id": reduction_rule_id,
+        },
+    )
+
+
+@mcp.tool()
+async def push_json_ld(
+    json_ld: str,
+    graph_iri: str,
+    shapes_graph: str | None = None,
+    mode: str = "merge",
+    reduction_rule_id: str | None = None,
+) -> dict:
+    """Push a JSON-LD document into a named graph.
+
+    The bridge converts it to Turtle and writes it exactly as ``push_turtle``
+    does, so ``mode``, ``shapes_graph`` and ``reduction_rule_id`` mean the same
+    thing. The document must be a default-graph document: one that contains
+    named graphs is refused rather than partly written, and a ``@context`` given
+    as a URL is refused unless the operator has enabled context fetching --
+    inline the context instead.
+    """
+    return await _call(
+        "POST",
+        "/graph/push",
+        json_body={
+            "data": json_ld,
+            "format": "json-ld",
             "graph_iri": graph_iri,
             "shapes_graph": shapes_graph,
             "mode": mode,
