@@ -121,11 +121,11 @@ Invoke-RestMethod "$env:HB/graphs"   -Headers $h | Select-Object -Expand graphs
 | `POST` | `/admin/act-as` | Admin-only impersonation for exercising real grant checks |
 | `POST` | `/admin/cease-acting-as` | Clear an active act_as override |
 | `POST` | `/sparql/select` | SELECT / ASK → SPARQL JSON |
-| `POST` | `/sparql/construct` | CONSTRUCT / DESCRIBE → Turtle |
+| `POST` | `/sparql/construct` | CONSTRUCT / DESCRIBE → Turtle, or JSON-LD with `format=json-ld` |
 | `POST` | `/sparql/update` | UPDATE against the update endpoint |
 | `GET` | `/graphs` | Named graphs with triple counts, `?filter=` substring |
-| `GET` | `/graph?iri=` | Fetch a named graph as Turtle |
-| `POST` | `/graph/push` | Ingest Turtle; `mode=merge\|replace`; optional SHACL gate |
+| `GET` | `/graph?iri=` | Fetch a named graph as Turtle, or JSON-LD with `format=json-ld` |
+| `POST` | `/graph/push` | Ingest Turtle (or JSON-LD with `format=json-ld`); `mode=merge\|replace`; optional SHACL gate |
 | `DELETE` | `/graph?iri=` | Drop a named graph |
 | `GET` | `/holon?iri=` | Holon projected as a DataBook |
 | `POST` | `/validate` | SHACL report; `mode=auto\|full\|delta` |
@@ -215,6 +215,47 @@ a pipeline you know is 1.1.
 
 Where the bridge genuinely needs triples in-process, it only ever handles
 SHACL reports, which are plain 1.1.
+
+### JSON-LD
+
+The store speaks Turtle; JSON-LD is converted at the bridge's edge and nowhere
+else (`holonbridge/jsonld.py`).
+
+**In.** `POST /graph/push` takes `"format": "json-ld"` with the document in
+`data` (or `turtle`; exactly one of the two). MCP: `push_json_ld`. A DataBook
+`json-ld` block for `create_holon` / `create_message` goes through the same
+code. rdflib parses it and Fuseki still receives only `text/turtle`. Three
+refusals, each an error rather than a quiet loss:
+
+- A `@context` given as a URL is refused (rdflib would otherwise fetch it from
+  the bridge's network position, before authorisation). The operator can set
+  `JSONLD_FETCH_CONTEXTS=true`: each context is then fetched through the
+  `FETCH_ALLOWLIST` egress policy and size cap `/ingest` uses, inlined, and
+  followed up to three levels. `@import` is refused either way.
+- A document containing named graphs is refused, naming them; only a
+  default-graph document can go into the one graph you choose.
+- A document that converts to no triples is refused. JSON-LD drops any key its
+  context does not map, so a context-less document can convert to nothing; with
+  `mode=replace` that would erase the graph. A document where only *some* keys
+  are unmapped still loses those keys without error — that is what JSON-LD
+  expansion does — so give it a `@context` or `@vocab` and check the result.
+
+**Out.** `POST /sparql/construct` and `GET /graph` take `format=json-ld`
+(MCP: `sparql_construct`'s `format`). `jsonld_form` is `compact` (default; the
+result's own prefixes become the `@context`) or `expanded` (full IRIs, no
+context). The response header `X-JSONLD-Engine` says which engine wrote it.
+The default engine is rdflib. `JSONLD_OUTPUT_ENGINE=jena` asks Fuseki for
+`application/ld+json` and falls back to rdflib if Fuseki answers 400, 406, 415
+or 501 or returns something that is not JSON; any other Fuseki failure is
+returned, not retried. JSON-LD cannot express RDF 1.2 triple terms: a result
+containing one is a 422 that points back at `format=turtle`. `JSONLD_MAX_BYTES`
+(5 MB) caps documents read and produced; larger is a 413.
+
+Authorisation is unchanged: a read is checked before anything is fetched or
+converted, and `format` changes only how a permitted result is written.
+
+Tested against a stub Fuseki. The `jena` engine and Jena's JSON-LD writer
+have not been run against a live Fuseki.
 
 ### One `Conn` per request
 

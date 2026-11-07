@@ -40,14 +40,17 @@ See ``acl.analyse_graph_refs`` and ``acl.authorize_update`` for the rules.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, status
+from typing import Literal
+
+from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from .. import audit
 from ..acl import analyse_graph_refs, authorize_query, authorize_update
 from ..deps import AnimusDep, ClientDep, ConnDep
-from ..fuseki import FusekiError
+from ..fuseki import JSONLD, FusekiError
+from ..jsonld import JsonLdError, render, settings_for, to_http
 from ..trigger_hook import after_write_update
 from ..sparql_kind import classify
 
@@ -58,6 +61,19 @@ class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1)
     graph: str | None = Field(
         default=None, description="restrict to this named graph as default graph"
+    )
+
+
+class ConstructRequest(QueryRequest):
+    format: Literal["turtle", "json-ld"] = Field(
+        default="turtle", description="serialisation of the result"
+    )
+    jsonld_form: Literal["compact", "expanded"] = Field(
+        default="compact",
+        description=(
+            "for format=json-ld: compact (the result's prefixes as the @context) "
+            "or expanded (full IRIs, no @context)"
+        ),
     )
 
 
@@ -138,14 +154,37 @@ async def select(
 
 @router.post("/construct", response_class=PlainTextResponse)
 async def construct(
-    body: QueryRequest, conn: ConnDep, client: ClientDep, animus: AnimusDep
-) -> str:
+    body: ConstructRequest,
+    conn: ConnDep,
+    client: ClientDep,
+    animus: AnimusDep,
+    request: Request,
+) -> Response:
+    """CONSTRUCT/DESCRIBE, as Turtle (default) or JSON-LD.
+
+    The query is authorised before any serialisation work, and a JSON-LD
+    request changes only how the result is written, never what it contains.
+    """
     _guard(body.query, expect_update=False)
     await _authorize_read(body.query, conn, client, animus)
     try:
-        return await client.construct(conn, body.query, default_graph=body.graph)
+        rendered = await render(
+            lambda: client.construct(conn, body.query, default_graph=body.graph),
+            lambda: client.construct(
+                conn, body.query, default_graph=body.graph, accept=JSONLD
+            ),
+            fmt=body.format,
+            form=body.jsonld_form,
+            settings=settings_for(request),
+        )
     except FusekiError as exc:
         raise HTTPException(exc.status or 502, detail=exc.as_dict()) from exc
+    except JsonLdError as exc:
+        raise to_http(exc) from exc
+    headers = {"X-JSONLD-Engine": rendered.engine} if rendered.engine else None
+    # Turtle keeps the content type this route has always returned (text/plain).
+    media = rendered.media_type if body.format == "json-ld" else "text/plain"
+    return PlainTextResponse(rendered.text, media_type=media, headers=headers)
 
 
 @router.post("/update")

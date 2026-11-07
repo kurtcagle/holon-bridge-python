@@ -36,7 +36,8 @@ from ..fuseki import FusekiError
 from ..holon import PROJECTION_MODES, AsOfUnsupportedError, get_holon
 from ..ingest import write_turtle_to_graph
 from ..persona_scope import SCOPED_ROLES, resolve_scope_graphs
-from ..turtle import TurtleSyntaxError, from_json_ld, parse
+from ..jsonld import json_ld_to_turtle
+from ..turtle import TurtleSyntaxError, parse
 
 router = APIRouter(tags=["holon"])
 
@@ -239,7 +240,7 @@ async def create_holon(
 
     if block.lang == "json-ld":
         try:
-            turtle_payload = from_json_ld(block.body)
+            turtle_payload = await json_ld_to_turtle(block.body, settings=settings)
         except TurtleSyntaxError as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     else:

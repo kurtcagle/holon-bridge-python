@@ -16,6 +16,7 @@ from .conn import Conn
 
 SPARQL_JSON = "application/sparql-results+json"
 TURTLE = "text/turtle"
+JSONLD = "application/ld+json"
 
 
 class FusekiTimeout(RuntimeError):
@@ -117,8 +118,10 @@ class FusekiClient:
         *,
         default_graph: str | None = None,
         timeout: float | None = None,
+        accept: str = TURTLE,
     ) -> str:
-        """Run a CONSTRUCT/DESCRIBE and return Turtle."""
+        """Run a CONSTRUCT/DESCRIBE and return the result in ``accept`` (Turtle
+        unless a caller asks Fuseki for another RDF syntax, e.g. JSON-LD)."""
         url = conn.query_endpoint
         if default_graph:
             url = f"{url}?{urlencode({'default-graph-uri': default_graph})}"
@@ -127,7 +130,7 @@ class FusekiClient:
             conn=conn,
             content=query,
             content_type="application/sparql-query",
-            accept=TURTLE,
+            accept=accept,
             timeout=timeout,
         )
         return response.text
@@ -152,10 +155,10 @@ class FusekiClient:
         """Merge into a named graph (GSP POST)."""
         await self._gsp(conn, graph_iri, turtle, method="POST")
 
-    async def get_graph(self, conn: Conn, graph_iri: str) -> str:
+    async def get_graph(self, conn: Conn, graph_iri: str, *, accept: str = TURTLE) -> str:
         url = f"{conn.gsp_endpoint}?{urlencode({'graph': graph_iri})}"
         response = await self._client.get(
-            url, headers=self._headers(conn, {"Accept": TURTLE})
+            url, headers=self._headers(conn, {"Accept": accept})
         )
         if response.status_code == 404:
             return ""
