@@ -1275,6 +1275,37 @@ no way to drop a dataset, so removing one stays a deliberate step in Fuseki.
   snapshot; a trailing `/` or `\` makes no difference, and forward slashes are the
   safe choice on Windows). Checked live: a `memory` dataset snapshotted, Fuseki
   restarted, then restored with its owner, shapes and data intact.
+- **Export as one zipped TriG file.** A snapshot is a checkpoint on the bridge's own
+  disk for a restore into the same host, and nothing returns it, so it is lost with
+  the host. `POST /admin/dataset/export` (MCP `export_dataset`) writes the whole active
+  dataset as `SNAPSHOT_DIR/{dataset}/exports/{id}.trig.zip`: one TriG file (every named
+  graph as a `GRAPH <iri> { ... }` block, and the default graph, if it has triples, as
+  `{ ... }`) plus a `manifest.json` with a sha256 and per-graph counts. Any triple store
+  can load it. Graphs are fetched as N-Triples and wrapped as text, never parsed, so RDF
+  1.2 triple terms pass through; blank-node labels are prefixed per graph (`_:g0002_b0`)
+  so two graphs that both contain `_:b0` stay different nodes, by a tokeniser that never
+  touches text inside an IRI or a string literal. The zip is streamed to a temporary file
+  and moved into place when complete; memory is the largest single graph. `EXPORT_MAX_BYTES`
+  (default 200 MB, uncompressed) is checked as it is written, so a refused export leaves
+  nothing behind. Needs **admin on the dataset** (the file holds identity, delegation and
+  audit graphs too); an empty dataset, or one holding only its audit graph, is never
+  exported. Retention is the newest `SNAPSHOT_KEEP` plus, if `SNAPSHOT_MAX_AGE_DAYS` is set,
+  nothing older than that (also applied to snapshots), except that the **newest is always
+  kept**; pruning happens only after the new file is in place. `GET /admin/dataset/exports`
+  (`list_exports`) lists them, metadata only.
+  **Getting it off the host:** with `EXPORT_SIGNING_KEY` set (32+ characters), the export
+  response carries an expiring link (`downloadPath`, plus `downloadUrl` when
+  `EXPORT_PUBLIC_BASE_URL` is set), and `POST /admin/dataset/export/{id}/link`
+  (`export_download_link`) makes a fresh one for an earlier export. `EXPORT_LINK_TTL` is
+  the default life (900 s; 60 to 86400 per request). A link is an HMAC over dataset, export
+  id and expiry, names one file, and needs no bearer token, so `curl` from another machine
+  fetches it; anyone holding a live link can download the export, so treat it like the
+  export. Every bad link (signature, expiry, names, links off) is the same 403, and a
+  refused link is not audited because the dataset in the URL is the caller's until the
+  signature checks out. Exports, link-making and valid downloads are always audited.
+  Without a key the file is still written and stays on the host. Not built yet: restoring
+  from an export (use a snapshot for that), a scheduled export, and pushing the file off
+  the host on its own.
 - Gate: `DATASET_CREATORS`, a comma-separated list, empty by default (which
   turns creation off). Same standard as claiming — an identity token, or a
   proxy asserting an identity, that is on the list; never the legacy token or an

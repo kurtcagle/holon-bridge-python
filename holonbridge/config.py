@@ -232,6 +232,21 @@ class Settings:
     snapshot_dir: Path | None = None
     snapshot_max_bytes: int = 50_000_000
     snapshot_keep: int = 5  # newest snapshots kept per dataset
+    # Snapshots and exports older than this many days are removed after a new
+    # one is written, except that the newest is always kept. 0 = no age limit.
+    snapshot_max_age_days: int = 0
+    # ``export_dataset`` writes one zipped TriG file under
+    # ``SNAPSHOT_DIR/{dataset}/exports/``. ``export_max_bytes`` caps the
+    # uncompressed TriG (checked as it is written, so a refused export leaves
+    # nothing behind). Memory use is the largest single graph, not the dataset.
+    export_max_bytes: int = 200_000_000
+    # Signs the expiring download links for exports. Unset (or under 32
+    # characters) turns links off; exports are still written. Never logged.
+    export_signing_key: str | None = None
+    export_link_ttl: int = 900  # seconds a link lives unless the caller asks for less/more
+    # If set, a link is also returned as an absolute URL on this base
+    # (for example the bridge's public ngrok address); otherwise just the path.
+    export_public_base_url: str | None = None
     allow_legacy_bearer: bool = True
 
     # Turtle handling. ``passthrough`` sends payloads to Jena unparsed, which
@@ -325,6 +340,11 @@ class Settings:
             snapshot_dir=Path(os.environ["SNAPSHOT_DIR"]) if os.getenv("SNAPSHOT_DIR") else None,
             snapshot_max_bytes=int(os.getenv("SNAPSHOT_MAX_BYTES", "50000000")),
             snapshot_keep=max(1, int(os.getenv("SNAPSHOT_KEEP", "5"))),
+            snapshot_max_age_days=max(0, int(os.getenv("SNAPSHOT_MAX_AGE_DAYS", "0"))),
+            export_max_bytes=max(1, int(os.getenv("EXPORT_MAX_BYTES", "200000000"))),
+            export_signing_key=os.getenv("EXPORT_SIGNING_KEY") or None,
+            export_link_ttl=max(60, min(86_400, int(os.getenv("EXPORT_LINK_TTL", "900")))),
+            export_public_base_url=os.getenv("EXPORT_PUBLIC_BASE_URL") or None,
             allow_legacy_bearer=_flag("ALLOW_LEGACY_BEARER", True),
             parse_mode=os.getenv("PARSE_MODE", "passthrough").strip().lower(),
             shacl_required=_flag("SHACL_REQUIRED", False),

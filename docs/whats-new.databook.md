@@ -2,9 +2,9 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.25
+version: 1.0.26
 created: 2026-09-27
-updated: 2026-11-01
+updated: 2026-11-07
 author:
   - name: Kurt Cagle
     iri: https://holongraph.com/people/kurt-cagle
@@ -45,6 +45,26 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-11-07 (dataset export as zipped TriG)
+
+- **A whole dataset can be exported as one zipped TriG file and fetched on an
+  expiring link: `POST /admin/dataset/export` / `export_dataset`.** Snapshots
+  are a checkpoint on the bridge's own disk and nothing returns them, so they
+  are lost with the host. An export is `{id}.trig.zip` (the TriG plus a manifest
+  with a sha256) under `SNAPSHOT_DIR/{dataset}/exports/`, loadable by any
+  triple store. Graphs are fetched as N-Triples and wrapped as text, never
+  parsed, so RDF 1.2 passes through; blank-node labels are prefixed per graph so
+  graphs that reuse `_:b0` do not merge; the default graph is included when it
+  has triples. Admin on the dataset; an empty dataset is never exported;
+  `EXPORT_MAX_BYTES` (200 MB) is enforced while streaming and a refused export
+  leaves nothing behind. `list_exports` and `export_download_link` complete it.
+  With `EXPORT_SIGNING_KEY` set, a response carries an HMAC-signed link that
+  expires (`EXPORT_LINK_TTL`, 15 minutes by default) and needs no bearer token;
+  every bad link is one 403 and is not audited, a valid download, an export and
+  a link made are always audited. New `SNAPSHOT_MAX_AGE_DAYS` drops snapshots
+  and exports older than that, never the newest. Not yet: restore from an
+  export, a scheduled export, an automatic push off the host.
 
 ### 2026-11-01 (ingest from a URL: outbound policy)
 
@@ -585,6 +605,11 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-11-07-a a hb:ReleaseNote ;
+    dcterms:date "2026-11-07"^^xsd:date ;
+    rdfs:label "Dataset export as one zipped TriG file, with expiring download links and an age limit on retention" ;
+    dcterms:description "POST /admin/dataset/export (MCP export_dataset) writes the active dataset as SNAPSHOT_DIR/{dataset}/exports/{id}.trig.zip: a TriG file with every named graph as a GRAPH block plus the default graph when it has triples, and a manifest with a sha256. Graphs are fetched as N-Triples and wrapped as text, never parsed (RDF 1.2 passes through); blank-node labels are prefixed per graph so two graphs reusing a label do not merge. Streamed to a temporary file and moved into place; EXPORT_MAX_BYTES is checked while writing. Admin on the dataset; an empty dataset is never exported. GET /admin/dataset/exports and POST /admin/dataset/export/{id}/link list exports and make fresh links. With EXPORT_SIGNING_KEY set, links are HMAC-signed over dataset, export id and expiry, expire (EXPORT_LINK_TTL), need no bearer token, and every bad link is the same 403 that is not audited; exports, links and valid downloads are always audited. SNAPSHOT_MAX_AGE_DAYS removes snapshots and exports older than the limit after a new one is written, never the newest. Restore from an export, scheduling and an automatic off-host push are not built." .
 
 hb:release-2026-11-01-g a hb:ReleaseNote ;
     dcterms:date "2026-11-01"^^xsd:date ;
