@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.27
+version: 1.0.28
 created: 2026-09-27
 updated: 2026-11-07
 author:
@@ -45,6 +45,24 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-11-07 (JSON-LD input and output)
+
+- **JSON-LD can be pushed and read:
+  [PR #81](https://github.com/kurtcagle/holon-bridge-python/pull/81).**
+  `POST /graph/push` takes `format: "json-ld"` (payload in `data` or `turtle`),
+  `/sparql/construct` and `GET /graph` take `format=json-ld` with
+  `jsonld_form` compact or expanded; MCP gains `push_json_ld` and `format` on
+  `sparql_construct`. rdflib is the default engine; `JSONLD_OUTPUT_ENGINE=jena`
+  asks Fuseki for `application/ld+json` and falls back to rdflib. Fuseki still
+  receives only Turtle. Two defects in the old DataBook `json-ld` path are fixed
+  with it: a remote `@context` was fetched by rdflib before authorisation and
+  outside the egress policy (now refused; `JSONLD_FETCH_CONTEXTS=true` fetches
+  through `FETCH_ALLOWLIST`), and named graphs were silently dropped (now
+  refused). A document that converts to no triples is refused too, so a
+  context-less `replace` push cannot erase a graph. RDF 1.2 triple terms cannot
+  be written as JSON-LD (422). Not tested against a live Fuseki: the `jena`
+  engine and Jena's JSON-LD writer.
 
 ### 2026-11-07 (dataset export as zipped TriG)
 
@@ -626,6 +644,12 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-11-07-b a hb:ReleaseNote ;
+    dcterms:date "2026-11-07"^^xsd:date ;
+    rdfs:label "JSON-LD input and output; remote contexts and named graphs refused" ;
+    dcterms:description "POST /graph/push accepts format json-ld (payload in data or turtle) and converts it to Turtle in-process with rdflib; /sparql/construct and GET /graph return JSON-LD with format=json-ld (compact by default, expanded on request) and an X-JSONLD-Engine header. JSONLD_OUTPUT_ENGINE=jena asks Fuseki for application/ld+json and falls back to rdflib on 400, 406, 415, 501 or invalid JSON; other Fuseki errors are returned. Input refuses a remote @context (JSONLD_FETCH_CONTEXTS=true fetches through the FETCH_ALLOWLIST egress policy and inlines, up to 3 levels and 10 contexts), @import, named graphs, and documents that convert to no triples; the DataBook json-ld block path shares the converter, which fixes a context fetch made from the bridge before the write was authorised and a silent named-graph drop. JSONLD_MAX_BYTES (5 MB) caps documents both ways. RDF 1.2 triple terms are refused as JSON-LD. Keys a context does not map are still dropped silently, as JSON-LD defines. The jena engine is not tested against a live Fuseki." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/81> .
 
 hb:release-2026-11-07-a a hb:ReleaseNote ;
     dcterms:date "2026-11-07"^^xsd:date ;
