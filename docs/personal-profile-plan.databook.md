@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/holonbridge-personal-profile-plan-v1
 title: "HolonBridge personal profile and executable: deployment plan"
 type: databook
-version: 0.2.0
+version: 0.3.0
 created: 2026-11-07
 author:
   - name: Kurt Cagle
@@ -20,8 +20,8 @@ description: >
   service_config.py, dataset_create.py, .env.example) as of main at PR #78.
 graph:
   namespace: "urn:holonbridge:plan:2026-11:"
-  triple_count: 78
-  subjects: 19
+  triple_count: 82
+  subjects: 20
   rdf_version: "1.1"
   turtle_version: "1.1"
 process:
@@ -76,6 +76,7 @@ age) is merged, because the scheduled export job builds on it.
 | 8 | Target platforms: Windows 11 (x64) and Ubuntu first, RHEL-family Linux as appropriate, macOS later | decided |
 | 9 | The **native binaries are the distributed product**, so every release is signed, checksummed and ships with a software bill of materials | decided; routes below |
 | 10 | A **container image** is built, and a variant includes a preconfigured Jena | decided; shape proposed below |
+| 11 | An opt-in **`restart_fuseki`** tool lets the bridge restart a separately installed Fuseki through an operator-configured command | proposed |
 
 ## What the profile exposes
 
@@ -84,11 +85,11 @@ The surface test (Phase A) fixes the exact sets.
 
 | Group | Contents | Routes | MCP tools |
 |---|---|---|---|
-| **Core** (personal) | SPARQL, graph push/get/drop/list, `get_holon`, validate, named queries and rules, ingest and pipelines, datasets (create, list, switch, snapshot, export), sequences, fluents, events, audit (read), dataset admin | about 59 | about 52 |
+| **Core** (personal) | SPARQL, graph push/get/drop/list, `get_holon`, validate, named queries and rules, ingest and pipelines, datasets (create, list, switch, snapshot, export), sequences, fluents, events, audit (read), dataset admin, Fuseki restart | about 60 | about 53 |
 | **Automation** (opt-in) | triggers, candidates, scheduler, projections, named projections | about 39 | about 36 |
 | **Multi-user** (not in the personal profile) | identity admin, delegation, personas, `whoami`, dataset claim, agents, banks | about 34 | about 24 |
 
-The full build exposes all three groups: about 132 routes and 112 tools. The
+The full build exposes all three groups: about 133 routes and 113 tools. The
 personal profile drops about 40 per cent of the routes and more than half of
 the tool definitions Claude has to carry in context.
 
@@ -140,6 +141,35 @@ Making them absent is the larger change in Phase G.
 - A **surface test** asserts the exact route set and tool set for each profile,
   so any drift is a failing test.
 
+### Restarting Fuseki
+
+Nothing in the bridge can restart Fuseki today. It edits configuration files
+and reports `restartRequired: true`, and a person restarts Fuseki. The reasons
+it stayed manual are real: Fuseki refuses to start if any single configuration
+file is invalid (this took every dataset down once), a restart affects every
+dataset, and in-memory datasets lose their contents. The personal profile adds
+an opt-in `restart_fuseki` that removes the manual step while keeping those
+protections.
+
+- **Off unless configured.** `FUSEKI_RESTART_COMMAND` holds a fixed argument
+  list (a service restart, a `systemd --user` unit, `docker restart`), run
+  without a shell. Callers cannot supply or alter any argument.
+- **Gated.** Admin only, explicit confirmation from the person in chat (as
+  `initialise_dataset` already requires), rate-limited, and always audited.
+  It is not reachable from triggers, the scheduler or the agent endpoints.
+- **Preflight.** Every configuration file in `FUSEKI_CONFIG_DIR` must still
+  parse, or the restart is refused.
+- **Memory datasets.** In-memory datasets are snapshotted first, and the
+  response names any that will lose contents.
+- **Health wait and rollback.** After the command runs, wait for Fuseki to
+  answer its ping, with a timeout. If it does not come back, restore the
+  configuration file the bridge last edited from its backup, try once more, and
+  report failure with the log location instead of looping. This needs a
+  one-generation backup written whenever the bridge edits a configuration file
+  (a small change in `service_config.py` and `provisioning.py`).
+- `init` uses the same path for the single restart after it creates the first
+  datasets.
+
 ## Executable and installer
 
 ### What ships
@@ -163,8 +193,9 @@ works for everything except those two provisioning steps. This is why "Jena
 installed locally relative to the MCP machine" is a requirement and not just a
 convenience.
 
-`init` therefore creates the owner's first datasets, asks for one Fuseki
-restart, and `doctor` then confirms the `/shacl` endpoint is live.
+`init` therefore creates the owner's first datasets and restarts Fuseki once,
+through the configured restart command if there is one and by asking the person
+otherwise. `doctor` then confirms the `/shacl` endpoint is live.
 
 ### Subcommands
 
@@ -174,6 +205,7 @@ restart, and `doctor` then confirms the `/shacl` endpoint is live.
 | `serve` | Run the bridge (the long-lived daemon) |
 | `mcp` | The stdio MCP server; a thin client of a running `serve`, which it starts behind a lock file if absent |
 | `doctor` | Check Java version, Fuseki reachability and version, writable configuration directory, `/shacl` endpoint, token, ports, and data directory permissions |
+| `restart-fuseki` | Run the configured Fuseki restart with the same preflight and health wait as the tool |
 | `snapshot`, `export` | Wrap the existing snapshot and export operations |
 
 Read the Java version Jena requires from the installed Jena release instead of
@@ -215,6 +247,7 @@ two systems with the export zip, which is what it is for.
 | `HOLONBRIDGE_HOST`, `HOLONBRIDGE_PORT` | `127.0.0.1` and a free port (default 3031) |
 | `FUSEKI_URL` | confirmed against `/$/ping` (default `http://localhost:3030`) |
 | `FUSEKI_CONFIG_DIR` | detected from the Jena install and confirmed |
+| `FUSEKI_RESTART_COMMAND` | the restart command for the detected install (service, systemd unit or container), or unset |
 | `IDENTITY_TOKENS` | one generated token bound to the owner identity |
 | `ALLOW_LEGACY_BEARER` | `false` |
 | `DATASET_CLAIMANTS`, `DATASET_CREATORS` | the owner identity |
@@ -313,10 +346,10 @@ Design notes:
   security configuration is changed or the containers share a network
   namespace. A single image with both processes avoids this, which is the main
   reason to prefer it for the "with Jena" variant.
-- **Restart stays human-owned.** The bridge never restarts Fuseki, and a new
-  dataset's `/shacl` endpoint needs one restart. In the single image, expose an
-  explicit `restart-fuseki` command that the person invokes; in a two-service
-  setup, `docker compose restart` on the Fuseki service. No automatic restart.
+- **Restart stays explicit.** A new dataset's `/shacl` endpoint needs one
+  Fuseki restart. In the single image, the supervisor performs it when the
+  person confirms `restart_fuseki`; in a two-service setup the configured
+  command is `docker compose restart` on the Fuseki service. Never automatic.
 - **Shared state.** The configuration directory and the TDB2 database live on a
   named volume on the container host's own filesystem, never on a synced or
   shared dual-boot folder. Exports go to a separate volume or mount.
@@ -354,13 +387,16 @@ Design notes:
 7. Container: confirm Fuseki's admin-API localhost restriction on the pinned
    release, the restart path, and volume permissions for a non-root user.
 8. Signing dry run on CI with a test artefact (Windows first).
+9. Restart tool: stop and start under a `systemd --user` unit, a Windows
+   service and Docker; the health wait and configuration rollback; and what the
+   preflight and memory-dataset snapshot do on a real instance.
 
 ## Phases
 
 | Phase | Scope | Size |
 |---|---|---|
 | A | Profile flag, shorter router and tool lists, automation gate, owner token and auto-claim, surface test | small |
-| B | Snapshot before destructive operations, scheduled export to a chosen folder, `.env.personal.example`, `pipx` documentation | small |
+| B | Snapshot before destructive operations, scheduled export to a chosen folder, the opt-in `restart_fuseki` tool with configuration backup, `.env.personal.example`, `pipx` documentation | small to medium |
 | C | Spikes 1 to 6, then `init`, `serve`, `mcp`, `doctor`, tested natively on Windows 11 and Ubuntu | medium |
 | D | Release engineering: Windows installer, `.deb`, `.rpm`, CI matrix, signing, checksums, bill of materials, release page | medium |
 | E | Container images (spike 7 first): bridge-only image, image with Jena, multi-architecture publishing and signing | small to medium |
@@ -399,7 +435,7 @@ plan:phase-a a plan:Phase ;
 plan:phase-b a plan:Phase ;
     rdfs:label "B. Safety and backups" ;
     plan:order 2 ;
-    plan:size "small" ;
+    plan:size "small to medium" ;
     plan:dependsOn plan:phase-a .
 
 plan:phase-c a plan:Phase ;
@@ -471,6 +507,11 @@ plan:decision-runtime-profile a plan:Decision ;
 plan:decision-audit-and-snapshots a plan:Decision ;
     rdfs:label "Audit at mutations level; snapshot before destructive operations" ;
     plan:status "proposed" .
+
+plan:decision-restart-fuseki a plan:Decision ;
+    rdfs:label "Opt-in restart_fuseki tool running an operator-configured command" ;
+    plan:status "proposed" ;
+    plan:partOf plan:phase-b .
 
 plan:decision-windows-signing-route a plan:Decision ;
     rdfs:label "Windows signing route and signing identity" ;
