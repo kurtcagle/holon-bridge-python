@@ -615,9 +615,19 @@ async def get_candidate_proposal(
     return candidate.detail()
 
 
+class DecisionBody(BaseModel):
+    """Optional body of an approve or reject call."""
+
+    reason: str | None = Field(default=None, max_length=1000)
+
+
 @router.post("/candidate/{candidate_id}/approve")
 async def approve_candidate_proposal(
-    candidate_id: str, conn: ConnDep, client: ClientDep, animus: AnimusDep
+    candidate_id: str,
+    conn: ConnDep,
+    client: ClientDep,
+    animus: AnimusDep,
+    body: DecisionBody | None = None,
 ) -> dict:
     """CHANGED: ``approve_candidate`` now routes through the ordinary
     ACL/SHACL-gated write path (see that function's own docstring), so
@@ -635,7 +645,9 @@ async def approve_candidate_proposal(
             status.HTTP_404_NOT_FOUND, detail={"error": "unknown_candidate", "id": candidate_id}
         )
     try:
-        result = await approve_candidate(client, conn, candidate, animus=animus)
+        result = await approve_candidate(
+            client, conn, candidate, animus=animus, reason=body.reason if body else None
+        )
     except CandidateError as exc:
         raise HTTPException(
             status.HTTP_409_CONFLICT, detail={"error": "candidate_not_pending", "message": str(exc)}
@@ -647,7 +659,11 @@ async def approve_candidate_proposal(
 
 @router.post("/candidate/{candidate_id}/reject")
 async def reject_candidate_proposal(
-    candidate_id: str, conn: ConnDep, client: ClientDep, animus: AnimusDep
+    candidate_id: str,
+    conn: ConnDep,
+    client: ClientDep,
+    animus: AnimusDep,
+    body: DecisionBody | None = None,
 ) -> dict:
     candidate_iri = conn.scoped("candidates", candidate_id)
     candidate = await get_candidate(client, conn, candidate_iri)
@@ -656,7 +672,9 @@ async def reject_candidate_proposal(
             status.HTTP_404_NOT_FOUND, detail={"error": "unknown_candidate", "id": candidate_id}
         )
     try:
-        await reject_candidate(client, conn, candidate)
+        await reject_candidate(
+            client, conn, candidate, animus=animus, reason=body.reason if body else None
+        )
     except CandidateError as exc:
         raise HTTPException(
             status.HTTP_409_CONFLICT, detail={"error": "candidate_not_pending", "message": str(exc)}
