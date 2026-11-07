@@ -53,15 +53,26 @@ async def propose_candidate(
 
 
 @mcp.tool()
-async def approve_candidate(candidate_id: str) -> dict:
+async def approve_candidate(candidate_id: str, reason: str | None = None) -> dict:
     """Approve a pending candidate: merges its staged Turtle (GSP POST) into
     the target graph, regardless of the underlying rule's own write mode
-    (see the module note above). Refused (409) if not Pending."""
-    return await _call("POST", f"/candidate/{candidate_id}/approve")
+    (see the module note above). Refused (409) if not Pending. The candidate
+    keeps who approved it, when, and the optional ``reason`` (up to 1000
+    characters)."""
+    return await _call(
+        "POST",
+        f"/candidate/{candidate_id}/approve",
+        json_body={"reason": reason} if reason else None,
+    )
 
 
 @mcp.tool()
-async def reject_candidate(candidate_id: str) -> dict:
+async def reject_candidate(candidate_id: str, reason: str | None = None) -> dict:
     """Reject a pending candidate. No write happens; the candidate is marked
-    Rejected. Refused (409) if not Pending."""
-    return await _call("POST", f"/candidate/{candidate_id}/reject")
+    Rejected and keeps who rejected it, when, and the optional ``reason`` (up
+    to 1000 characters). Refused (409) if not Pending."""
+    return await _call(
+        "POST",
+        f"/candidate/{candidate_id}/reject",
+        json_body={"reason": reason} if reason else None,
+    )

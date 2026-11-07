@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.26
+version: 1.0.27
 created: 2026-09-27
 updated: 2026-11-07
 author:
@@ -65,6 +65,27 @@ process:
   a link made are always audited. New `SNAPSHOT_MAX_AGE_DAYS` drops snapshots
   and exports older than that, never the newest. Not yet: restore from an
   export, a scheduled export, an automatic push off the host.
+
+### 2026-11-05 (candidate decisions are recorded)
+
+- **A candidate now keeps who decided it, when and why.** Approving or
+  rejecting a candidate only overwrote `hev:candidateStatusValue`, so a
+  decided candidate said nothing about the reviewer, the time or the reason
+  (the write an approval triggers is audited separately, after the fact). The
+  decision is now one guarded update that replaces the status and adds
+  `hev:approvedBy` or `hev:rejectedBy` (the same terms the agent-call ledger
+  uses), `hev:decidedAt`, an optional `hev:decisionReason` (up to 1000
+  characters), `hev:decidedByReal` when an admin is acting as someone else, and
+  a `hev:decisionId`. The update only matches a candidate that is still
+  Pending and is read back, so two reviewers who both saw Pending cannot both
+  record a decision: the second gets a 409. A bad reason or reviewer identity is
+  refused before the approval's merge runs. `POST /candidate/{id}/approve` and
+  `/reject` and the matching MCP tools take an optional `reason`; candidate
+  listings and detail show `decidedBy`, `decidedAt`, `decisionReason` and
+  `decidedByReal`. Candidates decided before this change have no record. Not
+  changed: the approval's merge and the status update are still two steps, so a
+  failure between them leaves a merged candidate Pending (the merge is additive
+  and safe to repeat).
 
 ### 2026-11-01 (ingest from a URL: outbound policy)
 
@@ -611,6 +632,12 @@ hb:release-2026-11-07-a a hb:ReleaseNote ;
     rdfs:label "Dataset export as one zipped TriG file, with expiring download links and an age limit on retention" ;
     dcterms:description "POST /admin/dataset/export (MCP export_dataset) writes the active dataset as SNAPSHOT_DIR/{dataset}/exports/{id}.trig.zip: a TriG file with every named graph as a GRAPH block plus the default graph when it has triples, and a manifest with a sha256. Graphs are fetched as N-Triples and wrapped as text, never parsed (RDF 1.2 passes through); blank-node labels are prefixed per graph so two graphs reusing a label do not merge. Streamed to a temporary file and moved into place; EXPORT_MAX_BYTES is checked while writing. Admin on the dataset; an empty dataset is never exported. GET /admin/dataset/exports and POST /admin/dataset/export/{id}/link list exports and make fresh links. With EXPORT_SIGNING_KEY set, links are HMAC-signed over dataset, export id and expiry, expire (EXPORT_LINK_TTL), need no bearer token, and every bad link is the same 403 that is not audited; exports, links and valid downloads are always audited. SNAPSHOT_MAX_AGE_DAYS removes snapshots and exports older than the limit after a new one is written, never the newest. Restore from an export, scheduling and an automatic off-host push are not built." ;
     rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/80> .
+
+hb:release-2026-11-05-a a hb:ReleaseNote ;
+    dcterms:date "2026-11-05"^^xsd:date ;
+    rdfs:label "Candidates keep who approved or rejected them, when and why" ;
+    dcterms:description "approve_candidate and reject_candidate replace the candidate's status in one update guarded on it still being Pending and add approvedBy or rejectedBy, decidedAt, an optional decisionReason, decidedByReal for an admin acting as someone else, and a decisionId; the result is read back, so a second reviewer gets a 409 instead of overwriting the first. The approve and reject routes and MCP tools take an optional reason." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/79> .
 
 hb:release-2026-11-01-g a hb:ReleaseNote ;
     dcterms:date "2026-11-01"^^xsd:date ;
