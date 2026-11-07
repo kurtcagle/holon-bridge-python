@@ -140,8 +140,8 @@ def test_no_fragment_of_any_value_reaches_any_output(repo, env_file, tmp_path, c
 
 
 def test_the_report_does_not_say_whether_a_variable_is_empty_or_quoted(report):
-    allowed = {"name", "description", "description_source", "status", "read_at", "tooling_at",
-               "defined_times"}
+    allowed = {"name", "origin", "origin_basis", "description", "description_source", "status",
+               "read_at", "tooling_at", "defined_times"}
     for section in ("current", "scripts_only", "orphan_candidates", "read_by_code_not_defined",
                     "documented_but_not_read"):
         for item in report[section]:
@@ -296,3 +296,102 @@ def test_every_variable_documented_in_env_example_is_still_referenced_somewhere(
 def test_the_real_report_marks_the_json_ld_settings_current():
     report = env_audit.build_report(ROOT / ".env.example", ROOT)
     assert "JSONLD_MAX_BYTES" in names(report["read_by_code_not_defined"])
+
+
+# --- where a value comes from -------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name, origin",
+    [
+        # secrets you can create yourself
+        ("BEARER_TOKEN", "generated"),
+        ("IDENTITY_TOKENS", "generated"),
+        ("PROXY_TOKENS", "generated"),
+        ("MCP_JWT_SECRET", "generated"),
+        ("EXPORT_SIGNING_KEY", "generated"),
+        # looks like a secret, but another service issues it
+        ("ANTHROPIC_API_KEY", "external"),
+        ("GITHUB_OAUTH_CLIENT_SECRET", "external"),
+        ("GITHUB_OAUTH_CLIENT_ID", "external"),
+        ("NGROK_AUTHTOKEN", "external"),
+        ("HB_AGENT_TRIAGE_KEY", "external"),
+        # locations and identities that have to exist already
+        ("FUSEKI_URL", "external"),
+        ("SNAPSHOT_DIR", "external"),
+        ("HOLONBRIDGE_ENV_FILE", "external"),
+        ("FETCH_ALLOWLIST", "external"),
+        ("MCP_ALLOWED_GITHUB_LOGINS", "external"),
+        ("HOLONBRIDGE_DATASET", "external"),
+        # choices with a default; a host or port here is where *this* process listens
+        ("PARSE_MODE", "setting"),
+        ("SNAPSHOT_KEEP", "setting"),
+        ("EXPORT_LINK_TTL", "setting"),
+        ("SHACL_REQUIRED", "setting"),
+        ("ALLOW_LEGACY_BEARER", "setting"),
+        ("HOLONBRIDGE_HOST", "setting"),
+        ("HOLONBRIDGE_PORT", "setting"),
+        ("JSONLD_OUTPUT_ENGINE", "setting"),
+        # nothing to go on, and a bare *_KEY is ambiguous on purpose: a provider's API key
+        # and a signing key you generate look the same by name
+        ("WIDGET_KEY", "unknown"),
+        ("SOMETHING_FROM_THE_NODE_ERA", "unknown"),
+        ("PORT", "unknown"),
+    ],
+)
+def test_the_origin_guess_for_known_shapes_of_name(name, origin):
+    assert env_audit.guess_origin(name, None)[0] == origin
+
+
+def test_every_guess_says_why():
+    for name in ("BEARER_TOKEN", "FUSEKI_URL", "PARSE_MODE", "WHO_KNOWS"):
+        origin, why = env_audit.guess_origin(name, None)
+        assert origin in env_audit.ORIGINS and len(why) > 10
+
+
+def test_a_variable_the_code_parses_as_a_number_or_switch_is_a_setting_even_with_an_odd_name(repo, tmp_path):
+    (repo / "holonbridge" / "odd.py").write_text(
+        "import os\nLIMIT = int(os.getenv('ODDLY_NAMED_THING', '5'))\n"
+        "SWITCH = _flag('ANOTHER_ODD_ONE', False)\n"
+        "def _flag(key, default):\n    return os.getenv(key, default)\n"
+    )
+    env = tmp_path / "e.env"
+    env.write_text("ODDLY_NAMED_THING=1\nANOTHER_ODD_ONE=1\n")
+    items = {i["name"]: i for i in env_audit.build_report(env, repo)["current"]}
+    assert items["ODDLY_NAMED_THING"]["origin"] == "setting"
+    assert "number" in items["ODDLY_NAMED_THING"]["origin_basis"]
+    assert items["ANOTHER_ODD_ONE"]["origin"] == "setting"
+    assert "flag" in items["ANOTHER_ODD_ONE"]["origin_basis"]
+
+
+def test_a_name_rule_beats_the_parse_hint(repo, tmp_path):
+    (repo / "holonbridge" / "odd.py").write_text("import os\nX = int(os.getenv('SOME_TOKEN', '0'))\n")
+    env = tmp_path / "e.env"
+    env.write_text("SOME_TOKEN=1\n")
+    item = env_audit.build_report(env, repo)["current"][0]
+    assert item["origin"] == "generated"
+
+
+def test_the_report_tags_every_entry_and_counts_the_origins(report):
+    sections = ("current", "scripts_only", "orphan_candidates", "read_by_code_not_defined",
+                "documented_but_not_read")
+    assert all(item["origin"] in env_audit.ORIGINS for s in sections for item in report[s])
+    assert set(report["origins"]) == set(env_audit.ORIGINS)
+    assert sum(report["origins"].values()) == len(
+        {item["name"] for s in sections for item in report[s]}
+    )
+    assert "guess" in report["origin_note"]
+
+
+def test_the_markdown_shows_the_tag_and_says_it_is_a_guess(report):
+    text = env_audit.render_markdown(report)
+    assert "**[generated]**" in text and "**[unknown]**" in text
+    assert "That is a guess" in text
+
+
+def test_the_origin_of_a_name_never_depends_on_its_value(repo, tmp_path):
+    first, second = tmp_path / "a.env", tmp_path / "b.env"
+    first.write_text("BEARER_TOKEN=\nPARSE_MODE=\nOLD_LEGACY_VAR=\n")
+    second.write_text("BEARER_TOKEN=https://example.org/x\nPARSE_MODE=0123456789\nOLD_LEGACY_VAR=/a/path\n")
+    one, two = (env_audit.build_report(p, repo) for p in (first, second))
+    assert one == {**two, "env_file": "a.env"}

@@ -1228,6 +1228,15 @@ only, so a variable used by Fuseki, ngrok or a launcher looks orphaned here, and
 `.env.example`, then from the comment beside the code that reads the variable;
 one marked † is a nearby comment that may describe a group.
 
+Each name is also tagged with where its value would come from: `generated` (a
+secret you can create yourself, like a bridge token or signing key), `external`
+(has to come from outside: a provider's API key or OAuth credentials, a path, a
+URL, a login or host name, the name of a dataset that exists), `setting` (a
+choice with a default: a TTL, a mode, a switch) or `unknown`. These are guesses
+from the name and from how the code parses the value; the JSON report carries the
+reason for each, and a bare `*_KEY` is left `unknown` on purpose because a
+provider's key and a signing key you generate look the same.
+
 ### Credentials: one token, one role, and claiming a dataset
 
 A token to the REST bridge is exactly one of three kinds, and the bridge refuses

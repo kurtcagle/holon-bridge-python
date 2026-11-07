@@ -66,6 +66,34 @@ DYNAMIC_FAMILIES = {
     "endpoint (AGENT_CREDENTIAL_PREFIX)",
 }
 
+#: Where a variable's value comes from, guessed from its name; first match wins, so
+#: the specific rules sit above the general ones. These are heuristics, and the
+#: report says so: a wrong guess is cheap, a confident wrong answer is not.
+#:   generated  a secret or identifier you can create yourself (a random token)
+#:   external   it has to come from outside: a provider's credential, a path, a URL,
+#:              a login or host name, the name of something that already exists
+#:   setting    a choice you make (a number, a switch, a mode); the code has a default
+#:   unknown    no rule applied
+ORIGIN_RULES: list[tuple[str, str, str]] = [
+    (r"API_KEY$|^GITHUB_OAUTH_CLIENT_|^NGROK_|^HB_AGENT_|(^|_)CLIENT_(ID|SECRET)$", "external",
+     "a credential issued by another service"),
+    (r"^(HOLONBRIDGE|MCP)_(HOST|PORT)$|_PORT$", "setting", "an address this process listens on"),
+    (r"_(TOKEN|TOKENS|SECRET|SIGNING_KEY)$", "generated",
+     "a secret you create yourself, for example a long random string"),
+    (r"_URL$", "external", "the address of a service that exists elsewhere"),
+    (r"_HOSTS$|_ALLOWLIST$|_LOGINS$|_CLAIMANTS$|_CREATORS$", "external",
+     "host names, logins or people you supply"),
+    (r"_(DIR|FILE|PATH)$|^HOLONBRIDGE_CONFIG$", "external", "a path on your machine"),
+    (r"(^|_)DATASET$|_BANK$|_PERSONA$", "external", "the name of something that already exists in your store"),
+    (
+        (r"_(TTL|SECONDS|TIMEOUT|KEEP|LEVEL|LEVELS|MODE|ENABLED|REQUIRED|DELTA|ENGINE|TRANSPORT|PREFIX|"
+         r"CONTEXTS|DAYS|MODEL|DEFINER)$|_MAX_|^MAX_|^ALLOW_|^REQUIRE"),
+        "setting",
+        "a choice you make; the code has a default",
+    ),
+]
+ORIGINS = ("generated", "external", "setting", "unknown")
+
 NAME = r"[A-Za-z_][A-Za-z0-9_]*"
 _ASSIGN = re.compile(rf"^\s*(?:export\s+)?({NAME})\s*=")
 _COMMENTED_ASSIGN = re.compile(rf"^#\s*({NAME})\s*=")
@@ -189,6 +217,7 @@ class CodeUse:
     mentioned: dict[str, list[str]] = field(default_factory=dict)
     dynamic: list[str] = field(default_factory=list)  # reads whose name is not a literal
     notes: dict[str, str] = field(default_factory=dict)  # name -> comment written next to the read
+    kinds: dict[str, str] = field(default_factory=dict)  # name -> "number" or "flag", from how it is parsed
 
 
 _ENV_CALLS = {"os.getenv", "getenv", "os.environ.get", "environ.get",
@@ -268,7 +297,31 @@ def scan_code(repo: Path) -> CodeUse:
                 add(use.mentioned, node.value, where)
     for path, tree in files:
         _collect_notes(use, tree, sources[path], helpers)
+        _collect_kinds(use, tree, helpers)
     return use
+
+
+def _collect_kinds(use: CodeUse, tree: ast.AST, helpers: set[str]) -> None:
+    """Note names the code parses as a number (``int(os.getenv(...))``) or a switch
+    (a ``_flag`` helper); a value that is parsed that way is a setting, not a secret."""
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and node.args):
+            continue
+        callee = _callee_name(node)
+        if not (_is_env_read(node) or callee in helpers):
+            continue
+        name = _literal(node.args[0])
+        if name is None:
+            continue
+        if "flag" in callee.lower():
+            use.kinds.setdefault(name, "flag")
+        ancestor, depth = parents.get(node), 0
+        while ancestor is not None and depth < 4:
+            if isinstance(ancestor, ast.Call) and _callee_name(ancestor) in ("int", "float"):
+                use.kinds.setdefault(name, "number")
+                break
+            ancestor, depth = parents.get(ancestor), depth + 1
 
 
 def _comment_above(source: list[str], lineno: int) -> str:
@@ -384,6 +437,24 @@ def family_of(name: str) -> str | None:
     return None
 
 
+ORIGIN_NOTE = (
+    "Origin is a guess from each name and from how the code parses it, not a fact; origin_basis "
+    "says why. generated: a secret you can create yourself. external: has to come from outside "
+    "(a provider's credential, a path, a URL, a login or host name, the name of something that "
+    "exists). setting: a choice you make, with a default. unknown: no rule applied."
+)
+
+
+def guess_origin(name: str, kind: str | None) -> tuple[str, str]:
+    """``(origin, why)`` for a variable: a guess from its name, then from how the code parses it."""
+    for pattern, origin, why in ORIGIN_RULES:
+        if re.search(pattern, name):
+            return origin, why
+    if kind:
+        return "setting", f"the code parses it as a {kind}, so it is a choice rather than a secret"
+    return "unknown", "no rule matched its name and the code does not parse it as a number or switch"
+
+
 def build_report(env_path: Path, repo: Path) -> dict:
     defined = env_names(env_path)
     own, from_block = example_descriptions(repo / ".env.example")
@@ -412,8 +483,11 @@ def build_report(env_path: Path, repo: Path) -> dict:
             if candidate:
                 text, source = candidate, label
                 break
+        origin, why = guess_origin(name, use.kinds.get(name))
         item = {
             "name": name,
+            "origin": origin,
+            "origin_basis": why,
             "description": text,
             "description_source": source,
             "status": status(name),
@@ -433,8 +507,15 @@ def build_report(env_path: Path, repo: Path) -> dict:
     defaults = [entry(n) for n in sorted(use.read) if n not in defined]
     stale_docs = [entry(n) for n in sorted(documented)
                   if status(n) in ("docs only", "unknown", "tooling")]
+    everything = {n for section in (current, tooling_only, orphans, defaults, stale_docs)
+                  for n in (e["name"] for e in section)}
+    by_origin = {o: 0 for o in ORIGINS}
+    for section_names in everything:
+        by_origin[guess_origin(section_names, use.kinds.get(section_names))[0]] += 1
     return {
         "env_file": env_path.name,
+        "origin_note": ORIGIN_NOTE,
+        "origins": by_origin,
         "counts": {
             "defined": len(defined),
             "current": len(current),
@@ -466,6 +547,15 @@ def render_markdown(report: dict) -> str:
         f"- Orphan candidates (defined; nothing in this repository refers to them): **{c['orphan_candidates']}**",
         f"- Read by the code but not defined (their defaults apply): **{c['read_by_code_not_defined']}**",
         f"- Documented in `.env.example` but not read by any code: **{c['documented_but_not_read']}**",
+        "- Origin, across every name above: " + ", ".join(
+            f"{count} {origin}" for origin, count in report["origins"].items()),
+        "",
+        ("Each name is tagged with where its value would come from. That is a guess "
+         "from the name and from how the code parses it; the JSON report gives the reason for "
+         "each. generated: a secret you can create yourself. external: has to come from "
+         "outside (a provider's credential, a path, a URL, a login or host name, the name of "
+         "something that exists). setting: a choice you make, with a default. unknown: no "
+         "rule applied."),
         "",
         ("Orphan candidates are only candidates: this tool sees one repository, so a name "
          "used by Fuseki, ngrok, a launcher or your shell will look orphaned here."),
@@ -510,7 +600,7 @@ def _section(title: str, items: list[dict], *, show_read: bool = False,
         if item.get("defined_times"):
             extra.append(f"defined {item['defined_times']} times")
         suffix = f" ({'; '.join(extra)})" if extra else ""
-        lines.append(f"- `{item['name']}`: {text}{suffix}")
+        lines.append(f"- `{item['name']}` **[{item['origin']}]**: {text}{suffix}")
     return lines + [""]
 
 

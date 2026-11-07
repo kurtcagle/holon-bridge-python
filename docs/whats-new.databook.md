@@ -55,7 +55,10 @@ process:
   locations only, and a test holds it to that with sentinel secrets. It sorts
   names into current (the Python code reads them, found by AST including helper
   functions), used only by scripts, orphan candidates, read-by-code-but-undefined,
-  and documented-but-unread. "Orphan" means nothing in this repository refers to
+  and documented-but-unread, and tags each name `generated` (a secret you can
+  create yourself), `external` (a provider's credential, a path, a URL, a login or
+  something that must already exist), `setting` or `unknown`: a guess from the name
+  and how the code parses the value, with the reason in the JSON. "Orphan" means nothing in this repository refers to
   the name, so a variable used by Fuseki, ngrok or a launcher still needs a human
   check. A test also fails if `.env.example` documents a name nothing refers to.
 
@@ -661,7 +664,7 @@ process:
 hb:release-2026-11-07-c a hb:ReleaseNote ;
     dcterms:date "2026-11-07"^^xsd:date ;
     rdfs:label "env_audit.py: audit a .env by name, not value, and find orphaned variables" ;
-    dcterms:description "scripts/env_audit.py --env FILE reads only the variable names in a .env (nothing after the = is stored or reported, not even whether it is empty) and writes a markdown or JSON report: current variables with descriptions and where the code reads them, variables used only by shell or PowerShell scripts, orphan candidates, variables the code reads that the file lacks, and variables .env.example documents that nothing reads. Reads are found with the AST, including helper functions such as _flag. Descriptions come from .env.example, then the comment beside the code. Orphan means no reference in this repository; Fuseki, ngrok or launcher use needs a manual check, and agent credentials referenced as env:NAME from the graph are handled as the HB_AGENT_ family. A sentinel-secrets test covers every output; another fails when .env.example documents an unreferenced variable." ;
+    dcterms:description "scripts/env_audit.py --env FILE reads only the variable names in a .env (nothing after the = is stored or reported, not even whether it is empty) and writes a markdown or JSON report: current variables with descriptions and where the code reads them, variables used only by shell or PowerShell scripts, orphan candidates, variables the code reads that the file lacks, and variables .env.example documents that nothing reads. Reads are found with the AST, including helper functions such as _flag. Descriptions come from .env.example, then the comment beside the code. Each name is tagged generated, external, setting or unknown, a heuristic from its name and how the code parses it, with the reason recorded. Orphan means no reference in this repository; Fuseki, ngrok or launcher use needs a manual check, and agent credentials referenced as env:NAME from the graph are handled as the HB_AGENT_ family. A sentinel-secrets test covers every output; another fails when .env.example documents an unreferenced variable." ;
     rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/82> .
 
 hb:release-2026-11-07-b a hb:ReleaseNote ;
