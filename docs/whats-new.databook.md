@@ -215,6 +215,17 @@ process:
 
 ## Log
 
+### 2026-11-09 (replace shrink guard)
+
+- **A `mode=replace` that would leave under 10% of a graph is refused:
+  [PR #84](https://github.com/kurtcagle/holon-bridge-python/pull/84).**
+  On `/graph/push`, `/holon` and the MCP `push_turtle` and `create_holon` tools,
+  a replace that would shrink a graph of 20 or more triples to under 10% of its
+  size returns 409 `replace_would_shrink_graph` with the before and after counts,
+  unless the caller sends `force_shrink=true`. Pipelines and triggers are not
+  guarded. A replace response carries `triplesBefore` and `triplesAfter`. Fuseki
+  store only.
+
 ### 2026-11-07 (env audit script)
 
 - **`scripts/env_audit.py` lists a `.env`'s variables and finds orphans without
@@ -881,6 +892,12 @@ hb:release-2026-11-13-a a hb:ReleaseNote ;
     rdfs:label "Fluent ledger: backdatable valid time and recorded insertion time" ;
     dcterms:description "update_fluent already accepted asserted_datetime in Python; the REST request model and the MCP tool now carry it too (naive timestamps read as UTC). Every StateAssertion is stamped hevt:insertedAt with the wall clock, never caller-supplied, so a fact learnt late has a valid time and a transaction time. get_holon's inserted_at now keeps only entries inserted by then and is exposed on MCP; with no inserted_at there is no transaction-time bound, where it previously defaulted to observed_at. Entries from before the change have no insertedAt and count as known. Tested against rdflib, not Jena; the nested FILTER in the as-of query's later-assertion clause is untested for the reason given in test_get_holon_asof.py." ;
     rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pulls> .
+
+hb:release-2026-11-09-a a hb:ReleaseNote ;
+    dcterms:date "2026-11-09"^^xsd:date ;
+    rdfs:label "Refuse a mode=replace that would leave under 10% of a graph; force_shrink overrides" ;
+    dcterms:description "On 6 Oct 2026 a push_turtle mode=replace with a partial payload emptied a 167-triple graph to 1 triple and reported conforms: true. /graph/push, /holon and the MCP push_turtle and create_holon tools now count the graph and the payload (in a throwaway Jena graph) before a replace, and refuse with a 409 when a graph of 20 or more triples would be left with under 10% of its triples, unless force_shrink is true. Pipelines and triggers are not guarded. Replace responses carry triplesBefore and triplesAfter. Fuseki store only; the Fluree store kind needs its own count." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/84> .
 
 hb:release-2026-11-07-c a hb:ReleaseNote ;
     dcterms:date "2026-11-07"^^xsd:date ;
