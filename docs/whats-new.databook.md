@@ -695,7 +695,7 @@ process:
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
 
-hb:release-2026-11-13-b a hb:ReleaseNote ;
+hb:release-2026-11-13-d a hb:ReleaseNote ;
     dcterms:date "2026-11-13"^^xsd:date ;
     rdfs:label "approve_candidate validates the merge when SHACL_REQUIRED is on or a shapes_graph is given" ;
     dcterms:description "approve_candidate passed shacl_required=False and no shapes_graph from the route, so a candidate was always merged unvalidated and the REST and MCP routes could not ask otherwise. The route now passes SHACL_REQUIRED and SHACL_DELTA, DecisionBody and the MCP approve_candidate tool gain shapes_graph (an empty string opts that approval out), and a violation is a 422 that leaves the candidate Pending. Default behaviour with SHACL_REQUIRED off is unchanged. Optional hb:validateWith on named rules is not built. Tests stub the SHACL engine; three of the six new route tests fail on the previous code." ;
