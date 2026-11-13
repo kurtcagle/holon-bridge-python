@@ -508,3 +508,143 @@ def test_a_reason_over_1000_characters_is_a_422_and_the_candidate_stays_pending(
 
     assert response.status_code == 422
     assert next(iter(stub.domain._candidates.values()))["candidateStatusValue"] == "Pending"
+
+
+# --- SHACL on approval (follows SHACL_REQUIRED, caller can name or skip a shapes graph) ---
+
+
+def _client_with(stub, **settings):
+    app = create_app(Settings(bearer_token=TOKEN, **settings))
+    test_client = TestClient(app)
+    test_client.__enter__()
+    app.state.fuseki = stub
+    return test_client
+
+
+@pytest.fixture
+def fake_shacl(monkeypatch):
+    """Replace the SHACL engine inside ingest.write_turtle_to_graph.
+
+    ``calls`` records the shapes graph and mode of each validation that ran;
+    ``verdict["conforms"]`` decides the outcome. Context-pack validation is
+    stubbed to "nothing to check" so only the ordinary pack is under test.
+    """
+    from holonbridge import ingest as ingest_mod
+    from holonbridge.shacl import ValidationReport
+
+    calls: list[dict] = []
+    verdict = {"conforms": True}
+
+    def report():
+        if verdict["conforms"]:
+            return ValidationReport(conforms=True)
+        return ValidationReport(
+            conforms=False,
+            results=[{"resultSeverity": "http://www.w3.org/ns/shacl#Violation", "resultMessage": "bad"}],
+        )
+
+    async def fake_full(client, conn, **kw):
+        calls.append({"mode": "full", **kw})
+        return report()
+
+    async def fake_delta(client, conn, **kw):
+        calls.append({"mode": "delta", **kw})
+        return report()
+
+    async def fake_context(client, conn, **kw):
+        return None
+
+    monkeypatch.setattr(ingest_mod.shacl_mod, "validate_full", fake_full)
+    monkeypatch.setattr(ingest_mod.shacl_mod, "validate_delta", fake_delta)
+    monkeypatch.setattr(ingest_mod.shacl_mod, "validate_context_pack", fake_context)
+    return calls, verdict
+
+
+def _approve(test_client, stub, body=None):
+    import asyncio
+
+    stub.admin = True
+    cid = asyncio.run(_stage_candidate(stub))
+    response = test_client.post(f"/candidate/{cid}/approve", json=body or {}, headers=hdrs())
+    status_value = next(iter(stub.domain._candidates.values()))["candidateStatusValue"]
+    return response, status_value
+
+
+def test_approval_is_unvalidated_when_the_deployment_does_not_require_shacl(stub, fake_shacl):
+    calls, _ = fake_shacl
+    response, state = _approve(_client_with(stub), stub)
+
+    assert response.status_code == 200, response.text
+    assert state == "Approved"
+    assert calls == []
+
+
+def test_approval_validates_against_the_dataset_shapes_when_shacl_is_required(stub, fake_shacl):
+    calls, _ = fake_shacl
+    response, state = _approve(_client_with(stub, shacl_required=True), stub)
+
+    assert response.status_code == 200, response.text
+    assert state == "Approved"
+    assert len(calls) == 1
+    assert calls[0]["shapes_graph"].endswith(":shacl")
+    assert calls[0]["mode"] == "delta"  # SHACL_DELTA defaults on, as for push
+
+
+def test_a_violation_refuses_the_approval_and_the_candidate_stays_pending(stub, fake_shacl):
+    _, verdict = fake_shacl
+    verdict["conforms"] = False
+    response, state = _approve(_client_with(stub, shacl_required=True), stub)
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["error"] == "shacl_violation"
+    assert state == "Pending"
+
+
+def test_an_empty_shapes_graph_opts_this_approval_out(stub, fake_shacl):
+    calls, verdict = fake_shacl
+    verdict["conforms"] = False  # would refuse if it ran
+    response, state = _approve(_client_with(stub, shacl_required=True), stub, {"shapes_graph": ""})
+
+    assert response.status_code == 200, response.text
+    assert state == "Approved"
+    assert calls == []
+
+
+def test_a_named_shapes_graph_is_used_even_when_shacl_is_not_required(stub, fake_shacl):
+    calls, _ = fake_shacl
+    response, state = _approve(_client_with(stub), stub, {"shapes_graph": "urn:ds:my-shapes"})
+
+    assert response.status_code == 200, response.text
+    assert [c["shapes_graph"] for c in calls] == ["urn:ds:my-shapes"]
+    assert state == "Approved"
+
+
+# --- MCP approve_candidate forwards shapes_graph ---
+
+
+@pytest.fixture
+def mcp_candidates(monkeypatch):
+    from holonbridge_mcp.tools import candidates
+
+    calls: list[dict] = []
+
+    async def fake_call(method, path, *, json_body=None, **kw):
+        calls.append({"method": method, "path": path, "json_body": json_body})
+        return {"ok": True}
+
+    monkeypatch.setattr(candidates, "_call", fake_call)
+    return candidates, calls
+
+
+@pytest.mark.asyncio
+async def test_mcp_approve_forwards_shapes_graph_including_the_empty_opt_out(mcp_candidates):
+    candidates, calls = mcp_candidates
+    fn = getattr(candidates.approve_candidate, "fn", candidates.approve_candidate)
+
+    await fn("c1", reason="ok", shapes_graph="")
+    await fn("c2")
+    await fn("c3", shapes_graph="urn:ds:s")
+
+    assert calls[0]["json_body"] == {"reason": "ok", "shapes_graph": ""}
+    assert calls[1]["json_body"] is None
+    assert calls[2]["json_body"] == {"shapes_graph": "urn:ds:s"}

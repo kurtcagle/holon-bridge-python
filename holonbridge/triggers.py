@@ -899,6 +899,8 @@ async def approve_candidate(
     animus: Animus,
     shapes_graph: str | None = None,
     reason: str | None = None,
+    shacl_required: bool = False,
+    shacl_delta: bool = False,
 ) -> dict[str, Any]:
     """Merge exactly the Turtle the candidate staged into its target graph.
 
@@ -927,13 +929,17 @@ async def approve_candidate(
     through its own declared write mode, via ``execute_named_rule`` — this
     function is only ever the reviewed path.
 
-    SHACL validation is opt-in here, via ``shapes_graph`` — unlike
-    ``/ingest``/``push_turtle``, there is no dataset-wide "shacl_required"
-    setting threaded down to this call, so a candidate that names no
-    ``shapes_graph`` merges unvalidated, matching this function's own
-    behaviour before this fix. Pass ``shapes_graph`` explicitly (the
-    dataset's own default, ``conn.shapes_graph``, is a reasonable choice)
-    to have this merge checked like any other gated write.
+    CHANGED 2026-11-13 (SHACL on approval): ``shacl_required`` and
+    ``shacl_delta`` are now passed through, and the approval route supplies the
+    deployment's ``SHACL_REQUIRED`` and ``SHACL_DELTA`` settings, so approving a
+    candidate is validated exactly as ``push_turtle`` and ``/ingest`` are. The
+    shapes graph resolves as for those: an explicit ``shapes_graph`` is used as
+    given, ``""`` means "do not validate this approval", and ``None`` falls back
+    to the dataset's own shapes graph when ``shacl_required`` is true. With
+    ``SHACL_REQUIRED`` off (the default) and no ``shapes_graph``, behaviour is
+    unchanged: the merge is unvalidated. A violation refuses the approval with a
+    422 and the candidate stays ``Pending``. Direct callers that pass neither
+    keyword keep the old behaviour (no validation, full-graph mode).
 
     Returns whatever ``write_turtle_to_graph`` returns (the validation
     report, when one ran) rather than ``None``, so a caller can see what
@@ -952,8 +958,8 @@ async def approve_candidate(
             reduction_rule_id=None,
             conn=conn,
             client=client,
-            shacl_required=False,
-            shacl_delta=False,
+            shacl_required=shacl_required,
+            shacl_delta=shacl_delta,
             animus=animus,
         )
     else:

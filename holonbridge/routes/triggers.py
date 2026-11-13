@@ -628,6 +628,15 @@ class DecisionBody(BaseModel):
     """Optional body of an approve or reject call."""
 
     reason: str | None = Field(default=None, max_length=1000)
+    shapes_graph: str | None = Field(
+        default=None,
+        description=(
+            "approve only: the shapes graph to validate the merge against. Omit to use the "
+            "dataset's own shapes graph when the deployment sets SHACL_REQUIRED (otherwise no "
+            "validation); an empty string skips validation for this approval; any other "
+            "value is used as given."
+        ),
+    )
 
 
 @router.post("/candidate/{candidate_id}/approve")
@@ -636,9 +645,15 @@ async def approve_candidate_proposal(
     conn: ConnDep,
     client: ClientDep,
     animus: AnimusDep,
+    settings: SettingsDep,
     body: DecisionBody | None = None,
 ) -> dict:
-    """CHANGED: ``approve_candidate`` now routes through the ordinary
+    """CHANGED 2026-11-13: SHACL on approval follows ``SHACL_REQUIRED`` /
+    ``SHACL_DELTA`` like every other write path, and the body may name a
+    ``shapes_graph`` (``""`` opts out). A violation is a 422 and the candidate
+    stays Pending.
+
+    CHANGED: ``approve_candidate`` now routes through the ordinary
     ACL/SHACL-gated write path (see that function's own docstring), so
     this now also passes ``animus`` through and lets a 401/403/422/502
     ``HTTPException`` raised from inside it propagate as-is -- it is
@@ -655,7 +670,14 @@ async def approve_candidate_proposal(
         )
     try:
         result = await approve_candidate(
-            client, conn, candidate, animus=animus, reason=body.reason if body else None
+            client,
+            conn,
+            candidate,
+            animus=animus,
+            reason=body.reason if body else None,
+            shapes_graph=body.shapes_graph if body else None,
+            shacl_required=settings.shacl_required,
+            shacl_delta=settings.shacl_delta,
         )
     except CandidateError as exc:
         raise HTTPException(
