@@ -401,6 +401,32 @@ async def _precommit_check(
     shapes_turtle: str,
     gate_scope: str = GATE_SCOPE_ASSERTION,
 ) -> "shacl_mod.ValidationReport":
+    """One fluent: see :func:`_precommit_check_many`."""
+    return await _precommit_check_many(
+        client,
+        conn,
+        fluents=[fluent],
+        events_graph=events_graph,
+        scene_graph=scene_graph,
+        ledger_insert=ledger_insert,
+        scene_update=scene_update,
+        shapes_turtle=shapes_turtle,
+        gate_scope=gate_scope,
+    )
+
+
+async def _precommit_check_many(
+    client: FusekiClient,
+    conn: Conn,
+    *,
+    fluents: list[str],
+    events_graph: str,
+    scene_graph: str,
+    ledger_insert: str,
+    scene_update: str,
+    shapes_turtle: str,
+    gate_scope: str = GATE_SCOPE_ASSERTION,
+) -> "shacl_mod.ValidationReport":
     """Validate the exact candidate transition before it ever touches a
     live graph.
 
@@ -438,11 +464,24 @@ async def _precommit_check(
         await client.update(conn, f"COPY SILENT GRAPH <{scene_graph}> TO <{scratch_scene}>")
         await client.update(conn, f"{_PREFIXES}\n{trial_ledger}\n;\n{trial_scene}")
 
-        scope_query = f"""{_PREFIXES}
+        if len(fluents) == 1:
+            scope_query = f"""{_PREFIXES}
 CONSTRUCT {{ ?assertion ?p ?o . }}
 WHERE {{
   GRAPH <{scratch_events}> {{
-    ?assertion hevt:forFluent <{fluent}> ; ?p ?o .
+    ?assertion hevt:forFluent <{fluents[0]}> ; ?p ?o .
+    FILTER NOT EXISTS {{ ?assertion hevt:invalidatedAt ?anyInvalidation }}
+    FILTER NOT EXISTS {{ ?later hevt:supersedes ?assertion }}
+  }}
+}}"""
+        else:
+            values = " ".join(f"<{f}>" for f in fluents)
+            scope_query = f"""{_PREFIXES}
+CONSTRUCT {{ ?assertion ?p ?o . }}
+WHERE {{
+  VALUES ?scopedFluent {{ {values} }}
+  GRAPH <{scratch_events}> {{
+    ?assertion hevt:forFluent ?scopedFluent ; ?p ?o .
     FILTER NOT EXISTS {{ ?assertion hevt:invalidatedAt ?anyInvalidation }}
     FILTER NOT EXISTS {{ ?later hevt:supersedes ?assertion }}
   }}
@@ -454,24 +493,39 @@ WHERE {{
             # posting an empty graph makes the validator answer 404 "No data
             # graph". It only happens when the copy's state moved on from what
             # this attempt read, i.e. a lost race -- the caller retries.
-            raise _CandidateDidNotFire(fluent)
+            raise _CandidateDidNotFire(", ".join(fluents))
+        if len(fluents) > 1:
+            from .turtle import parse as _parse  # noqa: PLC0415
 
-        extra_turtle = ""
+            seen = {
+                str(o)
+                for _s, p, o in _parse(scoped_turtle)
+                if str(p) == f"{HEVT_NS}forFluent"
+            }
+            missing = [f for f in fluents if f not in seen]
+            if missing:
+                # One member did not fire on the copy: the whole transaction
+                # is one guarded unit, so this is the same lost race.
+                raise _CandidateDidNotFire(", ".join(missing))
+
+        extra_turtles: list[str] = []
         if gate_scope == GATE_SCOPE_HOLDER:
-            extra_turtle = await client.construct(
-                conn,
-                _holder_scope_query(
-                    conn, fluent=fluent, scratch_scene=scratch_scene,
-                ),
-            )
+            for each in fluents:
+                extra_turtles.append(
+                    await client.construct(
+                        conn,
+                        _holder_scope_query(conn, fluent=each, scratch_scene=scratch_scene),
+                    )
+                )
 
         validate_scratch = f"urn:{conn.dataset}:scratch:fluent-validate-{token}"
         try:
             await client.post_graph(conn, validate_scratch, scoped_turtle)
-            if extra_turtle.strip() and _has_triples(extra_turtle):
-                # A second POST, not concatenated Turtle: the two documents'
-                # blank nodes must stay distinct.
-                await client.post_graph(conn, validate_scratch, extra_turtle)
+            for extra_turtle in extra_turtles:
+                if extra_turtle.strip() and _has_triples(extra_turtle):
+                    # A separate POST each, not concatenated Turtle: the
+                    # documents' blank nodes must stay distinct.
+                    await client.post_graph(conn, validate_scratch, extra_turtle)
             report_turtle = await client.shacl_validate(
                 conn, target_graph=validate_scratch, shapes_turtle=shapes_turtle
             )

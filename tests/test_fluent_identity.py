@@ -180,7 +180,11 @@ def audit_entries(store):
 
 def test_both_routes_depend_on_an_identity(api):
     routes = {r.path: r for r in fluent_routes.router.routes if isinstance(r, APIRoute)}
-    assert set(routes) == {"/fluent/update", "/fluent/{fluent_id:path}/prior"}
+    assert set(routes) == {
+        "/fluent/update",
+        "/fluent/update-many",
+        "/fluent/{fluent_id:path}/prior",
+    }
     for path, route in routes.items():
         calls = [d.call for d in route.dependant.dependencies]
         assert deps.require_animus in calls, f"{path} does not require an identity"

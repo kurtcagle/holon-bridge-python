@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.31
+version: 1.0.32
 created: 2026-09-27
 updated: 2026-11-13
 author:
@@ -45,6 +45,44 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-11-13 (hb:Portal: a door between holons, and multi-fluent transactions)
+
+- **`hb:Portal` is a registered door between two holons, with a lock, an effect and an
+  optional boundary check, crossed in one atomic transaction.** A portal names the holon
+  a traveller leaves and the holon it arrives in, and the position property whose fluent
+  says where a traveller is. `POST /portal` registers one (`register_portal` in MCP),
+  `GET /portals` and `GET /portal/{id}` read them, `POST /portal/{id}/status` suspends or
+  reactivates one, `DELETE /portal/{id}` removes it, and `POST /portal/{id}/traverse`
+  (`traverse_portal`) crosses. A crossing checks, in order: the portal is Active; the
+  traveller has exactly one position fluent of that property and it is at `from`; the
+  lock (a named SELECT bound to the traveller as `focus`; open when it returns a row,
+  unless `?open` or `?allowed` is false, with `?reason` passed back when it is shut);
+  the optional `boundaryShapes` (SHACL shapes the traveller's `payload` Turtle must
+  satisfy). It then moves the position fluent and applies the effect query's rows (same
+  columns as a fluent trigger action) in a single transaction. The boundary stays the
+  statement of what is valid inside a holon; the portal is the rule for moving between
+  them, and may consult the boundary but not the reverse.
+- **Registering a portal makes its position property portal-governed.** Direct
+  `update_fluent`, `update_fluents` and fluent-trigger rows against a fluent of that
+  property are refused (`409 portal_governed`), so the lock cannot be walked around. That
+  is a property of the model, not a setting. Suspending a portal does not release the
+  property; deleting it does. Past crossings stay in the ledger.
+- **`update_fluents` / `POST /fluent/update-many`: several fluent changes, all or none.**
+  The portal needed this and it stands alone. One conjunctive guard (each member's
+  expectation, variables suffixed per member) is shared by a single ledger INSERT and a
+  single scene DELETE/INSERT, so either every member lands or none does. The batch gets an
+  `hevt:Transaction` record; each assertion carries `hevt:inTransaction`; a crossing adds
+  `hevt:viaPortal` and `hevt:traveller`. A member may carry an `expect` precondition. At
+  most 20 members. The pre-commit SHACL gate runs once over all members together.
+  Needs the same three write grants as `POST /fluent/update`.
+- **Limits worth knowing.** The lock is evaluated just before the transaction, not inside
+  it, so a lock that reads state which another writer changes in between can be stale; the
+  position change itself is guarded against `from`, so two crossings by one traveller
+  cannot both succeed. Registering needs write on the portals graph and read on what the
+  lock and effect queries read, and a lock query without a `focus` parameter is warned
+  about because it answers the same for everyone. Tested on rdflib with pyshacl, not on a
+  live Fuseki.
 
 ### 2026-11-13 (a trigger that changes fluents)
 
@@ -781,6 +819,11 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-11-13-h a hb:ReleaseNote ;
+    dcterms:date "2026-11-13"^^xsd:date ;
+    rdfs:label "hb:Portal and atomic multi-fluent transactions" ;
+    dcterms:description "A registered portal joins two holons: from, to, a position property, an optional lock and effect (named SELECTs bound to the traveller as focus) and optional boundaryShapes. POST /portal/{id}/traverse checks Active status, that the traveller's single position fluent is at from, the lock, and the boundary payload, then moves the traveller and applies the effect rows in one transaction. Registering a portal makes its position property portal-governed: update_fluent, update-many and fluent-trigger rows against it are refused with 409 portal_governed until the portal is deleted. New update_fluents / POST /fluent/update-many applies up to 20 fluent changes under one shared guard so all land or none do, recorded as an hevt:Transaction with hevt:inTransaction on each assertion (and hevt:viaPortal, hevt:traveller for a crossing). The lock is evaluated just before, not inside, the transaction. New graph role portals. Tested on rdflib with pyshacl; not run against live Fuseki." .
 
 hb:release-2026-11-13-g a hb:ReleaseNote ;
     dcterms:date "2026-11-13"^^xsd:date ;
