@@ -87,9 +87,18 @@ def render_trigger_turtle(
     agent_task: str | None = None,
     agent_context: str | None = None,
     agent_target_graph: str | None = None,
-<<<<<<< HEAD
     fluent_query: str | None = None,
+    fire_mode: str = "Edge",
 ) -> str:
+    if fire_mode not in FIRE_MODES:
+        raise InvalidTrigger(f"fireMode must be one of {', '.join(FIRE_MODES)}, not {fire_mode!r}")
+    if fire_mode == "EveryEvaluation" and agent_endpoint:
+        raise InvalidTrigger("fireMode EveryEvaluation applies to rule actions, not onFireAgent")
+    if fire_mode == "EveryEvaluation" and fluent_query:
+        raise InvalidTrigger(
+            "fireMode EveryEvaluation applies to rule actions, not onFireFluentQuery: "
+            "a fluent update repeated on every evaluation is almost never what is meant"
+        )
     if sum(bool(x) for x in (on_fire, agent_endpoint, fluent_query)) != 1:
         raise InvalidTrigger(
             "a trigger names exactly one action: a rule (onFire), an agent (onFireAgent) "
@@ -100,16 +109,6 @@ def render_trigger_turtle(
             "onFireFluentQuery needs reviewRequired=false: a fluent update is a compare-and-set, "
             "not Turtle that can wait in the candidate queue"
         )
-=======
-    fire_mode: str = "Edge",
-) -> str:
-    if fire_mode not in FIRE_MODES:
-        raise InvalidTrigger(f"fireMode must be one of {', '.join(FIRE_MODES)}, not {fire_mode!r}")
-    if fire_mode == "EveryEvaluation" and agent_endpoint:
-        raise InvalidTrigger("fireMode EveryEvaluation applies to rule actions, not onFireAgent")
-    if bool(on_fire) == bool(agent_endpoint):
-        raise InvalidTrigger("a trigger names exactly one action: a rule (onFire) or an agent (onFireAgent)")
->>>>>>> origin/main
     if agent_endpoint and not (agent_task or "").strip():
         raise InvalidTrigger("an agent trigger needs a task to give the agent")
     if not agent_endpoint and (agent_task or agent_context or agent_target_graph):

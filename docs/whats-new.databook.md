@@ -67,8 +67,10 @@ process:
   a failure on the first row is a `failed` firing and is retried, a failure after
   that is recorded as `partial` and is not retried, so write `Insert` rows knowing
   that. The updates do not themselves fire state triggers (the existing re-entrancy
-  guard), so a chain of arrivals advances one step per evaluation. Evaluating one on
-  demand needs the same three write grants as `POST /fluent/update`.
+  guard), so a chain of arrivals advances one step per evaluation. A fluent trigger is Edge-fired only: `fireMode EveryEvaluation` is refused at
+  registration and skipped by the loader, because a repeated `Insert` is almost
+  never intended. Evaluating one on demand needs the same three write grants as
+  `POST /fluent/update`.
 
 ### 2026-11-13 (a wider, opt-in scope for the fluent SHACL gate)
 
@@ -783,7 +785,7 @@ process:
 hb:release-2026-11-13-g a hb:ReleaseNote ;
     dcterms:date "2026-11-13"^^xsd:date ;
     rdfs:label "Triggers can act by updating fluents (onFireFluentQuery)" ;
-    dcterms:description "A new hev:onFireFluentQuery action names a SELECT returning ?fluent and ?value rows (optional ?operation, ?isIri, ?assertedAt, ?description), bound to the focus if it declares a focus parameter, applied through update_fluent as the trigger's definer. Needs reviewRequired=false (enforced at registration, activation and load), read on the condition and action query, and write on the events, scene and sequences graphs, re-checked at firing. Exactly one of onFire, onFireAgent and onFireFluentQuery. Rows are validated first, capped at 50, then applied sequentially and not atomically: a first-row failure is a failed firing and is retried, a later failure is recorded as partial and not retried. No cascade within an evaluation. Tested against stubs with update_fluent replaced by a recorder; not run against a live Fuseki." ;
+    dcterms:description "A new hev:onFireFluentQuery action names a SELECT returning ?fluent and ?value rows (optional ?operation, ?isIri, ?assertedAt, ?description), bound to the focus if it declares a focus parameter, applied through update_fluent as the trigger's definer. Needs reviewRequired=false (enforced at registration, activation and load), read on the condition and action query, and write on the events, scene and sequences graphs, re-checked at firing. Exactly one of onFire, onFireAgent and onFireFluentQuery. Rows are validated first, capped at 50, then applied sequentially and not atomically: a first-row failure is a failed firing and is retried, a later failure is recorded as partial and not retried. No cascade within an evaluation; fireMode EveryEvaluation is refused for these triggers. Tested against stubs with update_fluent replaced by a recorder; not run against a live Fuseki." ;
     rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/issues/86> .
 
 hb:release-2026-11-13-f a hb:ReleaseNote ;

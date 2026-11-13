@@ -186,19 +186,16 @@ class Trigger:
     agent_task: str = ""
     agent_context: str = ""
     agent_target_graph: str = ""
-<<<<<<< HEAD
     #: Set instead of ``on_fire_rule_id``: the id of a named SELECT whose rows
     #: (bound to the focus) are applied as fluent updates. See
     #: ``fluent_trigger_action.py``. Requires ``review_required`` false.
     fluent_query: str = ""
-=======
     #: ``Edge`` or ``EveryEvaluation`` (see ``FIRE_MODES``).
     fire_mode: str = FIRE_MODE_EDGE
 
     @property
     def every_evaluation(self) -> bool:
         return self.fire_mode == FIRE_MODE_EVERY
->>>>>>> origin/main
 
     @property
     def runnable(self) -> bool:
@@ -394,6 +391,12 @@ async def load_named_triggers(
             warnings.append(
                 f"<{iri}> combines fireMode {FIRE_MODE_EVERY} with onFireAgent; skipped "
                 "(an agent call per write is not supported)"
+            )
+            continue
+        if fire_mode == FIRE_MODE_EVERY and fluent_query:
+            warnings.append(
+                f"<{iri}> combines fireMode {FIRE_MODE_EVERY} with onFireFluentQuery; skipped "
+                "(a fluent update repeated on every evaluation is almost never what is meant)"
             )
             continue
 

@@ -510,7 +510,6 @@ def test_a_reason_over_1000_characters_is_a_422_and_the_candidate_stays_pending(
     assert next(iter(stub.domain._candidates.values()))["candidateStatusValue"] == "Pending"
 
 
-<<<<<<< HEAD
 # --- fluent-update triggers (hev:onFireFluentQuery) -------------------------------
 
 _FLUENT_CONN = Conn(base_url="http://x", dataset="ds", overridden=False, bank_name="local")
@@ -662,7 +661,8 @@ def test_evaluating_a_fluent_trigger_needs_write_on_the_fluent_graphs(client, fl
     fluent_stub.denied_write_graphs = {SEQUENCES}
     denied = client.post("/named-trigger/tick/evaluate", json={}, headers=hdrs())
     assert denied.status_code == 403
-=======
+
+
 # --- SHACL on approval (follows SHACL_REQUIRED, caller can name or skip a shapes graph) ---
 
 
@@ -801,4 +801,3 @@ async def test_mcp_approve_forwards_shapes_graph_including_the_empty_opt_out(mcp
     assert calls[0]["json_body"] == {"reason": "ok", "shapes_graph": ""}
     assert calls[1]["json_body"] is None
     assert calls[2]["json_body"] == {"shapes_graph": "urn:ds:s"}
->>>>>>> origin/main

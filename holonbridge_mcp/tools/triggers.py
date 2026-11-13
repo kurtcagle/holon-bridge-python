@@ -98,11 +98,8 @@ async def register_named_trigger(
     agent_task: str | None = None,
     agent_context: str | None = None,
     agent_target_graph: str | None = None,
-<<<<<<< HEAD
     on_fire_fluent_query: str | None = None,
-=======
     fire_mode: str = "Edge",
->>>>>>> origin/main
 ) -> dict:
     """Register (or overwrite) a named trigger.
 
@@ -175,11 +172,8 @@ async def register_named_trigger(
             "agent_task": agent_task,
             "agent_context": agent_context,
             "agent_target_graph": agent_target_graph,
-<<<<<<< HEAD
             "on_fire_fluent_query": on_fire_fluent_query,
-=======
             "fire_mode": fire_mode,
->>>>>>> origin/main
         },
     )
 

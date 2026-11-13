@@ -425,3 +425,23 @@ async def test_a_focus_that_stops_matching_is_rearmed(stub, conn, recorder):
     again = only(await evaluate_triggers(stub, conn, kind=TRIGGER_STATE), "tick")
     assert [f.outcome for f in again] == ["applied"]
     assert len(recorder.calls) == 2
+
+
+async def test_every_evaluation_is_refused_for_a_fluent_trigger(stub, conn):
+    stub.add_trigger("again", condition="select-something", onFireFluentQuery="advance-clock",
+                     reviewRequired="false", fireMode="EveryEvaluation")
+    result = await load_named_triggers(stub, conn)
+    assert result.by_id("again") is None
+    assert any("EveryEvaluation" in w and "onFireFluentQuery" in w for w in result.warnings)
+
+
+def test_the_renderer_refuses_every_evaluation_for_a_fluent_trigger():
+    from holonbridge.trigger_registry import InvalidTrigger, render_trigger_turtle
+
+    with pytest.raises(InvalidTrigger, match="EveryEvaluation"):
+        render_trigger_turtle(
+            node="urn:n", trigger_id="t", trigger_kind="StateTrigger", condition="c", on_fire=None,
+            review_required=False, status="Active", label=None, description=None,
+            watched_predicates=[], registered_at="2026-11-13T00:00:00+00:00",
+            fluent_query="advance-clock", fire_mode="EveryEvaluation",
+        )
