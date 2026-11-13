@@ -53,16 +53,28 @@ async def propose_candidate(
 
 
 @mcp.tool()
-async def approve_candidate(candidate_id: str, reason: str | None = None) -> dict:
+async def approve_candidate(
+    candidate_id: str, reason: str | None = None, shapes_graph: str | None = None
+) -> dict:
     """Approve a pending candidate: merges its staged Turtle (GSP POST) into
     the target graph, regardless of the underlying rule's own write mode
     (see the module note above). Refused (409) if not Pending. The candidate
     keeps who approved it, when, and the optional ``reason`` (up to 1000
-    characters)."""
+    characters).
+
+    The merge is SHACL-validated when the deployment sets SHACL_REQUIRED (against
+    the dataset's own shapes graph) or when ``shapes_graph`` names one; a
+    violation is a 422 and the candidate stays Pending. ``shapes_graph=""``
+    skips validation for this approval."""
+    body: dict = {}
+    if reason:
+        body["reason"] = reason
+    if shapes_graph is not None:
+        body["shapes_graph"] = shapes_graph
     return await _call(
         "POST",
         f"/candidate/{candidate_id}/approve",
-        json_body={"reason": reason} if reason else None,
+        json_body=body or None,
     )
 
 
