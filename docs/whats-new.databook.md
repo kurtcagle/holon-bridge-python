@@ -703,7 +703,7 @@ process:
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
 
-hb:release-2026-11-13-b a hb:ReleaseNote ;
+hb:release-2026-11-13-g a hb:ReleaseNote ;
     dcterms:date "2026-11-13"^^xsd:date ;
     rdfs:label "Triggers can act by updating fluents (onFireFluentQuery)" ;
     dcterms:description "A new hev:onFireFluentQuery action names a SELECT returning ?fluent and ?value rows (optional ?operation, ?isIri, ?assertedAt, ?description), bound to the focus if it declares a focus parameter, applied through update_fluent as the trigger's definer. Needs reviewRequired=false (enforced at registration, activation and load), read on the condition and action query, and write on the events, scene and sequences graphs, re-checked at firing. Exactly one of onFire, onFireAgent and onFireFluentQuery. Rows are validated first, capped at 50, then applied sequentially and not atomically: a first-row failure is a failed firing and is retried, a later failure is recorded as partial and not retried. No cascade within an evaluation. Tested against stubs with update_fluent replaced by a recorder; not run against a live Fuseki." ;
