@@ -46,6 +46,25 @@ process:
 
 ## Log
 
+### 2026-11-13 (a wider, opt-in scope for the fluent SHACL gate)
+
+- **`FLUENT_GATE_SCOPE=holder` lets a fluent gate shape see the holder, its sibling
+  fluents and the new value's neighbourhood
+  ([closes #88](https://github.com/kurtcagle/holon-bridge-python/issues/88)).**
+  The pre-commit check validated only the fluent's own live assertion, so "a
+  train's location must be a station on its own line" could not be a gate shape.
+  With the new setting (`assertion` by default, which changes nothing), the
+  scratch validation graph also carries: the triples of a node that links to the
+  fluent (the holder); the holons triples of the fluent and its sibling fluents;
+  the current scene values of both, taken from the scratch scene so they include
+  this transition; and, when the new value is an IRI, that node's holons triples
+  (one hop). Two costs, both deliberate: an update can be refused because of
+  another fluent's value, and a violation already present in that neighbourhood
+  blocks every update to its fluents until it is fixed, because the wider check
+  is not delta-based. Shapes that name `GRAPH` are still refused. Verified on Jena
+  Fuseki 5.5.0 with its SHACL service (`tests/test_fluent_gate_scope_live.py`,
+  skipped without `HOLONBRIDGE_TEST_FUSEKI_URL`) as well as on rdflib and pyshacl.
+
 ### 2026-11-13 (state triggers can fire on every evaluation)
 
 - **`hev:fireMode "EveryEvaluation"` on a trigger, default `"Edge"`
@@ -736,6 +755,12 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-11-13-f a hb:ReleaseNote ;
+    dcterms:date "2026-11-13"^^xsd:date ;
+    rdfs:label "Fluent gate: opt-in holder scope (FLUENT_GATE_SCOPE=holder)" ;
+    dcterms:description "update_fluent's pre-commit SHACL check validated only the fluent's live StateAssertion, so a shape needing the holder or a sibling fluent could not gate a write. FLUENT_GATE_SCOPE (assertion by default, unchanged) accepts holder, which adds to the scratch validation graph the triples of a node linking to the fluent, the holons triples of the fluent and its sibling fluents, the current scene values of both from the scratch scene so they reflect this transition, and the holons triples of the new value when it is an IRI. A violation in that neighbourhood blocks updates to its fluents until fixed (not delta-based), and an update can be refused because of another fluent's value. update_fluent takes gate_scope; the route passes the setting. Shapes naming GRAPH are still refused. Verified on Jena Fuseki 5.5.0 and on rdflib with pyshacl." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/issues/88> .
 
 hb:release-2026-11-13-e a hb:ReleaseNote ;
     dcterms:date "2026-11-13"^^xsd:date ;

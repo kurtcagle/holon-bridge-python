@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from rdflib import Dataset, Namespace, URIRef
 
 from holonbridge import audit, deps
+from holonbridge.config import Settings
 from holonbridge.acl import Animus
 from holonbridge.conn import Conn
 from holonbridge.deps import get_client, require_animus, require_conn
@@ -130,6 +131,7 @@ def who():
 def api(store, conn, who, recorder):
     app = FastAPI()
     app.state.fuseki = store
+    app.state.settings = Settings()
     app.add_middleware(audit.AuditMiddleware)
     app.include_router(fluent_routes.router)
 
@@ -371,3 +373,13 @@ def test_an_allowed_update_is_recorded_against_all_three_graphs(api, store, reco
     (entry,) = audit_entries(store)
     assert entry["outcome"] == "allowed" and entry["actor"] == JANE
     assert entry["graphs"] == sorted([EVENTS, SCENE, SEQUENCES])
+
+
+def test_the_route_passes_the_deployments_gate_scope_to_the_update(api, store, recorder):
+    grant(store, EVENTS, SCENE, SEQUENCES)
+    assert update(api).status_code == 200
+    assert recorder.updates[-1]["gate_scope"] == "assertion"
+
+    api.app_.state.settings = Settings(fluent_gate_scope="holder")
+    assert update(api).status_code == 200
+    assert recorder.updates[-1]["gate_scope"] == "holder"
