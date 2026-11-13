@@ -167,6 +167,23 @@ def test_watched_predicates_are_stored(client, stub):
     assert stub.updates[0].count("<https://example.org/p>") == 1
 
 
+def test_fire_mode_is_stored_returned_and_defaults_to_edge(client, stub):
+    response = register(client, {**AUTO, "fire_mode": "EveryEvaluation"})
+    assert response.status_code == 200, response.text
+    assert response.json()["fireMode"] == "EveryEvaluation"
+    assert '"EveryEvaluation"' in stub.updates[0] and "fireMode" in stub.updates[0]
+
+    stub.updates.clear()
+    plain = register(client, REVIEWED)
+    assert plain.json()["fireMode"] == "Edge"
+    assert "fireMode" not in stub.updates[0]
+
+
+def test_an_unknown_fire_mode_is_a_422(client, stub):
+    assert register(client, {**AUTO, "fire_mode": "Sometimes"}).status_code == 422
+    assert stub.updates == []
+
+
 # --- identity and the registry grant ----------------------------------------------
 
 
