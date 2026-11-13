@@ -2,9 +2,9 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.29
+version: 1.0.30
 created: 2026-09-27
-updated: 2026-11-07
+updated: 2026-11-13
 author:
   - name: Kurt Cagle
     iri: https://holongraph.com/people/kurt-cagle
@@ -43,6 +43,24 @@ process:
    annoying, move everything older than a few months into
    `whats-new-archive.databook.md` and leave a one-line pointer here --
    not needed yet.
+
+## Log
+
+### 2026-11-13 (two clocks on a fluent: backdating and insertion time)
+
+- **`update_fluent` takes `asserted_datetime` over REST and MCP, and every ledger
+  entry now records when it was inserted:
+  [branch `fluent-backdating-and-transaction-time`](https://github.com/kurtcagle/holon-bridge-python/pulls).**
+  `asserted_datetime` (ISO 8601, no timezone means UTC) is valid time: when the
+  fact was true, which a caller may backdate to record something learnt late. The
+  bridge stamps `hevt:insertedAt` on every entry with the wall clock; the caller
+  cannot set it. `get_holon`'s `inserted_at` now excludes entries inserted after
+  it, and is exposed on MCP. Without `inserted_at` there is no transaction-time
+  bound (it used to default to `observed_at`, which would now hide every entry
+  written since). Entries from before this change have no `insertedAt` and count
+  as known from the start. Not covered: the nested `FILTER` in the as-of query's
+  "later assertion" clause is not tested here, because rdflib mis-evaluates it
+  (see `tests/test_get_holon_asof.py`); that wants a live Fuseki test.
 
 ## Log
 
@@ -660,6 +678,12 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-11-13-a a hb:ReleaseNote ;
+    dcterms:date "2026-11-13"^^xsd:date ;
+    rdfs:label "Fluent ledger: backdatable valid time and recorded insertion time" ;
+    dcterms:description "update_fluent already accepted asserted_datetime in Python; the REST request model and the MCP tool now carry it too (naive timestamps read as UTC). Every StateAssertion is stamped hevt:insertedAt with the wall clock, never caller-supplied, so a fact learnt late has a valid time and a transaction time. get_holon's inserted_at now keeps only entries inserted by then and is exposed on MCP; with no inserted_at there is no transaction-time bound, where it previously defaulted to observed_at. Entries from before the change have no insertedAt and count as known. Tested against rdflib, not Jena; the nested FILTER in the as-of query's later-assertion clause is untested for the reason given in test_get_holon_asof.py." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pulls> .
 
 hb:release-2026-11-07-c a hb:ReleaseNote ;
     dcterms:date "2026-11-07"^^xsd:date ;

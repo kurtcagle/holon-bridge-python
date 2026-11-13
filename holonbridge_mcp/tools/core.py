@@ -225,6 +225,7 @@ async def get_holon(
     projection_mode: str = "immersive",
     on_behalf_of: str | None = None,
     observed_at: str | None = None,
+    inserted_at: str | None = None,
 ) -> str | dict:
     """Retrieve a holon as a DataBook.
 
@@ -237,9 +238,14 @@ async def get_holon(
     private graphs are not applied to state, and the DataBook frontmatter's
     ``scope`` says which graphs were actually read. A holon that has a
     list-mode fluent is refused, because its history cannot yet be replayed
-    into the set as it stood; omit ``observed_at`` for those. There is no
-    transaction-time (``inserted_at``) parameter: the time an assertion was
-    recorded is not yet consulted, so it would be inert.
+    into the set as it stood; omit ``observed_at`` for those.
+
+    ``inserted_at`` (same format) adds the second clock: it keeps only entries
+    the bridge had recorded (``hevt:insertedAt``) by then, so the read is
+    "what the record held at ``inserted_at`` about ``observed_at``". Use it to
+    ask what was known then, as against what was true then. Entries written
+    before the bridge began stamping insertion time count as known from the
+    start; omit it for no bound.
 
     ``on_behalf_of`` reads as another Person's scope (a short slug or full
     Person IRI). It works only if that Person has an active read delegation
@@ -258,6 +264,8 @@ async def get_holon(
         params["on_behalf_of"] = on_behalf_of
     if observed_at:
         params["observed_at"] = observed_at
+    if inserted_at:
+        params["inserted_at"] = inserted_at
     return await _call("GET", "/holon", params=params, text=True)
 
 

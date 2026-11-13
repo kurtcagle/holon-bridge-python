@@ -60,7 +60,7 @@ async def holon(
     ),
     inserted_at: datetime | None = Query(
         default=None,
-        description="Transaction-time bound, paired with observed_at. Defaults to observed_at when only one is given.",
+        description="Transaction-time bound: only entries inserted (hevt:insertedAt) by then count, so this reads what the record held at that moment. Omit for no bound. Entries from before insertion time was stamped count as known.",
     ),
     on_behalf_of: str | None = Query(
         default=None,
