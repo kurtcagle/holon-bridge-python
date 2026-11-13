@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.30
+version: 1.0.31
 created: 2026-09-27
 updated: 2026-11-13
 author:
@@ -45,6 +45,17 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-11-13 (live test for transaction-time as-of reads)
+
+- **`as_of_query`'s transaction-time clauses are now tested against real Fuseki:
+  [PR](https://github.com/kurtcagle/holon-bridge-python/pulls).**
+  PR #85 left the "a later assertion was already known" clause untested because
+  rdflib mis-evaluates its nested `FILTER`. Six new cases in
+  `tests/test_get_holon_asof_live.py` (a superseding entry not yet recorded is
+  ignored, recorded it wins, no `inserted_at` is unchanged, an entry recorded
+  after the asked moment is not shown; with and without a legacy first entry)
+  pass on Jena Fuseki 5.5.0. No code change.
 
 ### 2026-11-13 (two clocks on a fluent: backdating and insertion time)
 
@@ -678,6 +689,12 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-11-13-b a hb:ReleaseNote ;
+    dcterms:date "2026-11-13"^^xsd:date ;
+    rdfs:label "Live Fuseki tests for transaction-time as-of reads" ;
+    dcterms:description "Six cases added to tests/test_get_holon_asof_live.py cover the nested later-assertion clause of as_of_query that PR 85 could not test on rdflib: a superseding entry not yet recorded at inserted_at is ignored, one already recorded wins, no inserted_at leaves valid-time reads unchanged, and an entry recorded after the asked moment is not shown, each with and without a legacy first entry that has no insertedAt. All pass on Jena Fuseki 5.5.0. Test-only change." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pulls> .
 
 hb:release-2026-11-13-a a hb:ReleaseNote ;
     dcterms:date "2026-11-13"^^xsd:date ;
