@@ -25,7 +25,7 @@ from holonbridge.trigger_registry import (
 from holonbridge.triggers import TRIGGER_STATE, evaluate_triggers, load_named_triggers
 
 from ._identity import IdentityStub, auth, row
-from .test_triggers import HB, TriggerStub
+from .test_triggers import HB, HEV, TriggerStub
 
 TOKEN = "test-token"
 REGISTRY = "urn:ds:named-triggers"
@@ -508,6 +508,159 @@ def test_a_reason_over_1000_characters_is_a_422_and_the_candidate_stays_pending(
 
     assert response.status_code == 422
     assert next(iter(stub.domain._candidates.values()))["candidateStatusValue"] == "Pending"
+
+
+# --- fluent-update triggers (hev:onFireFluentQuery) -------------------------------
+
+_FLUENT_CONN = Conn(base_url="http://x", dataset="ds", overridden=False, bank_name="local")
+EVENTS = _FLUENT_CONN.graph("events")
+SCENE = _FLUENT_CONN.scene_graph
+SEQUENCES = _FLUENT_CONN.graph("sequences")
+
+FLUENT = {
+    "id": "tick",
+    "trigger_kind": "StateTrigger",
+    "condition": "select-something",
+    "on_fire_fluent_query": "advance-clock",
+    "review_required": False,
+}
+
+
+@pytest.fixture
+def fluent_stub(stub) -> RegStub:
+    iri = "urn:ds:named-query:advance-clock"
+    stub.domain.query_rows += [
+        row(q=iri, type=f"{HB}NamedQuery", p=f"{HB}id", o="advance-clock"),
+        row(
+            q=iri,
+            type=f"{HB}NamedQuery",
+            p=f"{HB}sparql",
+            o="SELECT ?fluent ?value WHERE { BIND(<urn:ds:fluent:clock> AS ?fluent) BIND(1 AS ?value) }",
+        ),
+    ]
+    return stub
+
+
+def test_a_fluent_trigger_can_be_registered_by_someone_who_may_write_fluents(client, fluent_stub):
+    response = register(client, FLUENT)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["ok"] and body["reviewRequired"] is False
+    (update,) = fluent_stub.updates
+    assert "onFireFluentQuery" in update and '"advance-clock"' in update
+    assert "onFire>" not in update.replace("onFireFluentQuery", "")
+    # Written with the definer, so firings can run as them.
+    assert "armedBy" in update
+
+
+@pytest.mark.parametrize("graph", [EVENTS, SCENE, SEQUENCES])
+def test_a_fluent_trigger_needs_write_on_the_events_scene_and_sequences_graphs(
+    client, fluent_stub, graph
+):
+    fluent_stub.denied_write_graphs = {graph}
+    denied = register(client, FLUENT)
+    assert denied.status_code == 403
+    assert graph in denied.json()["detail"]
+    assert fluent_stub.updates == []
+
+
+def test_a_fluent_trigger_cannot_be_reviewed(client, fluent_stub):
+    response = register(client, {**FLUENT, "review_required": True})
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "fluent_action_cannot_be_reviewed"
+    assert fluent_stub.updates == []
+
+
+def test_a_fluent_trigger_is_unreviewed_even_if_review_is_left_at_its_default(client, fluent_stub):
+    body = {k: v for k, v in FLUENT.items() if k != "review_required"}
+    response = register(client, body)
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "fluent_action_cannot_be_reviewed"
+
+
+def test_a_trigger_names_exactly_one_action(client, fluent_stub):
+    both = register(client, {**FLUENT, "on_fire": "log-rule"})
+    neither = register(client, {k: v for k, v in FLUENT.items() if k != "on_fire_fluent_query"})
+    for response in (both, neither):
+        assert response.status_code == 400
+        assert response.json()["detail"]["error"] == "invalid_trigger"
+    assert fluent_stub.updates == []
+
+
+def test_an_unknown_action_query_is_reported_with_the_known_ones(client, fluent_stub):
+    response = register(client, {**FLUENT, "on_fire_fluent_query": "no-such-query"})
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["error"] == "unknown_action_query"
+    assert "advance-clock" in detail["available"]
+
+
+def test_an_action_query_must_be_a_select(client, fluent_stub):
+    response = register(client, {**FLUENT, "on_fire_fluent_query": "not-a-select"})
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "action_query_not_bindable"
+    assert fluent_stub.updates == []
+
+
+def _render(**overrides) -> str:
+    args = dict(
+        node="urn:ds:named-trigger:t", trigger_id="t", trigger_kind="StateTrigger",
+        condition="select-something", on_fire=None, review_required=False, status="Active",
+        label=None, description=None, watched_predicates=[],
+        registered_at="2026-11-13T00:00:00+00:00", armed_by="urn:ds:person:definer",
+        fluent_query="advance-clock",
+    )
+    args.update(overrides)
+    return render_trigger_turtle(**args)
+
+
+def test_the_registry_renderer_writes_the_fluent_action():
+    graph = Graph()
+    graph.parse(data=_render(), format="turtle")
+    objects = {str(o) for s, p, o in graph if str(p).endswith("onFireFluentQuery")}
+    assert objects == {"advance-clock"}
+    assert not any(str(p).endswith("/onFire") for _, p, _ in graph)
+
+
+def test_the_registry_renderer_refuses_a_reviewed_fluent_trigger_too():
+    with pytest.raises(InvalidTrigger, match="reviewRequired=false"):
+        _render(review_required=True)
+
+
+def test_the_registry_renderer_refuses_two_actions():
+    with pytest.raises(InvalidTrigger, match="exactly one action"):
+        _render(on_fire="log-rule")
+
+
+def test_activating_a_fluent_trigger_rechecks_the_grants(client, fluent_stub):
+    assert register(client, FLUENT).status_code == 200
+    fluent_stub.domain.trigger_rows += [
+        row(t="urn:ds:named-trigger:tick", type=f"{HEV}NamedTrigger", p=f"{HEV}{k}", o=v)
+        for k, v in {
+            "id": "tick", "triggerKind": "StateTrigger", "condition": "select-something",
+            "onFireFluentQuery": "advance-clock", "reviewRequired": "false",
+            "triggerStatus": "Suspended",
+        }.items()
+    ]
+    fluent_stub.denied_write_graphs = {SCENE}
+    response = client.post(
+        "/named-trigger/tick/status", json={"status": "Active"}, headers=hdrs()
+    )
+    assert response.status_code == 403
+
+
+def test_evaluating_a_fluent_trigger_needs_write_on_the_fluent_graphs(client, fluent_stub):
+    fluent_stub.domain.trigger_rows += [
+        row(t="urn:ds:named-trigger:tick", type=f"{HEV}NamedTrigger", p=f"{HEV}{k}", o=v)
+        for k, v in {
+            "id": "tick", "triggerKind": "StateTrigger", "condition": "select-something",
+            "onFireFluentQuery": "advance-clock", "reviewRequired": "false",
+            "triggerStatus": "Active", "armedBy": "urn:ds:person:definer",
+        }.items()
+    ]
+    fluent_stub.denied_write_graphs = {SEQUENCES}
+    denied = client.post("/named-trigger/tick/evaluate", json={}, headers=hdrs())
+    assert denied.status_code == 403
 
 
 # --- SHACL on approval (follows SHACL_REQUIRED, caller can name or skip a shapes graph) ---

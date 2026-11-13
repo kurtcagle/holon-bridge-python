@@ -150,6 +150,8 @@ _TRIGGER_FIELDS: dict[str, tuple[str, ...]] = {
     "fire_mode": ("fireMode",),
     # CHANGED 2026-11-01: an agent action instead of a rule (hev:onFireAgent).
     "agent_endpoint": ("onFireAgent",),
+    # CHANGED 2026-11-13: a fluent action instead of a rule (hev:onFireFluentQuery).
+    "fluent_query": ("onFireFluentQuery",),
     "agent_task": ("agentTask",),
     "agent_context": ("agentContext",),
     "agent_target_graph": ("agentTargetGraph",),
@@ -184,6 +186,10 @@ class Trigger:
     agent_task: str = ""
     agent_context: str = ""
     agent_target_graph: str = ""
+    #: Set instead of ``on_fire_rule_id``: the id of a named SELECT whose rows
+    #: (bound to the focus) are applied as fluent updates. See
+    #: ``fluent_trigger_action.py``. Requires ``review_required`` false.
+    fluent_query: str = ""
     #: ``Edge`` or ``EveryEvaluation`` (see ``FIRE_MODES``).
     fire_mode: str = FIRE_MODE_EDGE
 
@@ -198,6 +204,10 @@ class Trigger:
     @property
     def is_agent(self) -> bool:
         return bool(self.agent_endpoint)
+
+    @property
+    def is_fluent(self) -> bool:
+        return bool(self.fluent_query)
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -221,6 +231,7 @@ class Trigger:
             }
             if self.is_agent
             else None,
+            "onFireFluentQuery": self.fluent_query or None,
         }
 
 
@@ -338,11 +349,31 @@ async def load_named_triggers(
         rule_id = pick(props, _TRIGGER_FIELDS["on_fire_rule"])
         agent_endpoint = pick(props, _TRIGGER_FIELDS["agent_endpoint"]) or ""
         agent_task = pick(props, _TRIGGER_FIELDS["agent_task"]) or ""
-        if not condition_id or not (rule_id or agent_endpoint):
+        fluent_query = pick(props, _TRIGGER_FIELDS["fluent_query"]) or ""
+        if not condition_id or not (rule_id or agent_endpoint or fluent_query):
             warnings.append(f"<{iri}> is missing condition and/or onFire; skipped")
             continue
-        if rule_id and agent_endpoint:
-            warnings.append(f"<{iri}> names both onFire and onFireAgent; skipped")
+        if sum(bool(x) for x in (rule_id, agent_endpoint, fluent_query)) > 1:
+            named = [
+                name
+                for name, present in (
+                    ("onFire", rule_id), ("onFireAgent", agent_endpoint),
+                    ("onFireFluentQuery", fluent_query),
+                )
+                if present
+            ]
+            warnings.append(
+                f"<{iri}> names {'both' if len(named) == 2 else 'all of'} {' and '.join(named)}; skipped"
+            )
+            continue
+        if fluent_query and not (
+            pick(props, _TRIGGER_FIELDS["review_required"]) is not None
+            and not truthy(pick(props, _TRIGGER_FIELDS["review_required"]))
+        ):
+            warnings.append(
+                f"<{iri}> has onFireFluentQuery but is not reviewRequired=false; skipped "
+                "(a fluent update cannot wait in the candidate queue)"
+            )
             continue
         if agent_endpoint and not agent_task.strip():
             warnings.append(f"<{iri}> has onFireAgent but no agentTask; skipped")
@@ -362,6 +393,12 @@ async def load_named_triggers(
                 "(an agent call per write is not supported)"
             )
             continue
+        if fire_mode == FIRE_MODE_EVERY and fluent_query:
+            warnings.append(
+                f"<{iri}> combines fireMode {FIRE_MODE_EVERY} with onFireFluentQuery; skipped "
+                "(a fluent update repeated on every evaluation is almost never what is meant)"
+            )
+            continue
 
         trigger_id = pick(props, _TRIGGER_FIELDS["id"]) or local_name(iri)
         triggers.append(
@@ -375,6 +412,7 @@ async def load_named_triggers(
                 agent_task=agent_task,
                 agent_context=pick(props, _TRIGGER_FIELDS["agent_context"]) or "",
                 agent_target_graph=pick(props, _TRIGGER_FIELDS["agent_target_graph"]) or "",
+                fluent_query=fluent_query,
                 review_required=truthy(pick(props, _TRIGGER_FIELDS["review_required"]))
                 if pick(props, _TRIGGER_FIELDS["review_required"]) is not None
                 else True,
@@ -1038,6 +1076,7 @@ async def _definer_denied(
     *,
     endpoint: Any = None,
     context_query: NamedQuery | None = None,
+    action_query: NamedQuery | None = None,
 ) -> str | None:
     """Why this trigger may not fire right now, or ``None`` if it may.
 
@@ -1066,6 +1105,11 @@ async def _definer_denied(
             (endpoint.url, endpoint.status, endpoint.credential_ref, endpoint.signing_ref)
             if endpoint else None,
         )
+    elif trig.is_fluent:
+        key = (
+            conn.base_url, conn.dataset, trig.iri, trig.armed_by, trig.review_required,
+            condition.sparql, trig.fluent_query, action_query.sparql if action_query else "",
+        )
     else:
         key = (
             conn.base_url, conn.dataset, trig.iri, trig.armed_by, trig.review_required,
@@ -1088,6 +1132,14 @@ async def _definer_denied(
                 query_fn, conn, trig.armed_by,
                 condition=condition, endpoint=endpoint, endpoint_id=trig.agent_endpoint,
                 context_query=context_query, target_graph=trig.agent_target_graph,
+                review_required=trig.review_required,
+            )
+        elif trig.is_fluent:
+            from .fluent_trigger_action import authorize_fluent_trigger  # noqa: PLC0415
+
+            await authorize_fluent_trigger(
+                query_fn, conn, trig.armed_by,
+                condition=condition, action_query=action_query,
                 review_required=trig.review_required,
             )
         else:
@@ -1216,7 +1268,8 @@ async def _evaluate(
     firings: list[TriggerFiring] = []
     for trig in triggers:
         condition = queries.by_id(trig.condition_id)
-        rule = None if trig.is_agent else rules.by_id(trig.on_fire_rule_id)
+        rule = None if (trig.is_agent or trig.is_fluent) else rules.by_id(trig.on_fire_rule_id)
+        action_query = queries.by_id(trig.fluent_query) if trig.is_fluent else None
         agent_endpoint = agent_endpoints.get(trig.agent_endpoint) if trig.is_agent else None
         agent_context = (
             queries.by_id(trig.agent_context) if trig.is_agent and trig.agent_context else None
@@ -1244,7 +1297,15 @@ async def _evaluate(
                 )
             )
             continue
-        if not trig.is_agent and rule is None:
+        if trig.is_fluent and action_query is None:
+            firings.append(
+                TriggerFiring(
+                    trig.id, "", "failed",
+                    detail=f"unknown action query {trig.fluent_query!r}",
+                )
+            )
+            continue
+        if not trig.is_agent and not trig.is_fluent and rule is None:
             firings.append(
                 TriggerFiring(
                     trig.id, "", "failed", detail=f"unknown rule {trig.on_fire_rule_id!r}"
@@ -1296,6 +1357,7 @@ async def _evaluate(
                 denial = await _definer_denied(
                     client, conn, trig, condition, rule,
                     endpoint=agent_endpoint, context_query=agent_context,
+                    action_query=action_query,
                 )
                 checked = True
                 if denial:
@@ -1339,6 +1401,32 @@ async def _evaluate(
                             detail=f"call {call.id} {call.status}", call_iri=call.iri,
                         )
                     )
+                elif trig.is_fluent:
+                    from .fluent_trigger_action import (  # noqa: PLC0415 - import cycle
+                        FluentActionInvalid,
+                        fire_fluent,
+                    )
+
+                    try:
+                        outcome = await fire_fluent(
+                            client, conn, trig, focus, action_query=action_query
+                        )
+                    except FluentActionInvalid as exc:
+                        log.warning("trigger %s could not apply fluent updates for <%s>: %s", trig.id, focus, exc)
+                        firings.append(TriggerFiring(trig.id, focus, "failed", detail=str(exc)))
+                        continue
+                    # Recorded even when partial: some rows are already
+                    # applied, and applying them again on the next evaluation
+                    # could double an Insert.
+                    kind_word = "partial" if outcome.partial else "applied"
+                    await _record_firing(
+                        client, conn, log_graph=log_graph, trigger=trig, focus=focus,
+                        outcome=kind_word, candidate_iri=None,
+                    )
+                    detail = f"{outcome.applied} of {outcome.total} fluent update(s) applied"
+                    if outcome.failure:
+                        detail += f"; stopped: {outcome.failure}"
+                    firings.append(TriggerFiring(trig.id, focus, kind_word, detail=detail))
                 elif trig.review_required:
                     # A re-armed focus may still have the proposal from its
                     # previous firing waiting for review. Do not stack another

@@ -46,6 +46,32 @@ process:
 
 ## Log
 
+### 2026-11-13 (a trigger that changes fluents)
+
+- **`on_fire_fluent_query` makes a trigger's action a set of fluent updates
+  ([closes #86](https://github.com/kurtcagle/holon-bridge-python/issues/86)).**
+  A trigger could fire a rule (Turtle into a graph) or call an agent, but could not
+  say "when this holds, move that fluent". Register one with `on_fire_fluent_query`
+  naming a SELECT whose rows are `?fluent`, `?value` and optionally `?operation`
+  (default `Set`), `?isIri`, `?assertedAt` and `?description`. The query is bound to
+  the focus if it declares a `focus` parameter. Each row is applied through
+  `update_fluent` as the person who armed the trigger, so the compare-and-set, the
+  SHACL gate and the ledger all behave as they do for a manual call. Rules that
+  follow from that: the definer needs read access to the condition and the action
+  query and write access to the events, scene and sequences graphs, re-checked at
+  every firing like the other actions; the trigger must be `review_required=false`,
+  because a fluent update cannot wait in the candidate queue (the loader skips a
+  fluent trigger that does not say so); a trigger names exactly one of `on_fire`,
+  `on_fire_agent` and `on_fire_fluent_query`. Rows are all checked before any is
+  applied, capped at 50 a firing, then applied one at a time, which is not atomic:
+  a failure on the first row is a `failed` firing and is retried, a failure after
+  that is recorded as `partial` and is not retried, so write `Insert` rows knowing
+  that. The updates do not themselves fire state triggers (the existing re-entrancy
+  guard), so a chain of arrivals advances one step per evaluation. A fluent trigger is Edge-fired only: `fireMode EveryEvaluation` is refused at
+  registration and skipped by the loader, because a repeated `Insert` is almost
+  never intended. Evaluating one on demand needs the same three write grants as
+  `POST /fluent/update`.
+
 ### 2026-11-13 (a wider, opt-in scope for the fluent SHACL gate)
 
 - **`FLUENT_GATE_SCOPE=holder` lets a fluent gate shape see the holder, its sibling
@@ -755,6 +781,12 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-11-13-g a hb:ReleaseNote ;
+    dcterms:date "2026-11-13"^^xsd:date ;
+    rdfs:label "Triggers can act by updating fluents (onFireFluentQuery)" ;
+    dcterms:description "A new hev:onFireFluentQuery action names a SELECT returning ?fluent and ?value rows (optional ?operation, ?isIri, ?assertedAt, ?description), bound to the focus if it declares a focus parameter, applied through update_fluent as the trigger's definer. Needs reviewRequired=false (enforced at registration, activation and load), read on the condition and action query, and write on the events, scene and sequences graphs, re-checked at firing. Exactly one of onFire, onFireAgent and onFireFluentQuery. Rows are validated first, capped at 50, then applied sequentially and not atomically: a first-row failure is a failed firing and is retried, a later failure is recorded as partial and not retried. No cascade within an evaluation; fireMode EveryEvaluation is refused for these triggers. Tested against stubs with update_fluent replaced by a recorder; not run against a live Fuseki." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/issues/86> .
 
 hb:release-2026-11-13-f a hb:ReleaseNote ;
     dcterms:date "2026-11-13"^^xsd:date ;
