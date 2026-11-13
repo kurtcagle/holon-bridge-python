@@ -196,7 +196,63 @@ async def test_asof_scope_names_the_graphs_actually_read(world):
     assert fm["scope"] == [HOLONS, EVENTS]
     assert fm["neighbourScope"] == [g.iri for g in scope]
     assert "ground truth only" in fm["asOf"]["note"]
-    assert "invalidatedAt" in fm["asOf"]["note"]
+    assert "insertedAt" in fm["asOf"]["note"]
+
+
+# --- transaction time ----------------------------------------------------------
+#
+# event:1 is made a late entry: true from 2026-09-01 but only recorded on the
+# 20th. It is the only assertion visible at the observed time, so rdflib's
+# nested-FILTER limit (module docstring) does not come into it.
+
+
+@pytest.fixture
+def late_world(world) -> ClosedWorld:
+    world.ds.get_context(URIRef(EVENTS)).parse(
+        format="turtle",
+        data="""@prefix hevt: <https://w3id.org/holon/event/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+<urn:example:event:1> hevt:insertedAt "2026-09-20T00:00:00+00:00"^^xsd:dateTime .""",
+    )
+    return world
+
+
+async def test_without_inserted_at_a_late_entry_still_shows(late_world):
+    """An ordinary valid-time read must not lose entries written since."""
+    book = await get_holon(
+        late_world, CONN, holon_iri=ACCOUNT, scope=_ground_truth(),
+        observed_at=datetime(2026, 9, 5, tzinfo=timezone.utc),
+    )
+    assert _current_value(book) == "100"
+    assert book.frontmatter["asOf"]["insertedAt"] is None
+
+
+async def test_inserted_at_before_the_entry_was_recorded_does_not_see_it(late_world):
+    book = await get_holon(
+        late_world, CONN, holon_iri=ACCOUNT, scope=_ground_truth(),
+        observed_at=datetime(2026, 9, 5, tzinfo=timezone.utc),
+        inserted_at=datetime(2026, 9, 6, tzinfo=timezone.utc),
+    )
+    assert _current_value(book) is None
+
+
+async def test_inserted_at_after_the_entry_was_recorded_sees_it(late_world):
+    book = await get_holon(
+        late_world, CONN, holon_iri=ACCOUNT, scope=_ground_truth(),
+        observed_at=datetime(2026, 9, 5, tzinfo=timezone.utc),
+        inserted_at=datetime(2026, 9, 25, tzinfo=timezone.utc),
+    )
+    assert _current_value(book) == "100"
+
+
+async def test_an_entry_with_no_insertion_time_counts_as_known(world):
+    """Ledgers written before insertedAt was stamped must keep reading."""
+    book = await get_holon(
+        world, CONN, holon_iri=ACCOUNT, scope=_ground_truth(),
+        observed_at=datetime(2026, 9, 5, tzinfo=timezone.utc),
+        inserted_at=datetime(2026, 9, 6, tzinfo=timezone.utc),
+    )
+    assert _current_value(book) == "100"
 
 
 async def test_current_state_scope_is_unchanged(world):
@@ -307,11 +363,30 @@ async def test_mcp_get_holon_omits_observed_at_by_default(mcp_call):
     assert "observed_at" not in calls[0]["params"]
 
 
-async def test_mcp_get_holon_does_not_expose_inserted_at(mcp_call):
-    """Deliberate: transaction time is not recorded yet, so the parameter
-    would be inert. If this fails because inserted_at was added, the as-of
-    note in holon.py and the tool docstring both need revisiting."""
-    import inspect
+async def test_mcp_get_holon_forwards_inserted_at(mcp_call):
+    core, calls = mcp_call
+    await core.get_holon(
+        "urn:example:account", observed_at="2026-09-05T00:00:00Z", inserted_at="2026-09-06T00:00:00Z"
+    )
+    assert calls[0]["params"]["inserted_at"] == "2026-09-06T00:00:00Z"
 
-    core, _ = mcp_call
-    assert "inserted_at" not in inspect.signature(core.get_holon).parameters
+
+async def test_mcp_get_holon_omits_inserted_at_by_default(mcp_call):
+    core, calls = mcp_call
+    await core.get_holon("urn:example:account", observed_at="2026-09-05T00:00:00Z")
+    assert "inserted_at" not in calls[0]["params"]
+
+
+async def test_mcp_update_fluent_forwards_asserted_datetime(monkeypatch):
+    from holonbridge_mcp.tools import fluents
+
+    seen: list[dict] = []
+
+    async def fake_call(method, path, *, json_body=None, **kw):
+        seen.append({"path": path, "body": json_body})
+        return {}
+
+    monkeypatch.setattr(fluents, "_call", fake_call)
+    await fluents.update_fluent("urn:f", "Set", 1, asserted_datetime="2026-11-12T22:41:00Z")
+    assert seen[0]["path"] == "/fluent/update"
+    assert seen[0]["body"]["asserted_datetime"] == "2026-11-12T22:41:00Z"

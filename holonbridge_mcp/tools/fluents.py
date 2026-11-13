@@ -30,6 +30,7 @@ async def update_fluent(
     is_iri: bool = False,
     asserted_by: str | None = None,
     description: str | None = None,
+    asserted_datetime: str | None = None,
 ) -> dict:
     """Perform one fluent state transition.
 
@@ -67,6 +68,14 @@ async def update_fluent(
     ``is_iri`` is true) must be plain IRIs — no whitespace or any of
     ``<>"{}|^`\\``.
 
+    ``asserted_datetime`` (ISO 8601, e.g. ``2026-09-01T12:00:00Z``; no timezone
+    means UTC) is the *valid time*: when this was true in the world. It
+    defaults to now. Pass an earlier time to record a fact you learnt late, such
+    as a body found at 23:06 that was dead by 22:41. It does not change when the
+    bridge recorded the entry: every ledger entry also carries ``hevt:insertedAt``,
+    the wall-clock time of the write, which the caller cannot set. ``get_holon``'s
+    ``observed_at`` reads the first axis and ``inserted_at`` the second.
+
     Returns ``oldValue``/``newValue`` (each ``{"kind": "uri"|"literal",
     "value": ...}``), the new ledger entry's ``assertion`` IRI, which entry
     it ``superseded`` (``null`` for a fluent's first-ever transition), the
@@ -82,6 +91,7 @@ async def update_fluent(
             "is_iri": is_iri,
             "asserted_by": asserted_by,
             "description": description,
+            "asserted_datetime": asserted_datetime,
         },
     )
 

@@ -62,10 +62,15 @@ then only the REST route reached it):
   drops the row, so a naive timestamp would return an empty projection
   rather than a wrong-looking one.
 
-``inserted_at`` still bounds only ``hevt:invalidatedAt`` (which nothing in
-the bridge writes); the time an assertion was inserted is not consulted.
-The frontmatter says so. Left as is deliberately -- see the as-of note on
-:func:`as_of_query`.
+CHANGED 2026-11-13: transaction time is now recorded. ``update_fluent``
+stamps every ledger entry with ``hevt:insertedAt`` (the wall clock at the
+write, never caller-supplied), and ``update_fluent`` takes an optional
+``asserted_datetime`` over REST and MCP so valid time can be backdated
+independently of it. ``inserted_at`` now also excludes entries inserted
+after it. When it is not given there is no insertion bound (it used to
+default to ``observed_at``, which would now hide every entry written since
+the moment observed). Entries from before this change carry no
+``hevt:insertedAt`` and count as known from the start.
 """
 
 from __future__ import annotations
@@ -146,9 +151,15 @@ def as_of_query(
     """CONSTRUCT the holon's structural triples plus what its fluents'
     values were as of valid-time ``observed_at`` (an ISO xsd:dateTime
     string), optionally also bounded by transaction-time ``inserted_at``.
-    ``inserted_at`` defaults to ``observed_at`` when not supplied -- the
-    common case is 'this happened and was recorded at the same moment';
-    the two axes diverge only for backdated or corrective entries.
+    With ``inserted_at`` the read is "what the record held at
+    ``inserted_at`` about ``observed_at``": an assertion counts only if it
+    had been inserted (``hevt:insertedAt``) by then. Without it there is no
+    transaction-time bound, so a backdated entry written after
+    ``observed_at`` still shows, which is what an ordinary valid-time read
+    wants. Entries written before ``hevt:insertedAt`` was recorded carry
+    none and are treated as known from the start. ``hevt:invalidatedAt`` is
+    still bounded by ``inserted_at``, or by ``observed_at`` when that is
+    not given, as before.
 
     Ground-truth only -- see this module's CHANGED note for why an as-of
     read isn't persona-scoped yet.
@@ -159,6 +170,18 @@ def as_of_query(
     chronology.
     """
     inserted = inserted_at or observed_at
+
+    def known_by(subject: str, inserted_var: str) -> str:
+        # Counts as known at inserted_at unless inserted after it; no
+        # insertedAt (a legacy entry) counts as known.
+        if not inserted_at:
+            return ""
+        return (
+            f"OPTIONAL {{ {subject} hevt:insertedAt {inserted_var} }}\n"
+            f"      FILTER (!BOUND({inserted_var}) || "
+            f'{inserted_var} <= "{inserted_at}"^^xsd:dateTime)'
+        )
+
     return f"""{_PREFIXES}
 CONSTRUCT {{
   <{holon_iri}> ?p ?o .
@@ -177,6 +200,7 @@ WHERE {{
                  hevt:hasValue ?value ;
                  hevt:assertedDateTime ?assertedAt .
       FILTER (?assertedAt <= "{observed_at}"^^xsd:dateTime)
+      {known_by("?assertion", "?insertedAt")}
       FILTER NOT EXISTS {{
         ?assertion hevt:invalidatedAt ?invalidatedAt .
         FILTER (?invalidatedAt <= "{inserted}"^^xsd:dateTime)
@@ -187,6 +211,7 @@ WHERE {{
         ?later hevt:forFluent ?fluent ;
                hevt:assertedDateTime ?laterAt .
         FILTER (?laterAt <= "{observed_at}"^^xsd:dateTime && ?laterAt > ?assertedAt)
+        {known_by("?later", "?laterInsertedAt")}
       }}
     }}
   }}
@@ -232,9 +257,8 @@ async def get_holon(
     from ``persona_scope.build_state_query`` across ``scope`` -- the fast
     path, no ledger walk. Supplying either switches the fluent-valued part
     of the projection to :func:`as_of_query`, which is NOT scope-aware yet
-    (see the module docstring) -- ``observed_at`` defaults to now() and
-    ``inserted_at`` defaults to ``observed_at`` when only one of the two
-    is given.
+    (see the module docstring) -- ``observed_at`` defaults to now(). With
+    no ``inserted_at`` there is no transaction-time bound.
     """
 
     if projection_mode not in PROJECTION_MODES:
@@ -248,7 +272,7 @@ async def get_holon(
     eff_inserted: datetime | None = None
     if as_of:
         eff_observed = _as_utc(observed_at) if observed_at else datetime.now(timezone.utc)
-        eff_inserted = _as_utc(inserted_at) if inserted_at else eff_observed
+        eff_inserted = _as_utc(inserted_at) if inserted_at else None
         list_fluents = await _list_mode_fluents(client, conn, holon_iri)
         if list_fluents:
             raise AsOfUnsupportedError(
@@ -263,7 +287,7 @@ async def get_holon(
             conn,
             holon_iri,
             observed_at=eff_observed.isoformat(),
-            inserted_at=eff_inserted.isoformat(),
+            inserted_at=eff_inserted.isoformat() if eff_inserted else None,
         )
     else:
         query = build_state_query(holon_iri, scope)
@@ -314,9 +338,9 @@ async def get_holon(
             "insertedAt": eff_inserted.isoformat() if eff_inserted else None,
             "note": (
                 "Valid-time read over ground truth only (holons and events graphs); "
-                "persona overlays are not applied to state. insertedAt bounds "
-                "hevt:invalidatedAt only -- the time an assertion was inserted is "
-                "not consulted."
+                "persona overlays are not applied to state. insertedAt, when given, "
+                "limits the read to entries inserted (hevt:insertedAt) by then; "
+                "entries recorded before insertion time was stamped count as known."
             ),
         }
 

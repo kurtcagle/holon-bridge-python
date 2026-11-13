@@ -220,6 +220,37 @@ def test_a_grant_on_someone_elses_behalf_is_not_enough_on_its_own(api, store, re
     assert recorder.updates == []
 
 
+# --- valid time ---------------------------------------------------------------------------
+
+
+def test_asserted_datetime_is_forwarded(api, store, recorder):
+    from datetime import datetime, timezone
+
+    grant(store, EVENTS, SCENE, SEQUENCES)
+    assert update(api, asserted_datetime="2026-11-12T22:41:00+00:00").status_code == 200
+    assert recorder.updates[0]["asserted_datetime"] == datetime(2026, 11, 12, 22, 41, tzinfo=timezone.utc)
+
+
+def test_a_naive_asserted_datetime_is_read_as_utc(api, store, recorder):
+    from datetime import datetime, timezone
+
+    grant(store, EVENTS, SCENE, SEQUENCES)
+    assert update(api, asserted_datetime="2026-11-12T22:41:00").status_code == 200
+    assert recorder.updates[0]["asserted_datetime"] == datetime(2026, 11, 12, 22, 41, tzinfo=timezone.utc)
+
+
+def test_asserted_datetime_defaults_to_none_so_the_bridge_uses_now(api, store, recorder):
+    grant(store, EVENTS, SCENE, SEQUENCES)
+    assert update(api).status_code == 200
+    assert recorder.updates[0]["asserted_datetime"] is None
+
+
+def test_a_malformed_asserted_datetime_is_refused_before_anything_runs(api, store, recorder):
+    grant(store, EVENTS, SCENE, SEQUENCES)
+    assert update(api, asserted_datetime="last tuesday").status_code == 422
+    assert recorder.updates == []
+
+
 # --- attribution ---------------------------------------------------------------------------
 
 

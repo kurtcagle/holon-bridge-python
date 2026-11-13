@@ -42,6 +42,7 @@ loses writes neither half of it), so the caller can simply retry.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
@@ -72,6 +73,16 @@ class UpdateFluentRequest(BaseModel):
         ),
     )
     description: str | None = None
+    asserted_datetime: datetime | None = Field(
+        default=None,
+        description=(
+            "Valid time: when this was true in the world (ISO 8601). Defaults "
+            "to now. Backdate it to record a fact that was true earlier than "
+            "it was learnt; the bridge separately records when it was "
+            "inserted (hevt:insertedAt), which this field cannot change. A "
+            "timestamp with no timezone is read as UTC."
+        ),
+    )
 
 
 def _result_dict(result: FluentUpdateResult) -> dict:
@@ -89,6 +100,15 @@ def _result_dict(result: FluentUpdateResult) -> dict:
         "superseded": result.superseded,
         "sequenceId": result.sequence_id,
     }
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    # A naive timestamp is read as UTC: stored assertedDateTime values are
+    # timezone-aware, and SPARQL cannot reliably order a naive dateTime
+    # against an aware one (see holon.py's as-of note).
+    if value is None:
+        return None
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
 def _safe(value: str, what: str) -> str:
@@ -149,6 +169,7 @@ async def update(
             is_iri=body.is_iri,
             asserted_by=person,
             description=body.description,
+            asserted_datetime=_as_utc(body.asserted_datetime),
         )
     except FluentError as exc:
         raise HTTPException(

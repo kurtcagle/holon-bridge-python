@@ -500,6 +500,9 @@ async def update_fluent(
             f"(<{fluent}>)"
         )
 
+    # asserted_dt is valid time: when the fact was true in the world, and the
+    # caller may backdate it. inserted_dt (below) is transaction time: when the
+    # bridge recorded it, always the wall clock, never caller-supplied.
     asserted_dt = asserted_datetime or datetime.now(timezone.utc)
     events_graph = conn.graph("events")
     scene_graph = conn.scene_graph
@@ -553,6 +556,7 @@ async def update_fluent(
             f"hevt:operation hevt:{operation.value}",
             f"hevt:forFluent <{fluent}>",
             f'hevt:assertedDateTime "{asserted_dt.isoformat()}"^^xsd:dateTime',
+            f'hevt:insertedAt "{datetime.now(timezone.utc).isoformat()}"^^xsd:dateTime',
             f"hevt:sequenceId <{minted.iri}>",
             f"hevt:assertedBy <{asserted_by}>" if asserted_by else "",
             f'holon:description "{escape_literal(description)}"@en' if description else "",
