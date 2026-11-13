@@ -133,6 +133,13 @@ class RegisterTriggerRequest(BaseModel):
         "write mode (or lets a call to an endpoint with callReview=false be sent by the "
         "scheduler)",
     )
+    fire_mode: str = Field(
+        default="Edge",
+        pattern="^(Edge|EveryEvaluation)$",
+        description="Edge (default): fire when a focus starts matching and again only after it has "
+        "stopped and started matching. EveryEvaluation: fire for every matching focus on every "
+        "evaluation (rule actions only), e.g. to rebuild a projection after each write.",
+    )
     status: str = Field(default="Active", pattern="^(Active|Suspended|Deprecated)$")
     label: str | None = None
     description: str | None = None
@@ -527,6 +534,7 @@ async def register_named_trigger(
             watched_predicates=watched,
             registered_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             armed_by=animus.person,
+            fire_mode=body.fire_mode,
         )
     except InvalidTrigger as exc:
         raise HTTPException(
@@ -547,6 +555,7 @@ async def register_named_trigger(
         "graph": registry,
         "triggerKind": body.trigger_kind,
         "reviewRequired": body.review_required,
+        "fireMode": body.fire_mode,
         "triggerStatus": body.status,
         "warnings": warnings,
     }
@@ -690,6 +699,15 @@ class DecisionBody(BaseModel):
     """Optional body of an approve or reject call."""
 
     reason: str | None = Field(default=None, max_length=1000)
+    shapes_graph: str | None = Field(
+        default=None,
+        description=(
+            "approve only: the shapes graph to validate the merge against. Omit to use the "
+            "dataset's own shapes graph when the deployment sets SHACL_REQUIRED (otherwise no "
+            "validation); an empty string skips validation for this approval; any other "
+            "value is used as given."
+        ),
+    )
 
 
 @router.post("/candidate/{candidate_id}/approve")
@@ -698,9 +716,15 @@ async def approve_candidate_proposal(
     conn: ConnDep,
     client: ClientDep,
     animus: AnimusDep,
+    settings: SettingsDep,
     body: DecisionBody | None = None,
 ) -> dict:
-    """CHANGED: ``approve_candidate`` now routes through the ordinary
+    """CHANGED 2026-11-13: SHACL on approval follows ``SHACL_REQUIRED`` /
+    ``SHACL_DELTA`` like every other write path, and the body may name a
+    ``shapes_graph`` (``""`` opts out). A violation is a 422 and the candidate
+    stays Pending.
+
+    CHANGED: ``approve_candidate`` now routes through the ordinary
     ACL/SHACL-gated write path (see that function's own docstring), so
     this now also passes ``animus`` through and lets a 401/403/422/502
     ``HTTPException`` raised from inside it propagate as-is -- it is
@@ -717,7 +741,14 @@ async def approve_candidate_proposal(
         )
     try:
         result = await approve_candidate(
-            client, conn, candidate, animus=animus, reason=body.reason if body else None
+            client,
+            conn,
+            candidate,
+            animus=animus,
+            reason=body.reason if body else None,
+            shapes_graph=body.shapes_graph if body else None,
+            shacl_required=settings.shacl_required,
+            shacl_delta=settings.shacl_delta,
         )
     except CandidateError as exc:
         raise HTTPException(

@@ -98,7 +98,11 @@ async def register_named_trigger(
     agent_task: str | None = None,
     agent_context: str | None = None,
     agent_target_graph: str | None = None,
+<<<<<<< HEAD
     on_fire_fluent_query: str | None = None,
+=======
+    fire_mode: str = "Edge",
+>>>>>>> origin/main
 ) -> dict:
     """Register (or overwrite) a named trigger.
 
@@ -107,7 +111,13 @@ async def register_named_trigger(
     ``condition`` is the id of a registered named query: a SELECT projecting
     ``?focus``. ``on_fire`` is the id of a registered named rule, bound with
     ``$this`` set to each focus node. A focus fires once while its condition
-    holds, and again after the condition has gone false and true.
+    holds, and again after the condition has gone false and true. That is
+    ``fire_mode="Edge"``, the default. ``fire_mode="EveryEvaluation"`` fires for
+    every matching focus on every evaluation instead, for work that should be
+    redone after each write (a ``Replace``-mode rule rebuilding a projection).
+    Rule actions only. With ``review_required`` true it still stages no second
+    candidate while one is Pending for that focus, so pair it with
+    ``review_required=false`` when the point is to refresh automatically.
 
     ``review_required`` (default true) stages the rule's output in the
     candidate queue for approval. ``false`` runs the rule for real, through
@@ -165,7 +175,11 @@ async def register_named_trigger(
             "agent_task": agent_task,
             "agent_context": agent_context,
             "agent_target_graph": agent_target_graph,
+<<<<<<< HEAD
             "on_fire_fluent_query": on_fire_fluent_query,
+=======
+            "fire_mode": fire_mode,
+>>>>>>> origin/main
         },
     )
 

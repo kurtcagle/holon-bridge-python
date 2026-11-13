@@ -47,6 +47,18 @@ candidate from its earlier proposal, no second one is staged until that
 candidate has been approved or rejected — re-arming must not be able to
 flood the review queue, which is the problem the ledger exists to prevent.
 
+**Fire modes.** ``hev:fireMode "Edge"`` (the default) is the behaviour above.
+``"EveryEvaluation"`` drops the edge: every focus the condition matches fires on
+every evaluation, however long it has matched. It is for work that should be
+redone after every write, such as a rule in ``Replace`` mode that rebuilds a
+projection, where "once while true" would leave it stale. Earlier firings are
+retired at the start of each evaluation so the ledger keeps one live firing per
+focus. A ``reviewRequired`` trigger still stages no second candidate while one
+is ``Pending`` for that focus (``skipped-pending-candidate``). Rule actions only:
+an agent trigger in this mode is refused at registration. Evaluation is still
+triggered by a watched write or a sweep, and the re-entrancy guard still stops a
+rule's own writes from re-firing it.
+
 **Why ``reviewRequired`` defaults matter.** A trigger whose rule targets
 ``holons`` — the dataset's own ground truth — mutates the thing everyone
 else reads through ``get_holon``. The default (``review_required=True``)
@@ -115,6 +127,14 @@ TRIGGER_KINDS = (TRIGGER_STATE, TRIGGER_TEMPORAL)
 
 TRIGGER_STATUSES = ("Active", "Suspended", "Deprecated")
 
+#: ``Edge`` (the default): fire once when a focus starts matching, again only
+#: after it has stopped matching and matched again. ``EveryEvaluation``: fire for
+#: every matching focus on every evaluation, however long it has matched. Rule
+#: actions only; see the module docstring's "Fire modes".
+FIRE_MODE_EDGE = "Edge"
+FIRE_MODE_EVERY = "EveryEvaluation"
+FIRE_MODES = (FIRE_MODE_EDGE, FIRE_MODE_EVERY)
+
 TRIGGER_CLASS_SUFFIX = "NamedTrigger"
 
 _TRIGGER_FIELDS: dict[str, tuple[str, ...]] = {
@@ -127,6 +147,7 @@ _TRIGGER_FIELDS: dict[str, tuple[str, ...]] = {
     "review_required": ("reviewRequired",),
     "status": ("triggerStatus", "status"),
     "armed_by": ("armedBy",),
+    "fire_mode": ("fireMode",),
     # CHANGED 2026-11-01: an agent action instead of a rule (hev:onFireAgent).
     "agent_endpoint": ("onFireAgent",),
     # CHANGED 2026-11-13: a fluent action instead of a rule (hev:onFireFluentQuery).
@@ -165,10 +186,19 @@ class Trigger:
     agent_task: str = ""
     agent_context: str = ""
     agent_target_graph: str = ""
+<<<<<<< HEAD
     #: Set instead of ``on_fire_rule_id``: the id of a named SELECT whose rows
     #: (bound to the focus) are applied as fluent updates. See
     #: ``fluent_trigger_action.py``. Requires ``review_required`` false.
     fluent_query: str = ""
+=======
+    #: ``Edge`` or ``EveryEvaluation`` (see ``FIRE_MODES``).
+    fire_mode: str = FIRE_MODE_EDGE
+
+    @property
+    def every_evaluation(self) -> bool:
+        return self.fire_mode == FIRE_MODE_EVERY
+>>>>>>> origin/main
 
     @property
     def runnable(self) -> bool:
@@ -195,6 +225,7 @@ class Trigger:
             "triggerStatus": self.status,
             "watchedPredicates": sorted(self.watched_predicates),
             "armedBy": self.armed_by or None,
+            "fireMode": self.fire_mode,
             "onFireAgent": {
                 "endpoint": self.agent_endpoint,
                 "task": self.agent_task,
@@ -351,6 +382,21 @@ async def load_named_triggers(
             warnings.append(f"<{iri}> has onFireAgent but no agentTask; skipped")
             continue
 
+        fire_mode_raw = pick(props, _TRIGGER_FIELDS["fire_mode"]) or FIRE_MODE_EDGE
+        fire_mode = local_name(fire_mode_raw) if fire_mode_raw.startswith("http") else fire_mode_raw
+        if fire_mode not in FIRE_MODES:
+            warnings.append(
+                f"<{iri}> has unrecognised fireMode {fire_mode_raw!r}; skipped "
+                f"(expected one of {', '.join(FIRE_MODES)})"
+            )
+            continue
+        if fire_mode == FIRE_MODE_EVERY and agent_endpoint:
+            warnings.append(
+                f"<{iri}> combines fireMode {FIRE_MODE_EVERY} with onFireAgent; skipped "
+                "(an agent call per write is not supported)"
+            )
+            continue
+
         trigger_id = pick(props, _TRIGGER_FIELDS["id"]) or local_name(iri)
         triggers.append(
             Trigger(
@@ -372,6 +418,7 @@ async def load_named_triggers(
                 description=pick(props, _TRIGGER_FIELDS["description"]) or "",
                 watched_predicates=frozenset(watched.get(iri, set())),
                 armed_by=pick(props, _TRIGGER_FIELDS["armed_by"]) or "",
+                fire_mode=fire_mode,
             )
         )
 
@@ -464,6 +511,22 @@ async def _rearm(
         len(stale),
     )
     return len(stale)
+
+
+async def _clear_all_live_firings(
+    client: FusekiClient, conn: Conn, *, log_graph: str, trigger: Trigger
+) -> int:
+    """Stamp ``hev:clearedAt`` on every live firing of ``trigger``, whatever its
+    focus. Used by ``EveryEvaluation`` triggers, which have no "already fired"
+    state to keep."""
+    rows = (await client.select(conn, _live_firings_query(log_graph, trigger.iri)))[
+        "results"
+    ]["bindings"]
+    live = sorted({row["firing"]["value"] for row in rows})
+    if not live:
+        return 0
+    await client.update(conn, _clear_firings_update(log_graph, live))
+    return len(live)
 
 
 async def _record_firing(
@@ -871,6 +934,8 @@ async def approve_candidate(
     animus: Animus,
     shapes_graph: str | None = None,
     reason: str | None = None,
+    shacl_required: bool = False,
+    shacl_delta: bool = False,
 ) -> dict[str, Any]:
     """Merge exactly the Turtle the candidate staged into its target graph.
 
@@ -899,13 +964,17 @@ async def approve_candidate(
     through its own declared write mode, via ``execute_named_rule`` — this
     function is only ever the reviewed path.
 
-    SHACL validation is opt-in here, via ``shapes_graph`` — unlike
-    ``/ingest``/``push_turtle``, there is no dataset-wide "shacl_required"
-    setting threaded down to this call, so a candidate that names no
-    ``shapes_graph`` merges unvalidated, matching this function's own
-    behaviour before this fix. Pass ``shapes_graph`` explicitly (the
-    dataset's own default, ``conn.shapes_graph``, is a reasonable choice)
-    to have this merge checked like any other gated write.
+    CHANGED 2026-11-13 (SHACL on approval): ``shacl_required`` and
+    ``shacl_delta`` are now passed through, and the approval route supplies the
+    deployment's ``SHACL_REQUIRED`` and ``SHACL_DELTA`` settings, so approving a
+    candidate is validated exactly as ``push_turtle`` and ``/ingest`` are. The
+    shapes graph resolves as for those: an explicit ``shapes_graph`` is used as
+    given, ``""`` means "do not validate this approval", and ``None`` falls back
+    to the dataset's own shapes graph when ``shacl_required`` is true. With
+    ``SHACL_REQUIRED`` off (the default) and no ``shapes_graph``, behaviour is
+    unchanged: the merge is unvalidated. A violation refuses the approval with a
+    422 and the candidate stays ``Pending``. Direct callers that pass neither
+    keyword keep the old behaviour (no validation, full-graph mode).
 
     Returns whatever ``write_turtle_to_graph`` returns (the validation
     report, when one ran) rather than ``None``, so a caller can see what
@@ -924,8 +993,8 @@ async def approve_candidate(
             reduction_rule_id=None,
             conn=conn,
             client=client,
-            shacl_required=False,
-            shacl_delta=False,
+            shacl_required=shacl_required,
+            shacl_delta=shacl_delta,
             animus=animus,
         )
     else:
@@ -1259,14 +1328,25 @@ async def _evaluate(
             # fired" until the next evaluation manages to clear it.
             log.warning("trigger %s could not be re-armed: %s", trig.id, exc)
 
+        if trig.every_evaluation:
+            # No edge to detect: every matching focus fires on every
+            # evaluation. Retire the previous evaluation's firings first so the
+            # ledger keeps one live firing per focus, not one per evaluation
+            # (``_rearm`` and the live-firings query read all of them).
+            try:
+                await _clear_all_live_firings(client, conn, log_graph=log_graph, trigger=trig)
+            except (FusekiError, KeyError) as exc:
+                log.warning("trigger %s could not retire earlier firings: %s", trig.id, exc)
+
         denial: str | None = None
         checked = False
         for focus in matches:
-            already = await client.select(
-                conn, _already_fired_ask(log_graph, trig.iri, focus)
-            )
-            if already.get("boolean"):
-                continue  # edge-triggered: this (trigger, focus) pair already fired
+            if not trig.every_evaluation:
+                already = await client.select(
+                    conn, _already_fired_ask(log_graph, trig.iri, focus)
+                )
+                if already.get("boolean"):
+                    continue  # edge-triggered: this (trigger, focus) pair already fired
 
             # Asked at most once per trigger per evaluation, and only when
             # there is something to fire, so a quiet evaluation costs nothing.
