@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.30
+version: 1.0.31
 created: 2026-09-27
 updated: 2026-11-13
 author:
@@ -45,6 +45,21 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-11-13 (state triggers can fire on every evaluation)
+
+- **`hev:fireMode "EveryEvaluation"` on a trigger, default `"Edge"`
+  ([closes #87](https://github.com/kurtcagle/holon-bridge-python/issues/87)).**
+  A state trigger fired once while its condition held, so an always-true
+  condition could not rebuild a projection after each write. In
+  `EveryEvaluation` mode every matching focus fires on every evaluation. The
+  previous evaluation's firings are stamped `hev:clearedAt` first, so the ledger
+  keeps one live firing per focus and `_rearm` stays cheap. A `reviewRequired`
+  trigger still stages no second candidate while one is Pending for that focus.
+  Rule actions only: an `onFireAgent` trigger in this mode is refused at
+  registration (and skipped with a warning if hand-written). `fire_mode` is on
+  `POST /named-trigger` and the `register_named_trigger` MCP tool and is shown in
+  the trigger summary. Tested on the in-memory ledger stub, not live Fuseki.
 
 ### 2026-11-13 (two clocks on a fluent: backdating and insertion time)
 
@@ -678,6 +693,12 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-11-13-b a hb:ReleaseNote ;
+    dcterms:date "2026-11-13"^^xsd:date ;
+    rdfs:label "Triggers: hev:fireMode EveryEvaluation fires on every evaluation, not just the rising edge" ;
+    dcterms:description "A state trigger is edge-triggered: a focus fires once and re-arms only when its condition goes false, so an always-true condition fired once over 40 writes and could not refresh a projection. hev:fireMode (Edge by default) now accepts EveryEvaluation, which skips the already-fired check; the trigger's earlier firings are stamped clearedAt at the start of each evaluation so the ledger keeps one live firing per focus. A reviewRequired trigger still stages no second candidate while one is Pending for that focus. Rule actions only; an onFireAgent trigger in this mode is refused at registration. fire_mode added to POST /named-trigger and register_named_trigger. Tested against the in-memory ledger stub, not Jena." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/issues/87> .
 
 hb:release-2026-11-13-a a hb:ReleaseNote ;
     dcterms:date "2026-11-13"^^xsd:date ;

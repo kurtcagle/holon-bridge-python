@@ -125,6 +125,13 @@ class RegisterTriggerRequest(BaseModel):
         "write mode (or lets a call to an endpoint with callReview=false be sent by the "
         "scheduler)",
     )
+    fire_mode: str = Field(
+        default="Edge",
+        pattern="^(Edge|EveryEvaluation)$",
+        description="Edge (default): fire when a focus starts matching and again only after it has "
+        "stopped and started matching. EveryEvaluation: fire for every matching focus on every "
+        "evaluation (rule actions only), e.g. to rebuild a projection after each write.",
+    )
     status: str = Field(default="Active", pattern="^(Active|Suspended|Deprecated)$")
     label: str | None = None
     description: str | None = None
@@ -464,6 +471,7 @@ async def register_named_trigger(
             watched_predicates=watched,
             registered_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             armed_by=animus.person,
+            fire_mode=body.fire_mode,
         )
     except InvalidTrigger as exc:
         raise HTTPException(
@@ -484,6 +492,7 @@ async def register_named_trigger(
         "graph": registry,
         "triggerKind": body.trigger_kind,
         "reviewRequired": body.review_required,
+        "fireMode": body.fire_mode,
         "triggerStatus": body.status,
         "warnings": warnings,
     }
