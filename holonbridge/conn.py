@@ -140,19 +140,35 @@ class Conn:
     bank_name: str
     token: str | None = None
     bank_scoped_datasets: frozenset[str] = frozenset()
+    # Which store the endpoints below address: "fuseki" (default) or "fluree".
+    store_kind: str = "fuseki"
+    # Fluree only: end-user identity forwarded per request (``fluree-identity``)
+    # and an optional ``fluree-policy-class``. Ignored by Fuseki.
+    identity: str | None = None
+    policy_class: str | None = None
 
     # --- endpoint construction -------------------------------------------------
 
     @property
+    def _fluree(self) -> bool:
+        return self.store_kind == "fluree"
+
+    @property
     def query_endpoint(self) -> str:
+        if self._fluree:
+            return f"{self.base_url}/v1/fluree/query/{self.dataset}"
         return f"{self.base_url}/{self.dataset}/query"
 
     @property
     def update_endpoint(self) -> str:
+        if self._fluree:
+            return f"{self.base_url}/v1/fluree/update/{self.dataset}"
         return f"{self.base_url}/{self.dataset}/update"
 
     @property
     def gsp_endpoint(self) -> str:
+        if self._fluree:
+            return f"{self.base_url}/v1/fluree/data/{self.dataset}"
         return f"{self.base_url}/{self.dataset}/data"
 
     @property
@@ -370,6 +386,7 @@ def resolve_conn(
         bank_name=bank.name,
         token=bank.auth_token,
         bank_scoped_datasets=bank.bank_scoped_datasets,
+        store_kind=settings.store_kind,
     )
 
 

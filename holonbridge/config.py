@@ -158,6 +158,8 @@ class Settings:
     port: int = 3031
     fuseki_url: str = "http://localhost:3030"
     fuseki_dataset: str = "ds"
+    # Which store the bridge talks to: "fuseki" (default) or "fluree".
+    store_kind: str = "fuseki"
     bearer_token: str | None = None
 
     # Identity-bound credentials. ``bearer_token`` above is a SHARED token: whoever
@@ -333,6 +335,7 @@ class Settings:
             port=int(os.getenv("HOLONBRIDGE_PORT", "3031")),
             fuseki_url=os.getenv("FUSEKI_URL", "http://localhost:3030").rstrip("/"),
             fuseki_dataset=os.getenv("FUSEKI_DATASET", "ds"),
+            store_kind=os.getenv("STORE_KIND", "fuseki").strip().lower() or "fuseki",
             bearer_token=os.getenv("BEARER_TOKEN") or None,
             identity_tokens=parse_identity_tokens(os.getenv("IDENTITY_TOKENS")),
             proxy_tokens=parse_proxy_tokens(os.getenv("PROXY_TOKENS")),

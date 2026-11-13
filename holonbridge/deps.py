@@ -63,7 +63,7 @@ from .config import BankStore, Settings
 from .conn import DATASET_OVERRIDE_HEADER, Conn, resolve_conn
 from .cache import RegistryCache
 from .claim import claimant as claim_eligibility, is_unclaimed
-from .fuseki import FusekiClient
+from .store import Store
 from .persona_state import PersonaStore
 
 ANIMUS_ID_HEADER = "x-holon-animus-id"
@@ -79,7 +79,7 @@ def get_banks(request: Request) -> BankStore:
     return request.app.state.banks
 
 
-def get_client(request: Request) -> FusekiClient:
+def get_client(request: Request) -> Store:
     return request.app.state.fuseki
 
 
@@ -212,7 +212,7 @@ def require_conn(
 async def require_animus(
     request: Request,
     conn: Annotated[Conn, Depends(require_conn)],
-    client: Annotated[FusekiClient, Depends(get_client)],
+    client: Annotated[Store, Depends(get_client)],
     acting_as: Annotated[ActingAsStore, Depends(get_acting_as)],
     token_auth: Annotated[TokenAuth, Depends(require_auth)],
     settings: Annotated[Settings, Depends(get_settings_dep)],
@@ -338,7 +338,7 @@ async def require_animus(
 
 
 ConnDep = Annotated[Conn, Depends(require_conn)]
-ClientDep = Annotated[FusekiClient, Depends(get_client)]
+ClientDep = Annotated[Store, Depends(get_client)]
 SettingsDep = Annotated[Settings, Depends(get_settings_dep)]
 BanksDep = Annotated[BankStore, Depends(get_banks)]
 RegistryDep = Annotated[RegistryCache, Depends(get_registry)]
