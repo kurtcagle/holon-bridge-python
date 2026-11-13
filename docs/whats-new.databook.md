@@ -46,6 +46,22 @@ process:
 
 ## Log
 
+### 2026-11-13 (approving a candidate is validated like any other write)
+
+- **`approve_candidate` follows `SHACL_REQUIRED` and `SHACL_DELTA`, and the approval
+  body takes a `shapes_graph`
+  ([closes #89's first half](https://github.com/kurtcagle/holon-bridge-python/issues/89)).**
+  Before, approving a candidate merged its Turtle with no validation at all, and
+  the REST and MCP routes had no way to ask for any. Now, with `SHACL_REQUIRED`
+  on, an approval is checked against the dataset's own shapes graph exactly as
+  `push_turtle` is, in delta mode unless `SHACL_DELTA` is off. The body (and the
+  MCP tool) may name a `shapes_graph`; an empty string skips validation for that
+  approval. A violation is a 422 and the candidate stays `Pending`. With
+  `SHACL_REQUIRED` off, which is the default, nothing changes unless a
+  `shapes_graph` is passed. Not done: `hb:validateWith` on a named rule, which
+  validates a rule's output before it is written. Tested with the SHACL engine
+  stubbed, so the real Jena path is not exercised here.
+
 ### 2026-11-13 (docs: the agent route, and mapping a domain onto the bridge)
 
 - **Two documentation pages, no code:
@@ -705,6 +721,12 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-11-13-d a hb:ReleaseNote ;
+    dcterms:date "2026-11-13"^^xsd:date ;
+    rdfs:label "approve_candidate validates the merge when SHACL_REQUIRED is on or a shapes_graph is given" ;
+    dcterms:description "approve_candidate passed shacl_required=False and no shapes_graph from the route, so a candidate was always merged unvalidated and the REST and MCP routes could not ask otherwise. The route now passes SHACL_REQUIRED and SHACL_DELTA, DecisionBody and the MCP approve_candidate tool gain shapes_graph (an empty string opts that approval out), and a violation is a 422 that leaves the candidate Pending. Default behaviour with SHACL_REQUIRED off is unchanged. Optional hb:validateWith on named rules is not built. Tests stub the SHACL engine; three of the six new route tests fail on the previous code." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/issues/89> .
 
 hb:release-2026-11-13-c a hb:ReleaseNote ;
     dcterms:date "2026-11-13"^^xsd:date ;
