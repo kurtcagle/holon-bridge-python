@@ -65,6 +65,64 @@ process:
   Fuseki 5.5.0 with its SHACL service (`tests/test_fluent_gate_scope_live.py`,
   skipped without `HOLONBRIDGE_TEST_FUSEKI_URL`) as well as on rdflib and pyshacl.
 
+### 2026-11-13 (state triggers can fire on every evaluation)
+
+- **`hev:fireMode "EveryEvaluation"` on a trigger, default `"Edge"`
+  ([closes #87](https://github.com/kurtcagle/holon-bridge-python/issues/87)).**
+  A state trigger fired once while its condition held, so an always-true
+  condition could not rebuild a projection after each write. In
+  `EveryEvaluation` mode every matching focus fires on every evaluation. The
+  previous evaluation's firings are stamped `hev:clearedAt` first, so the ledger
+  keeps one live firing per focus and `_rearm` stays cheap. A `reviewRequired`
+  trigger still stages no second candidate while one is Pending for that focus.
+  Rule actions only: an `onFireAgent` trigger in this mode is refused at
+  registration (and skipped with a warning if hand-written). `fire_mode` is on
+  `POST /named-trigger` and the `register_named_trigger` MCP tool and is shown in
+  the trigger summary. Tested on the in-memory ledger stub, not live Fuseki.
+
+### 2026-11-13 (approving a candidate is validated like any other write)
+
+- **`approve_candidate` follows `SHACL_REQUIRED` and `SHACL_DELTA`, and the approval
+  body takes a `shapes_graph`
+  ([closes #89's first half](https://github.com/kurtcagle/holon-bridge-python/issues/89)).**
+  Before, approving a candidate merged its Turtle with no validation at all, and
+  the REST and MCP routes had no way to ask for any. Now, with `SHACL_REQUIRED`
+  on, an approval is checked against the dataset's own shapes graph exactly as
+  `push_turtle` is, in delta mode unless `SHACL_DELTA` is off. The body (and the
+  MCP tool) may name a `shapes_graph`; an empty string skips validation for that
+  approval. A violation is a 422 and the candidate stays `Pending`. With
+  `SHACL_REQUIRED` off, which is the default, nothing changes unless a
+  `shapes_graph` is passed. Not done: `hb:validateWith` on a named rule, which
+  validates a rule's output before it is written. Tested with the SHACL engine
+  stubbed, so the real Jena path is not exercised here.
+
+### 2026-11-13 (docs: the agent route, and mapping a domain onto the bridge)
+
+- **Two documentation pages, no code:
+  [`projection-to-reviewed-answer`](projection-to-reviewed-answer.databook.md) and
+  [`domain-ontology-and-bridge-vocabulary`](domain-ontology-and-bridge-vocabulary.databook.md)
+  (closes [#91](https://github.com/kurtcagle/holon-bridge-python/issues/91) and
+  [#92](https://github.com/kurtcagle/holon-bridge-python/issues/92)).**
+  The first joins the four features that carry a question to an outside agent and
+  back (named projection, agent call, candidate, claim-check query), says the
+  bridge does not run a model, and notes that approval is not a schema check on this
+  version. The second sorts a domain model's ideas into built
+  in, convention and the modeller's job, including `hevt:insertedAt` and the
+  event-to-assertion link, which is a convention only. The claim-check query in
+  the first page was run against a small rdflib graph; the agent and candidate
+  routes were read, not run.
+
+### 2026-11-13 (live test for transaction-time as-of reads)
+
+- **`as_of_query`'s transaction-time clauses are now tested against real Fuseki:
+  [PR](https://github.com/kurtcagle/holon-bridge-python/pulls).**
+  PR #85 left the "a later assertion was already known" clause untested because
+  rdflib mis-evaluates its nested `FILTER`. Six new cases in
+  `tests/test_get_holon_asof_live.py` (a superseding entry not yet recorded is
+  ignored, recorded it wins, no `inserted_at` is unchanged, an entry recorded
+  after the asked moment is not shown; with and without a legacy first entry)
+  pass on Jena Fuseki 5.5.0. No code change.
+
 ### 2026-11-13 (two clocks on a fluent: backdating and insertion time)
 
 - **`update_fluent` takes `asserted_datetime` over REST and MCP, and every ledger
@@ -703,6 +761,30 @@ hb:release-2026-11-13-f a hb:ReleaseNote ;
     rdfs:label "Fluent gate: opt-in holder scope (FLUENT_GATE_SCOPE=holder)" ;
     dcterms:description "update_fluent's pre-commit SHACL check validated only the fluent's live StateAssertion, so a shape needing the holder or a sibling fluent could not gate a write. FLUENT_GATE_SCOPE (assertion by default, unchanged) accepts holder, which adds to the scratch validation graph the triples of a node linking to the fluent, the holons triples of the fluent and its sibling fluents, the current scene values of both from the scratch scene so they reflect this transition, and the holons triples of the new value when it is an IRI. A violation in that neighbourhood blocks updates to its fluents until fixed (not delta-based), and an update can be refused because of another fluent's value. update_fluent takes gate_scope; the route passes the setting. Shapes naming GRAPH are still refused. Verified on Jena Fuseki 5.5.0 and on rdflib with pyshacl." ;
     rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/issues/88> .
+
+hb:release-2026-11-13-e a hb:ReleaseNote ;
+    dcterms:date "2026-11-13"^^xsd:date ;
+    rdfs:label "Triggers: hev:fireMode EveryEvaluation fires on every evaluation, not just the rising edge" ;
+    dcterms:description "A state trigger is edge-triggered: a focus fires once and re-arms only when its condition goes false, so an always-true condition fired once over 40 writes and could not refresh a projection. hev:fireMode (Edge by default) now accepts EveryEvaluation, which skips the already-fired check; the trigger's earlier firings are stamped clearedAt at the start of each evaluation so the ledger keeps one live firing per focus. A reviewRequired trigger still stages no second candidate while one is Pending for that focus. Rule actions only; an onFireAgent trigger in this mode is refused at registration. fire_mode added to POST /named-trigger and register_named_trigger. Tested against the in-memory ledger stub, not Jena." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/issues/87> .
+
+hb:release-2026-11-13-d a hb:ReleaseNote ;
+    dcterms:date "2026-11-13"^^xsd:date ;
+    rdfs:label "approve_candidate validates the merge when SHACL_REQUIRED is on or a shapes_graph is given" ;
+    dcterms:description "approve_candidate passed shacl_required=False and no shapes_graph from the route, so a candidate was always merged unvalidated and the REST and MCP routes could not ask otherwise. The route now passes SHACL_REQUIRED and SHACL_DELTA, DecisionBody and the MCP approve_candidate tool gain shapes_graph (an empty string opts that approval out), and a violation is a 422 that leaves the candidate Pending. Default behaviour with SHACL_REQUIRED off is unchanged. Optional hb:validateWith on named rules is not built. Tests stub the SHACL engine; three of the six new route tests fail on the previous code." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/issues/89> .
+
+hb:release-2026-11-13-c a hb:ReleaseNote ;
+    dcterms:date "2026-11-13"^^xsd:date ;
+    rdfs:label "Docs: projection-to-reviewed-answer route and domain-ontology vocabulary map" ;
+    dcterms:description "Two new pages under docs/. projection-to-reviewed-answer joins a named projection (builds the prompt), an agent call (recorded, sent only on approval, at most once), a candidate (agent Turtle staged Pending, never written to the target graph) and a claim-check query (compares each cited ledger assertion and value with the ledger), and states that the bridge does not run a model and that approving a candidate runs no SHACL check on this version. domain-ontology-and-bridge-vocabulary tabulates which domain ideas are built in, convention only or the modeller's job, including hevt:insertedAt since PR 85, the one-assertion SHACL gate scope, and that no bridge term links an event to the assertions it brought. No code changed." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/issues/91> , <https://github.com/kurtcagle/holon-bridge-python/issues/92> .
+
+hb:release-2026-11-13-b a hb:ReleaseNote ;
+    dcterms:date "2026-11-13"^^xsd:date ;
+    rdfs:label "Live Fuseki tests for transaction-time as-of reads" ;
+    dcterms:description "Six cases added to tests/test_get_holon_asof_live.py cover the nested later-assertion clause of as_of_query that PR 85 could not test on rdflib: a superseding entry not yet recorded at inserted_at is ignored, one already recorded wins, no inserted_at leaves valid-time reads unchanged, and an entry recorded after the asked moment is not shown, each with and without a legacy first entry that has no insertedAt. All pass on Jena Fuseki 5.5.0. Test-only change." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pulls> .
 
 hb:release-2026-11-13-a a hb:ReleaseNote ;
     dcterms:date "2026-11-13"^^xsd:date ;
