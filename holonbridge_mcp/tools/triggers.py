@@ -98,6 +98,7 @@ async def register_named_trigger(
     agent_task: str | None = None,
     agent_context: str | None = None,
     agent_target_graph: str | None = None,
+    on_fire_fluent_query: str | None = None,
 ) -> dict:
     """Register (or overwrite) a named trigger.
 
@@ -130,6 +131,22 @@ async def register_named_trigger(
     the endpoint has ``call_review=false``. You need write access to the call
     ledger, the candidates graph and the target graph. Exactly one of
     ``on_fire`` and ``on_fire_agent``.
+
+    **Fluent action.** Give ``on_fire_fluent_query`` (the id of a named SELECT)
+    *instead of* ``on_fire`` to have the bridge change fluents when the trigger
+    fires, for example to advance a simulated clock or move something on one
+    step. The query is bound to the focus (declare a ``focus`` parameter of type
+    anyURI) and returns rows: ``?fluent`` and ``?value`` are required;
+    ``?operation`` (default ``Set``), ``?isIri``, ``?assertedAt`` (valid time)
+    and ``?description`` are optional. Each row is applied like
+    ``update_fluent`` called by you, so you need write access to the events,
+    scene and sequences graphs, and the trigger needs ``review_required=false``
+    because a fluent update is not something that can wait in the candidate
+    queue. Rows are checked first and then applied one by one, at most 50 a
+    firing, not atomically: a failure part-way is recorded as ``partial``. The
+    updates do not themselves fire state triggers, so a chain advances one step
+    per evaluation. Exactly one of ``on_fire``, ``on_fire_agent`` and
+    ``on_fire_fluent_query``.
     """
     return await _call(
         "POST",
@@ -148,6 +165,7 @@ async def register_named_trigger(
             "agent_task": agent_task,
             "agent_context": agent_context,
             "agent_target_graph": agent_target_graph,
+            "on_fire_fluent_query": on_fire_fluent_query,
         },
     )
 

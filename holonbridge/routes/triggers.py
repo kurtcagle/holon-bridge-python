@@ -55,6 +55,7 @@ from ..deps import AnimusDep, ClientDep, ConnDep, PersonasDep, RegistryDep, Sett
 from ..fuseki import FusekiError
 from ..named_queries import load_named_queries
 from ..named_rules import load_named_rules
+from ..fluent_trigger_action import authorize_fluent_trigger
 from ..toolset import resolve_reachable
 from ..trigger_authz import (
     TriggerDenied,
@@ -108,6 +109,13 @@ class RegisterTriggerRequest(BaseModel):
         default=None,
         description="id of an agent endpoint: instead of running a rule, place a call to it "
         "for each matching focus (see agent_task).",
+    )
+    on_fire_fluent_query: str | None = Field(
+        default=None,
+        description="id of a named SELECT whose rows (?fluent, ?value, optional ?operation, ?isIri, "
+        "?assertedAt, ?description), bound to the focus, are applied as fluent updates by the bridge, "
+        "as you. Needs review_required=false. Exactly one of on_fire, on_fire_agent and "
+        "on_fire_fluent_query.",
     )
     agent_task: str | None = Field(default=None, description="what to ask the agent (on_fire_agent only)")
     agent_context: str | None = Field(
@@ -276,6 +284,46 @@ async def _resolve_agent_parts(
     return condition, endpoint, context
 
 
+async def _resolve_fluent_parts(conn, client, animus, personas, condition_id: str, action_id: str):
+    """The condition and action query a fluent trigger names; both must exist and
+    be reachable by this caller (unreachable reads as unknown)."""
+    person = _identified(animus)
+    queries = await load_named_queries(client, conn)
+    condition = queries.by_id(condition_id)
+    action = queries.by_id(action_id)
+
+    persona, _source = personas.get(person_id=person, dataset=conn.dataset)
+    reachable = await resolve_reachable(
+        _query_fn(client, conn), conn, persona=persona,
+        candidate_iris=[q.iri for q in queries.queries],
+    )
+    available = sorted(q.id for q in queries.queries if q.iri in reachable)
+    if condition is None or condition.iri not in reachable:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail={"error": "unknown_condition", "id": condition_id, "available": available},
+        )
+    if action is None or action.iri not in reachable:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail={"error": "unknown_action_query", "id": action_id, "available": available},
+        )
+    return condition, action
+
+
+async def _authorize_fluent_definition(
+    conn, client, animus, *, condition, action, review_required: bool
+) -> list[str]:
+    person = _identified(animus)
+    try:
+        return await authorize_fluent_trigger(
+            _query_fn(client, conn), conn, person,
+            condition=condition, action_query=action, review_required=review_required,
+        )
+    except TriggerDenied as exc:
+        raise _http(exc) from exc
+
+
 async def _authorize_agent_definition(
     conn, client, animus, settings, *, condition, endpoint, context, target_graph, review_required: bool
 ) -> list[str]:
@@ -351,7 +399,12 @@ async def evaluate_named_trigger(
     if trig is None:
         raise _not_found(trigger_id, [t.id for t in result.triggers])
 
-    if trig.is_agent:
+    if trig.is_fluent:
+        # A fluent trigger writes events, scene and sequences: the same three
+        # graphs POST /fluent/update asks of a caller.
+        for graph in (conn.graph("events"), conn.scene_graph, conn.graph("sequences")):
+            await _require_grant(conn, client, animus, graph)
+    elif trig.is_agent:
         # An agent trigger writes to the call ledger (and, if it asks for an
         # answer, the candidates graph and the target graph).
         person = _identified(animus)
@@ -405,12 +458,13 @@ async def register_named_trigger(
     registry = conn.graph("named-triggers")
     await _require_grant(conn, client, animus, registry)
 
-    if bool(body.on_fire) == bool(body.on_fire_agent):
+    if sum(bool(x) for x in (body.on_fire, body.on_fire_agent, body.on_fire_fluent_query)) != 1:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             detail={
                 "error": "invalid_trigger",
-                "message": "name exactly one action: on_fire (a rule) or on_fire_agent (an agent endpoint)",
+                "message": "name exactly one action: on_fire (a rule), on_fire_agent (an agent "
+                "endpoint) or on_fire_fluent_query (a query whose rows update fluents)",
             },
         )
 
@@ -426,8 +480,16 @@ async def register_named_trigger(
             detail={"error": "invalid_trigger_kind", "expected": list(TRIGGER_KINDS)},
         )
 
-    rule = endpoint = context = None
-    if body.on_fire_agent:
+    rule = endpoint = context = action = None
+    if body.on_fire_fluent_query:
+        condition, action = await _resolve_fluent_parts(
+            conn, client, animus, personas, body.condition, body.on_fire_fluent_query
+        )
+        warnings = await _authorize_fluent_definition(
+            conn, client, animus,
+            condition=condition, action=action, review_required=body.review_required,
+        )
+    elif body.on_fire_agent:
         condition, endpoint, context = await _resolve_agent_parts(
             conn, client, animus, personas, body.condition, body.on_fire_agent, body.agent_context
         )
@@ -453,6 +515,7 @@ async def register_named_trigger(
             trigger_kind=body.trigger_kind,
             condition=condition.id,
             on_fire=rule.id if rule else None,
+            fluent_query=action.id if action else None,
             agent_endpoint=endpoint.id if endpoint else None,
             agent_task=body.agent_task,
             agent_context=context.id if context else None,
@@ -512,7 +575,15 @@ async def set_named_trigger_status(
         raise _not_found(trigger_id, [t.id for t in result.triggers])
 
     warnings: list[str] = []
-    if body.status == "Active" and trig.is_agent:
+    if body.status == "Active" and trig.is_fluent:
+        condition, action = await _resolve_fluent_parts(
+            conn, client, animus, personas, trig.condition_id, trig.fluent_query
+        )
+        warnings = await _authorize_fluent_definition(
+            conn, client, animus,
+            condition=condition, action=action, review_required=trig.review_required,
+        )
+    elif body.status == "Active" and trig.is_agent:
         condition, endpoint, context = await _resolve_agent_parts(
             conn, client, animus, personas, trig.condition_id, trig.agent_endpoint,
             trig.agent_context or None,
