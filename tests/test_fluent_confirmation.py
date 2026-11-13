@@ -32,6 +32,7 @@ from fastapi import HTTPException
 from rdflib import URIRef
 
 from holonbridge import fluent as fluent_mod
+from holonbridge.config import Settings
 from holonbridge.fluent import FluentError, Operation, update_fluent
 from holonbridge.routes import fluent as fluent_routes
 from holonbridge.sequence import SequenceError
@@ -221,7 +222,9 @@ def _body() -> fluent_routes.UpdateFluentRequest:
 
 
 async def _call_route():
-    return await fluent_routes.update(_body(), _conn(), object(), SimpleNamespace(person=ALICE))
+    return await fluent_routes.update(
+        _body(), _conn(), object(), SimpleNamespace(person=ALICE), Settings()
+    )
 
 
 async def test_an_exhausted_id_minter_is_a_409_not_a_bare_500(monkeypatch, allowed_route):

@@ -182,6 +182,7 @@ Core variables — the ones every setup needs:
 | `PARSE_MODE` | `passthrough` | Jena parses Turtle (required for RDF 1.2/Turtle 1.2); `local` uses rdflib pre-parsing, Turtle 1.1 only |
 | `SHACL_REQUIRED` | `false` | validate every push against `urn:{dataset}:shacl` |
 | `SHACL_DELTA` | `true` | report only violations the payload introduces, not the whole merged graph |
+| `FLUENT_GATE_SCOPE` | `assertion` | what the fluent update's pre-commit SHACL gate validates: the fluent's own assertion, or (`holder`) also the holder, its sibling fluents and one hop from the new value |
 | `ALLOW_DATASET_OVERRIDE` | `true` | whether `X-Dataset-Override` is honoured at all |
 | `HOLONBRIDGE_CONFIG` | `~/.holonbridge/config.json` | path to the bank config file (§3.2) |
 

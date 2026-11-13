@@ -95,6 +95,16 @@ but not the cheapest it could be -- see ``triggers.py``'s module
 docstring for why that's an explicit, deferred choice rather than an
 oversight.
 
+CHANGED 2026-11-13 (gate scope): the pre-commit check can be widened, per
+deployment, with ``FLUENT_GATE_SCOPE=holder``. The default (``assertion``) is
+exactly what is described above. ``holder`` also validates the holder's holons
+triples, its sibling fluents with their current scene values after this
+transition, and one hop from the new value, so a shape can say "a train's
+location must be a station on its own line". The price is that an update to one
+fluent can be refused because of another's value, and that a violation already
+present in the holder's neighbourhood blocks every update to its fluents until
+it is fixed: the check is not delta-based. See :func:`_holder_scope_query`.
+
 CHANGED 2026-09-30: fixed a lost-race bug that left an orphan ledger entry.
 The scene update has always been a compare-and-set, but the ledger append
 beside it was an unconditional ``INSERT DATA``. When two transitions on one
@@ -328,6 +338,57 @@ def _has_triples(turtle: str) -> bool:
     return len(_parse(turtle)) > 0
 
 
+GATE_SCOPE_ASSERTION = "assertion"
+GATE_SCOPE_HOLDER = "holder"
+GATE_SCOPES = (GATE_SCOPE_ASSERTION, GATE_SCOPE_HOLDER)
+
+
+def _holder_scope_query(conn: Conn, *, fluent: str, scratch_scene: str) -> str:
+    """CONSTRUCT the extra triples the ``holder`` gate scope validates.
+
+    * the holder: every holons-graph triple of a node that links to this fluent
+      (this is also where the holder's own link to the fluent comes from);
+    * the fluent and its sibling fluents (other fluents the same holder links
+      to): their holons-graph triples, so their type and property are visible;
+    * the current scene values of the fluent and its siblings, read from the
+      scratch scene, so the sibling values are the ones after this transition;
+    * one hop from the new value: when the fluent's current value is an IRI, its
+      holons-graph triples (the station a train is in, with the station's line).
+
+    The scratch scene is used so the candidate transition is what is seen. The
+    holons graph is read live: a fluent update never writes it. Blank nodes
+    reached this way are not followed any further.
+    """
+    holons = conn.holons_graph
+    return f"""{_PREFIXES}
+CONSTRUCT {{ ?s ?p ?o . }}
+WHERE {{
+  {{
+    GRAPH <{holons}> {{ ?s ?linkToFluent <{fluent}> . ?s ?p ?o . }}
+  }} UNION {{
+    GRAPH <{holons}> {{
+      ?holder ?linkToFluent <{fluent}> .
+      ?holder ?linkToSibling ?s .
+      ?s a holon:Fluent ; ?p ?o .
+    }}
+  }} UNION {{
+    GRAPH <{holons}> {{
+      ?holder ?linkToFluent <{fluent}> .
+      ?holder ?linkToSibling ?s .
+      ?s a holon:Fluent .
+    }}
+    GRAPH <{scratch_scene}> {{
+      ?s ?p ?o .
+      FILTER (?p IN (holon:currentValue, holon:currentAssertion))
+    }}
+  }} UNION {{
+    GRAPH <{scratch_scene}> {{ <{fluent}> holon:currentValue ?s . }}
+    FILTER (isIRI(?s))
+    GRAPH <{holons}> {{ ?s ?p ?o . }}
+  }}
+}}"""
+
+
 async def _precommit_check(
     client: FusekiClient,
     conn: Conn,
@@ -338,6 +399,7 @@ async def _precommit_check(
     ledger_insert: str,
     scene_update: str,
     shapes_turtle: str,
+    gate_scope: str = GATE_SCOPE_ASSERTION,
 ) -> "shacl_mod.ValidationReport":
     """Validate the exact candidate transition before it ever touches a
     live graph.
@@ -350,6 +412,10 @@ async def _precommit_check(
     scopes a check to this fluent's own current-state neighbourhood (its
     non-invalidated, non-superseded StateAssertion(s), which should be
     exactly one) against ``shapes_turtle``.
+
+    With ``gate_scope="holder"`` the validated graph also carries the holder's
+    neighbourhood (see :func:`_holder_scope_query`), so a shape can state a rule
+    that spans the assertion, the holder and its other fluents.
 
     Everything scratch is dropped before returning, success or failure.
     """
@@ -390,9 +456,22 @@ WHERE {{
             # this attempt read, i.e. a lost race -- the caller retries.
             raise _CandidateDidNotFire(fluent)
 
+        extra_turtle = ""
+        if gate_scope == GATE_SCOPE_HOLDER:
+            extra_turtle = await client.construct(
+                conn,
+                _holder_scope_query(
+                    conn, fluent=fluent, scratch_scene=scratch_scene,
+                ),
+            )
+
         validate_scratch = f"urn:{conn.dataset}:scratch:fluent-validate-{token}"
         try:
             await client.post_graph(conn, validate_scratch, scoped_turtle)
+            if extra_turtle.strip() and _has_triples(extra_turtle):
+                # A second POST, not concatenated Turtle: the two documents'
+                # blank nodes must stay distinct.
+                await client.post_graph(conn, validate_scratch, extra_turtle)
             report_turtle = await client.shacl_validate(
                 conn, target_graph=validate_scratch, shapes_turtle=shapes_turtle
             )
@@ -482,6 +561,7 @@ async def update_fluent(
     asserted_by: str | None = None,
     description: str | None = None,
     attempts: int = 8,
+    gate_scope: str = GATE_SCOPE_ASSERTION,
 ) -> FluentUpdateResult:
     """Perform one fluent transition: an atomic ledger append plus a
     destructive scene-graph update, in a single SPARQL request -- validated
@@ -493,6 +573,8 @@ async def update_fluent(
     for SET, the delta magnitude for INSERT/REMOVE, the member IRI/literal
     for LIST_INSERT/LIST_REMOVE.
     """
+    if gate_scope not in GATE_SCOPES:
+        raise FluentError(f"gate_scope must be one of {', '.join(GATE_SCOPES)}, not {gate_scope!r}")
     mode = await _read_operation_mode(client, conn, fluent=fluent)
     if operation not in _VALID_OPS[mode]:
         raise FluentError(
@@ -606,6 +688,7 @@ INSERT {{
                     ledger_insert=ledger_insert,
                     scene_update=scene_update,
                     shapes_turtle=shapes_turtle,
+                    gate_scope=gate_scope,
                 )
             except _CandidateDidNotFire:
                 continue  # lost a race before the live commit; retry from a fresh read

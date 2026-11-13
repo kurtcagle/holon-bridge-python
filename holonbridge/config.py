@@ -271,6 +271,11 @@ class Settings:
     # Delta mode reports only violations the incoming payload introduces,
     # so one pre-existing violation in a target graph cannot block all writes.
     shacl_delta: bool = True
+    # What the fluent update's pre-commit SHACL gate can see. ``assertion`` (the
+    # default) is the fluent's own live StateAssertion only. ``holder`` adds the
+    # holder's triples, its sibling fluents and their current scene values, and
+    # one hop from the new value, so a shape can state a rule that spans them.
+    fluent_gate_scope: str = "assertion"
 
     # Allow clients to retarget the dataset per request via X-Dataset-Override.
     allow_dataset_override: bool = True
@@ -298,6 +303,10 @@ class Settings:
     fuseki_config_dir: Path | None = None
 
     def __post_init__(self) -> None:
+        if self.fluent_gate_scope not in ("assertion", "holder"):
+            raise ValueError(
+                f"FLUENT_GATE_SCOPE must be 'assertion' or 'holder', not {self.fluent_gate_scope!r}"
+            )
         # One token, one role. A token that is both the shared legacy token and
         # an identity token (or a proxy token) would be ambiguous about whether
         # the animus header may override it, so refuse to start.
@@ -363,6 +372,7 @@ class Settings:
             parse_mode=os.getenv("PARSE_MODE", "passthrough").strip().lower(),
             shacl_required=_flag("SHACL_REQUIRED", False),
             shacl_delta=_flag("SHACL_DELTA", True),
+            fluent_gate_scope=os.getenv("FLUENT_GATE_SCOPE", "assertion").strip().lower(),
             allow_dataset_override=_flag("ALLOW_DATASET_OVERRIDE", True),
             request_timeout=float(os.getenv("REQUEST_TIMEOUT", "60")),
             named_query_ttl=float(os.getenv("NAMED_QUERY_TTL", "60")),

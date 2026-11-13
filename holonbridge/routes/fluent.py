@@ -51,7 +51,7 @@ from pydantic import BaseModel, Field
 from .. import audit
 from .. import delegation as dg
 from ..acl import check_write
-from ..deps import AnimusDep, ClientDep, ConnDep
+from ..deps import AnimusDep, ClientDep, ConnDep, SettingsDep
 from ..fluent import FluentError, FluentUpdateResult, Operation, prior_value, update_fluent
 from ..fuseki import FusekiError
 from ..sequence import SequenceError
@@ -120,7 +120,11 @@ def _safe(value: str, what: str) -> str:
 
 @router.post("/update")
 async def update(
-    body: UpdateFluentRequest, conn: ConnDep, client: ClientDep, animus: AnimusDep
+    body: UpdateFluentRequest,
+    conn: ConnDep,
+    client: ClientDep,
+    animus: AnimusDep,
+    settings: SettingsDep,
 ) -> dict:
     if animus.person is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="unresolved identity")
@@ -170,6 +174,7 @@ async def update(
             asserted_by=person,
             description=body.description,
             asserted_datetime=_as_utc(body.asserted_datetime),
+            gate_scope=settings.fluent_gate_scope,
         )
     except FluentError as exc:
         raise HTTPException(
