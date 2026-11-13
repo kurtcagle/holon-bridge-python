@@ -445,3 +445,20 @@ def test_the_renderer_refuses_every_evaluation_for_a_fluent_trigger():
             watched_predicates=[], registered_at="2026-11-13T00:00:00+00:00",
             fluent_query="advance-clock", fire_mode="EveryEvaluation",
         )
+
+
+async def test_a_row_for_a_portal_governed_fluent_fails_the_firing(stub, conn, recorder, monkeypatch):
+    """A traveller's position changes only by crossing a portal, so a trigger may not
+    set it either; nothing is applied."""
+    from holonbridge import portal as portal_mod
+
+    async def governed(client, conn_, fluent):
+        return ["customs"] if fluent == CLOCK else []
+
+    monkeypatch.setattr(portal_mod, "governing_portals", governed)
+
+    firings = only(await evaluate_triggers(stub, conn, kind=TRIGGER_STATE), "tick")
+
+    assert [f.outcome for f in firings] == ["failed"]
+    assert "customs" in firings[0].detail
+    assert recorder.calls == []

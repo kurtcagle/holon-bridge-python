@@ -333,6 +333,15 @@ async def fire_fluent(
     result = await client.select(conn, sparql)
     rows = parse_rows(result.get("results", {}).get("bindings", []))
 
+    # A traveller's position changes only by crossing a portal (holonbridge/portal.py).
+    # Checked for every row before any is applied, like the rest of the validation.
+    from .portal import governing_portals, portal_governed_message  # noqa: PLC0415
+
+    for number, row in enumerate(rows, start=1):
+        governed = await governing_portals(client, conn, row.fluent)
+        if governed:
+            raise FluentActionInvalid(f"row {number}: {portal_governed_message(row.fluent, governed)}")
+
     applied = 0
     for row in rows:
         try:

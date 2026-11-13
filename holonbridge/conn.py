@@ -59,6 +59,9 @@ named query with a prompt template. Deliberately not named
 change-delivery feature) or ``projection-log`` -- see
 holonbridge/named_projections.py's module docstring.
 
+CHANGED 2026-11-13: added ``portals``, the registry of ``hb:Portal`` entries (see
+holonbridge/portal.py).
+
 CHANGED 2026-09-30: added the ``shacl-context`` graph role and the
 ``validation_context_graphs`` property, for context-aware SHACL validation.
 Jena's SHACL service validates one flat graph, so a shape that needs to see
@@ -115,6 +118,7 @@ GRAPH_ROLES: Final = (
     "named-projections",
     "named-rules",
     "named-triggers",
+    "portals",
     "trigger-log",
     "candidates",
     "agents",

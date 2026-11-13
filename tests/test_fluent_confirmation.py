@@ -221,9 +221,17 @@ def _body() -> fluent_routes.UpdateFluentRequest:
     return fluent_routes.UpdateFluentRequest(fluent=FLUENT, operation=Operation.SET, value=1)
 
 
+class _NoPortals:
+    """A client with nothing in the portals graph: the route asks it whether the
+    fluent's property is governed by a portal, and the answer is no."""
+
+    async def select(self, conn, query):
+        return {"results": {"bindings": []}}
+
+
 async def _call_route():
     return await fluent_routes.update(
-        _body(), _conn(), object(), SimpleNamespace(person=ALICE), Settings()
+        _body(), _conn(), _NoPortals(), SimpleNamespace(person=ALICE), Settings()
     )
 
 

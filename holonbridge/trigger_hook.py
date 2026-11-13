@@ -46,6 +46,7 @@ SYSTEM_ROLES = (
     "named-projections",
     "named-rules",
     "named-triggers",
+    "portals",
     "trigger-log",
     "candidates",
     "agents",

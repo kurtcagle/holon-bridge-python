@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/holon-bridge-python-domain-ontology-and-bridge-vocabulary
 title: "Mapping a domain ontology onto the bridge: built in, convention, or yours"
 type: databook
-version: 1.0.0
+version: 1.1.0
 created: 2026-11-13
 updated: 2026-11-13
 author:
@@ -36,7 +36,7 @@ check this table. There are three kinds of answer, and they are not the same:
 | A changing property of a thing (a fluent) | Built in | `holon:Fluent`, with the scene holding `holon:currentValue` and `holon:currentAssertion`; changed with `update_fluent` |
 | History of every change, never edited | Built in | an append-only `hevt:StateAssertion` per transition in the events graph, chained with `hevt:supersedes`, carrying `hevt:oldValue`, `hevt:hasValue`, `hevt:operation`, `hevt:assertedBy`, `hevt:sequenceId` |
 | Two writers racing on the same fluent | Built in | `update_fluent` is a guarded compare-and-set; the loser writes neither the scene change nor a ledger entry, and retries |
-| Check a change against the schema before it lands | Built in | a SHACL gate on a scratch copy of events and scene, **scoped to the fluent's live assertion only** (see below) |
+| Check a change against the schema before it lands | Built in | a SHACL gate on a scratch copy of events and scene, **scoped to the fluent's live assertion by default; `FLUENT_GATE_SCOPE=holder` widens it** (see below) |
 | When a fact was true (valid time) | Built in | `hevt:assertedDateTime`; a caller may backdate it with `asserted_datetime` on `update_fluent` (REST and MCP) |
 | When the record learnt it (transaction time) | Built in, since [PR #85](https://github.com/kurtcagle/holon-bridge-python/pull/85) | `hevt:insertedAt`, stamped by the bridge's wall clock; the caller cannot set it. `get_holon` accepts `observed_at` (valid time) and `inserted_at` (transaction time). Entries from before the change have no `insertedAt` and count as known from the start |
 | Ask "what did the record say at T" | Built in | `get_holon` with `observed_at`, optionally `inserted_at`; refuses holons with list-mode fluents |
@@ -44,19 +44,25 @@ check this table. There are three kinds of answer, and they are not the same:
 | Which ledger entries an event brought about | Convention only | no bridge term links an event to the assertions written because of it |
 | Something that fires when a condition becomes true | Built in | `hev:NamedTrigger`, state or temporal, edge-triggered and re-armed on the falling edge |
 | An external agent giving an answer | Built in, gated | the agent gateway; answers become candidates. See [the projection-to-reviewed-answer page](projection-to-reviewed-answer.databook.md) |
-| A door between holons, with a lock | Modeller's job | the bridge has no portal construct. ACLs govern who may write a graph; a SHACL shape governs what a graph may contain; neither is a rule for moving between holons |
+| A door between holons, with a lock | Built in, since the `hb:Portal` PR | `hb:Portal` (`POST /portal`): from, to, a position property, an optional lock and effect (named SELECTs bound to the traveller) and optional boundary shapes. A crossing (`POST /portal/{id}/traverse`) moves the traveller's position fluent and applies the effect in one transaction. Registering a portal makes its position property portal-governed: it can no longer be changed except by crossing. What a lock *means* is still yours to write |
+| Several changes that must all happen or none | Built in, since the same PR | `update_fluents` (`POST /fluent/update-many`): up to 20 fluent changes under one shared guard, recorded as an `hevt:Transaction` |
 | A clock that advances the simulated world | External driver | the scheduler runs on the wall clock. A simulated or replayed clock is something your driver supplies, through `asserted_datetime` and your own events |
 | Claims an agent makes, and their citations | Convention only | see the claim-check example in the projection page |
 
 ## Three things in that table that bite
 
-**The SHACL gate sees one assertion, not the whole holon.** Before a fluent
-update commits, the bridge validates a scratch copy, but only the fluent's live
-assertion is in scope. A shape that needs the holder's other triples, or a
-sibling fluent's current value, will not fire at the gate, and a constraint
-that spans two fluents is not enforced by it. Put such a rule in a rule or
-trigger, or validate the whole holon afterwards. (A wider, opt-in gate scope is
-tracked in [#88](https://github.com/kurtcagle/holon-bridge-python/issues/88).)
+**The SHACL gate sees one assertion by default, not the whole holon.** Before a
+fluent update commits, the bridge validates a scratch copy. With the default
+setting (`FLUENT_GATE_SCOPE=assertion`) only the fluent's live assertion is in
+scope, so a shape that needs the holder's other triples or a sibling fluent's
+current value will not fire, and a constraint that spans two fluents is not
+enforced. Setting `FLUENT_GATE_SCOPE=holder` adds the holder, the sibling
+fluents and the new value's neighbourhood
+([#88](https://github.com/kurtcagle/holon-bridge-python/issues/88)); the price
+is that an update can be refused because of another fluent's value, and a
+violation already in that neighbourhood blocks every update to its fluents
+until it is fixed. If you leave the default, put cross-fluent rules in a rule
+or trigger, or validate the whole holon afterwards.
 
 **Valid time and transaction time are different questions.** `assertedDateTime`
 answers "when was it true", and you can backdate it to record something learnt

@@ -52,8 +52,10 @@ from .. import audit
 from .. import delegation as dg
 from ..acl import check_write
 from ..deps import AnimusDep, ClientDep, ConnDep, SettingsDep
-from ..fluent import FluentError, FluentUpdateResult, Operation, prior_value, update_fluent
+from ..fluent import FluentError, FluentUpdateResult, Operation, TypedValue, prior_value, update_fluent
+from ..fluent_transaction import MAX_OPS, FluentOp, update_fluents
 from ..fuseki import FusekiError
+from ..portal import governing_portals, portal_governed_message
 from ..sequence import SequenceError
 
 router = APIRouter(prefix="/fluent", tags=["fluent"])
@@ -163,6 +165,17 @@ async def update(
             audit.annotate(reason=detail)
             raise HTTPException(status.HTTP_403_FORBIDDEN, detail=detail)
 
+    governed = await governing_portals(client, conn, fluent)
+    if governed:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "error": "portal_governed",
+                "message": portal_governed_message(fluent, governed),
+                "portals": governed,
+            },
+        )
+
     try:
         result = await update_fluent(
             client,
@@ -190,6 +203,121 @@ async def update(
         raise HTTPException(exc.status or 502, detail=exc.as_dict()) from exc
 
     return {**_result_dict(result), "assertedBy": person}
+
+
+class FluentOperationItem(BaseModel):
+    fluent: str = Field(..., min_length=1)
+    operation: Operation
+    value: Any = None
+    is_iri: bool = False
+    description: str | None = None
+
+
+class UpdateFluentsRequest(BaseModel):
+    operations: list[FluentOperationItem] = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_OPS,
+        description=(
+            "Changes to apply together: all of them or none. One per fluent. Each is "
+            "as for /fluent/update; they share the asserted_datetime and description below."
+        ),
+    )
+    asserted_datetime: datetime | None = Field(
+        default=None, description="Valid time for every member, as for /fluent/update."
+    )
+    description: str | None = Field(default=None, description="Recorded on the transaction and, unless a member has its own, on each entry.")
+
+
+@router.post("/update-many")
+async def update_many(
+    body: UpdateFluentsRequest,
+    conn: ConnDep,
+    client: ClientDep,
+    animus: AnimusDep,
+    settings: SettingsDep,
+) -> dict:
+    """Several fluent changes as one transaction: every one is applied, or none is.
+
+    Needs the same three write grants as ``/fluent/update``. A fluent that is the
+    position property of a portal cannot be changed here (cross the portal)."""
+    if animus.person is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="unresolved identity")
+    person = animus.person
+
+    ops: list[FluentOp] = []
+    for item in body.operations:
+        value = item.value
+        if item.is_iri:
+            if not isinstance(value, str):
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST, detail="value: an IRI-valued update needs a string value"
+                )
+            value = _safe(value, "value")
+        ops.append(
+            FluentOp(
+                fluent=_safe(item.fluent, "fluent"),
+                operation=item.operation,
+                value=value,
+                is_iri=item.is_iri,
+                description=item.description,
+            )
+        )
+
+    graphs = [conn.graph("events"), conn.scene_graph, conn.graph("sequences")]
+    digest, size = audit.payload_digest(json.dumps(body.model_dump(mode="json"), sort_keys=True))
+    audit.annotate(graphs=graphs, payload_hash=digest, payload_bytes=size)
+
+    async def query_fn(q: str) -> dict:
+        return await client.select(conn, q)
+
+    for graph in graphs:
+        decision = await check_write(query_fn, conn.holons_graph, person=person, target=graph)
+        audit.annotate(authorised_by=decision.matched_grant, authorised_reason=decision.reason)
+        if not decision.allowed:
+            detail = f"{decision.reason} (graph: {graph})"
+            audit.annotate(reason=detail)
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail=detail)
+
+    for op in ops:
+        governed = await governing_portals(client, conn, op.fluent)
+        if governed:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "portal_governed",
+                    "message": portal_governed_message(op.fluent, governed),
+                    "portals": governed,
+                },
+            )
+
+    try:
+        result = await update_fluents(
+            client,
+            conn,
+            ops=ops,
+            asserted_by=person,
+            description=body.description,
+            asserted_datetime=_as_utc(body.asserted_datetime),
+            gate_scope=settings.fluent_gate_scope,
+        )
+    except FluentError as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, detail={"error": "fluent_error", "message": str(exc)}
+        ) from exc
+    except SequenceError as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, detail={"error": "sequence_contention", "message": str(exc)}
+        ) from exc
+    except FusekiError as exc:
+        raise HTTPException(exc.status or 502, detail=exc.as_dict()) from exc
+
+    return {
+        "ok": True,
+        "transaction": result.transaction,
+        "assertedBy": person,
+        "updates": [_result_dict(r) for r in result.results],
+    }
 
 
 @router.get("/{fluent_id:path}/prior")

@@ -97,6 +97,43 @@ async def update_fluent(
 
 
 @mcp.tool()
+async def update_fluents(
+    operations: list[dict],
+    description: str | None = None,
+    asserted_datetime: str | None = None,
+) -> dict:
+    """Change several fluents as one transaction: every change is made, or none is.
+
+    Use this when one event changes more than one fluent and a half-made change
+    would be wrong (a train leaves one station and the next one's occupancy
+    changes; a key is used and the door opens). Each entry of ``operations`` has
+    the same fields as ``update_fluent``: ``fluent``, ``operation``, ``value``,
+    ``is_iri`` and an optional ``description``. At most 20, one per fluent.
+
+    All changes are checked together first (operation against mode, the current
+    values, and, where the dataset has a shapes graph, the whole candidate on a
+    scratch copy, so a shape may relate the changed fluents to each other). If any
+    one fails, or any fluent changes underneath the transaction, nothing is
+    written. Entries share ``asserted_datetime`` (valid time) and are linked in the
+    ledger by one ``hevt:Transaction`` record.
+
+    Needs the same access as ``update_fluent``. A fluent that is the position
+    property of a portal cannot be changed here: use ``traverse_portal``.
+
+    Returns the ``transaction`` IRI and one ``updates`` entry per change.
+    """
+    return await _call(
+        "POST",
+        "/fluent/update-many",
+        json_body={
+            "operations": operations,
+            "description": description,
+            "asserted_datetime": asserted_datetime,
+        },
+    )
+
+
+@mcp.tool()
 async def get_prior_fluent_value(fluent: str) -> dict:
     """The value a fluent held immediately before its current one.
 

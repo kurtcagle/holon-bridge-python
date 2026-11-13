@@ -42,6 +42,7 @@ from .routes import (
     named_rules,
     persona,
     pipeline,
+    portals,
     projection,
     scheduler as scheduler_routes,
     sparql,
@@ -138,6 +139,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(named_projections.router)
     app.include_router(named_rules.router)
     app.include_router(triggers.router)
+    app.include_router(portals.router)
     app.include_router(agent_routes.router)
     app.include_router(pipeline.router)
     app.include_router(scheduler_routes.router)
