@@ -62,6 +62,17 @@ process:
   the first page was run against a small rdflib graph; the agent and candidate
   routes were read, not run.
 
+### 2026-11-13 (live test for transaction-time as-of reads)
+
+- **`as_of_query`'s transaction-time clauses are now tested against real Fuseki:
+  [PR](https://github.com/kurtcagle/holon-bridge-python/pulls).**
+  PR #85 left the "a later assertion was already known" clause untested because
+  rdflib mis-evaluates its nested `FILTER`. Six new cases in
+  `tests/test_get_holon_asof_live.py` (a superseding entry not yet recorded is
+  ignored, recorded it wins, no `inserted_at` is unchanged, an entry recorded
+  after the asked moment is not shown; with and without a legacy first entry)
+  pass on Jena Fuseki 5.5.0. No code change.
+
 ### 2026-11-13 (two clocks on a fluent: backdating and insertion time)
 
 - **`update_fluent` takes `asserted_datetime` over REST and MCP, and every ledger
@@ -695,11 +706,17 @@ process:
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
 
-hb:release-2026-11-13-b a hb:ReleaseNote ;
+hb:release-2026-11-13-c a hb:ReleaseNote ;
     dcterms:date "2026-11-13"^^xsd:date ;
     rdfs:label "Docs: projection-to-reviewed-answer route and domain-ontology vocabulary map" ;
     dcterms:description "Two new pages under docs/. projection-to-reviewed-answer joins a named projection (builds the prompt), an agent call (recorded, sent only on approval, at most once), a candidate (agent Turtle staged Pending, never written to the target graph) and a claim-check query (compares each cited ledger assertion and value with the ledger), and states that the bridge does not run a model and that approving a candidate runs no SHACL check on this version. domain-ontology-and-bridge-vocabulary tabulates which domain ideas are built in, convention only or the modeller's job, including hevt:insertedAt since PR 85, the one-assertion SHACL gate scope, and that no bridge term links an event to the assertions it brought. No code changed." ;
     rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/issues/91> , <https://github.com/kurtcagle/holon-bridge-python/issues/92> .
+
+hb:release-2026-11-13-b a hb:ReleaseNote ;
+    dcterms:date "2026-11-13"^^xsd:date ;
+    rdfs:label "Live Fuseki tests for transaction-time as-of reads" ;
+    dcterms:description "Six cases added to tests/test_get_holon_asof_live.py cover the nested later-assertion clause of as_of_query that PR 85 could not test on rdflib: a superseding entry not yet recorded at inserted_at is ignored, one already recorded wins, no inserted_at leaves valid-time reads unchanged, and an entry recorded after the asked moment is not shown, each with and without a legacy first entry that has no insertedAt. All pass on Jena Fuseki 5.5.0. Test-only change." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pulls> .
 
 hb:release-2026-11-13-a a hb:ReleaseNote ;
     dcterms:date "2026-11-13"^^xsd:date ;
