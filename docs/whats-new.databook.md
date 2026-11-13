@@ -698,7 +698,7 @@ process:
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
 
-hb:release-2026-11-13-b a hb:ReleaseNote ;
+hb:release-2026-11-13-f a hb:ReleaseNote ;
     dcterms:date "2026-11-13"^^xsd:date ;
     rdfs:label "Fluent gate: opt-in holder scope (FLUENT_GATE_SCOPE=holder)" ;
     dcterms:description "update_fluent's pre-commit SHACL check validated only the fluent's live StateAssertion, so a shape needing the holder or a sibling fluent could not gate a write. FLUENT_GATE_SCOPE (assertion by default, unchanged) accepts holder, which adds to the scratch validation graph the triples of a node linking to the fluent, the holons triples of the fluent and its sibling fluents, the current scene values of both from the scratch scene so they reflect this transition, and the holons triples of the new value when it is an IRI. A violation in that neighbourhood blocks updates to its fluents until fixed (not delta-based), and an update can be refused because of another fluent's value. update_fluent takes gate_scope; the route passes the setting. Shapes naming GRAPH are still refused. Verified on Jena Fuseki 5.5.0 and on rdflib with pyshacl." ;
