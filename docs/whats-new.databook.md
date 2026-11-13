@@ -694,7 +694,7 @@ process:
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
 
-hb:release-2026-11-13-b a hb:ReleaseNote ;
+hb:release-2026-11-13-e a hb:ReleaseNote ;
     dcterms:date "2026-11-13"^^xsd:date ;
     rdfs:label "Triggers: hev:fireMode EveryEvaluation fires on every evaluation, not just the rising edge" ;
     dcterms:description "A state trigger is edge-triggered: a focus fires once and re-arms only when its condition goes false, so an always-true condition fired once over 40 writes and could not refresh a projection. hev:fireMode (Edge by default) now accepts EveryEvaluation, which skips the already-fired check; the trigger's earlier firings are stamped clearedAt at the start of each evaluation so the ledger keeps one live firing per focus. A reviewRequired trigger still stages no second candidate while one is Pending for that focus. Rule actions only; an onFireAgent trigger in this mode is refused at registration. fire_mode added to POST /named-trigger and register_named_trigger. Tested against the in-memory ledger stub, not Jena." ;
