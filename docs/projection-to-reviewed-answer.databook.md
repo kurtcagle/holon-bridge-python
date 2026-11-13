@@ -96,10 +96,14 @@ Review it with `GET /candidates`, `GET /candidate/{id}`, then
 `POST /candidate/{id}/approve` or `/reject`. Approval goes through the ordinary
 ACL-checked write path, so the approver needs write access to the target graph.
 
-**Read this before relying on approval as a check.** `approve_candidate` runs
-SHACL only if a `shapes_graph` is passed. Without one, an approved candidate is
-written unvalidated. Approval is a person's judgement; it is not by itself a
-schema check.
+**Read this before relying on approval as a check.** On this version the REST
+and MCP approval routes pass no shapes graph, so an approved candidate is
+written with no SHACL check at all. Approval is a person's judgement, not a
+schema check. To check the Turtle first, read it with `GET /candidate/{id}` and
+run it through `validate_turtle` before you approve. (A change that makes
+approval follow `SHACL_REQUIRED` and accept a `shapes_graph` is open as
+[PR #96](https://github.com/kurtcagle/holon-bridge-python/pull/96); once it is
+merged, this paragraph should be updated.)
 
 ## 4. A claim-check query verifies what came back
 
@@ -145,9 +149,9 @@ SELECT ?claim ?statement ?cited ?claimed ?actual ?problem WHERE {
 Run it against the dataset where the claims were staged and the events graph is
 reachable. This checks that a claim *matches what the ledger says*. It does not
 check that the claim is relevant, complete or well reasoned, and it does not
-check a claim that cites nothing. Require a citation in a SHACL shape on
-`ex:Claim` (`sh:minCount 1` on `ex:cites`) and pass that shape as `shapes_graph`
-when approving, which also closes the gap in section 3.
+check a claim that cites nothing. Require a citation with a SHACL shape on
+`ex:Claim` (`sh:minCount 1` on `ex:cites`) and run the candidate through
+`validate_turtle` against it before approving.
 
 In the worked example this was built from (a two-line train network with a
 detective, a victim, a witness and a clock), six claims were written, two
@@ -162,5 +166,5 @@ were read from the code, not run end to end.
 | What the agent sees | the bridge (projection, `context_query`) |
 | Whether it is sent | a person, or a policy someone defined |
 | What the agent does with it | the agent, outside the bridge |
-| Whether the answer is written | a person, through the ordinary ACL and SHACL path |
+| Whether the answer is written | a person, through the ordinary ACL-checked write path (SHACL on approval depends on PR #96) |
 | Whether the answer is true | your claim-check query and your shapes; nothing automatic |

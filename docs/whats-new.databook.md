@@ -55,8 +55,8 @@ process:
   [#92](https://github.com/kurtcagle/holon-bridge-python/issues/92)).**
   The first joins the four features that carry a question to an outside agent and
   back (named projection, agent call, candidate, claim-check query), says the
-  bridge does not run a model, and notes that `approve_candidate` validates only
-  when given a `shapes_graph`. The second sorts a domain model's ideas into built
+  bridge does not run a model, and notes that approval is not a schema check on this
+  version. The second sorts a domain model's ideas into built
   in, convention and the modeller's job, including `hevt:insertedAt` and the
   event-to-assertion link, which is a convention only. The claim-check query in
   the first page was run against a small rdflib graph; the agent and candidate
@@ -698,7 +698,7 @@ process:
 hb:release-2026-11-13-b a hb:ReleaseNote ;
     dcterms:date "2026-11-13"^^xsd:date ;
     rdfs:label "Docs: projection-to-reviewed-answer route and domain-ontology vocabulary map" ;
-    dcterms:description "Two new pages under docs/. projection-to-reviewed-answer joins a named projection (builds the prompt), an agent call (recorded, sent only on approval, at most once), a candidate (agent Turtle staged Pending, never written to the target graph) and a claim-check query (compares each cited ledger assertion and value with the ledger), and states that the bridge does not run a model and that approve_candidate validates only if a shapes_graph is passed. domain-ontology-and-bridge-vocabulary tabulates which domain ideas are built in, convention only or the modeller's job, including hevt:insertedAt since PR 85, the one-assertion SHACL gate scope, and that no bridge term links an event to the assertions it brought. No code changed." ;
+    dcterms:description "Two new pages under docs/. projection-to-reviewed-answer joins a named projection (builds the prompt), an agent call (recorded, sent only on approval, at most once), a candidate (agent Turtle staged Pending, never written to the target graph) and a claim-check query (compares each cited ledger assertion and value with the ledger), and states that the bridge does not run a model and that approving a candidate runs no SHACL check on this version. domain-ontology-and-bridge-vocabulary tabulates which domain ideas are built in, convention only or the modeller's job, including hevt:insertedAt since PR 85, the one-assertion SHACL gate scope, and that no bridge term links an event to the assertions it brought. No code changed." ;
     rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/issues/91> , <https://github.com/kurtcagle/holon-bridge-python/issues/92> .
 
 hb:release-2026-11-13-a a hb:ReleaseNote ;
