@@ -149,8 +149,9 @@ async def register_named_trigger(
     ``update_fluent`` called by you, so you need write access to the events,
     scene and sequences graphs, and the trigger needs ``review_required=false``
     because a fluent update is not something that can wait in the candidate
-    queue. Rows are checked first and then applied one by one, at most 50 a
-    firing, not atomically: a failure part-way is recorded as ``partial``. The
+    queue. Rows are checked first and then applied as one transaction, all or
+    none, at most 20 a firing; they share one valid time and may not repeat a
+    fluent. A failure leaves nothing written and is retried. The
     updates do not themselves fire state triggers, so a chain advances one step
     per evaluation. Exactly one of ``on_fire``, ``on_fire_agent`` and
     ``on_fire_fluent_query``.

@@ -3,8 +3,8 @@
 A rule-based trigger stages a CONSTRUCT; an agent trigger places a call. This
 action *changes fluents*: for each focus its condition matches, a named SELECT
 (the "action query", bound to the focus) returns rows, and each row is applied
-through :func:`holonbridge.fluent.update_fluent` as the person who armed the
-trigger. It is how something inside the bridge can advance state, for example
+through :func:`holonbridge.fluent_transaction.update_fluents` as the person who
+armed the trigger. It is how something inside the bridge can advance state, for example
 "every tick, move each train on to its next stop", where before an outside
 driver had to call ``update_fluent``.
 
@@ -33,13 +33,15 @@ what the condition and action query read, and write the events, scene and
 sequences graphs, which is what ``POST /fluent/update`` asks of a caller. The
 same questions are asked again at every firing (see ``trigger_authz``).
 
-**Not atomic, so write idempotently.** Every row is checked (columns, IRIs,
-operation, timestamp, and a cap of :data:`MAX_ROWS`) *before* any is applied, but
-the rows are then applied one at a time. If one fails after others have been
-applied the firing is recorded as ``partial``, so the focus is not blindly
-applied again, and the detail says how far it got. A query whose rows are
-``Set`` operations can simply be re-run; one that uses ``Insert`` should be
-written knowing a retry will add again.
+**All rows or none.** Every row is checked (columns, IRIs, operation, timestamp,
+a cap of :data:`MAX_ROWS`) before anything is applied, and the rows are then
+applied as one transaction (:mod:`holonbridge.fluent_transaction`): if any row
+cannot be applied, or a concurrent writer changed one of the fluents first,
+nothing is written and the firing is a ``failed`` one, tried again on the next
+evaluation. There is no ``partial`` outcome and an ``Insert`` is never half
+applied. The price is that the rows of one firing share one valid time (give
+every row the same ``?assertedAt``, or none), may not name the same fluent twice,
+and are capped at the transaction limit.
 
 **No cascade within one evaluation.** The updates run inside the trigger
 evaluation, so the post-write hook does not evaluate state triggers for them
@@ -59,7 +61,8 @@ from typing import TYPE_CHECKING, Any
 
 from .conn import Conn
 from .delegation import DelegationError, safe_iri
-from .fluent import FluentError, Operation, update_fluent
+from .fluent import FluentError, Operation
+from .fluent_transaction import MAX_OPS, FluentOp, update_fluents
 from .fuseki import FusekiClient, FusekiError
 from .named_queries import NamedQuery
 from .sequence import SequenceError
@@ -75,9 +78,9 @@ from .trigger_authz import (
 if TYPE_CHECKING:  # pragma: no cover
     from .triggers import Trigger
 
-#: Most rows one firing may apply. A runaway query should fail loudly, not
-#: write thousands of ledger entries.
-MAX_ROWS = 50
+#: Most rows one firing may apply: the most one transaction takes. A runaway
+#: query should fail loudly, not write thousands of ledger entries.
+MAX_ROWS = MAX_OPS
 
 _XSD = "http://www.w3.org/2001/XMLSchema#"
 _INTEGERS = {f"{_XSD}{n}" for n in ("integer", "int", "long", "short", "byte", "nonNegativeInteger",
@@ -105,16 +108,11 @@ class FluentRow:
 
 @dataclass(frozen=True)
 class FluentOutcome:
-    """What a firing did: ``applied`` of ``total`` rows. ``failure`` is set when
-    it stopped early."""
+    """What a firing did: ``applied`` of ``total`` rows. The rows are one
+    transaction, so this is all of them or the firing raised."""
 
     applied: int
     total: int
-    failure: str | None = None
-
-    @property
-    def partial(self) -> bool:
-        return self.failure is not None and self.applied > 0
 
 
 def bind_action(query: NamedQuery, focus: str | None) -> str:
@@ -319,10 +317,9 @@ async def fire_fluent(
 ) -> FluentOutcome:
     """Run the action query for ``focus`` and apply its rows as the definer.
 
-    Raises :class:`FluentActionInvalid` before anything is applied if the query
-    or a row is unusable, and when the very first row fails to apply (so the
-    focus fires again on the next evaluation). A failure after at least one row
-    was applied is reported in the returned outcome, not raised.
+    Raises :class:`FluentActionInvalid` if the query or a row is unusable or the
+    transaction cannot be applied; nothing is written then, and the focus fires
+    again on the next evaluation.
     """
     if not trig.armed_by:
         raise FluentActionInvalid(
@@ -342,26 +339,43 @@ async def fire_fluent(
         if governed:
             raise FluentActionInvalid(f"row {number}: {portal_governed_message(row.fluent, governed)}")
 
-    applied = 0
-    for row in rows:
-        try:
-            await update_fluent(
-                client,
-                conn,
-                fluent=row.fluent,
-                operation=row.operation,
-                value=row.value,
-                is_iri=row.is_iri,
-                asserted_by=trig.armed_by,
-                asserted_datetime=row.asserted_at,
-                description=row.description or f"trigger {trig.id}",
+    if not rows:
+        return FluentOutcome(0, 0)
+
+    seen: set[str] = set()
+    for number, row in enumerate(rows, start=1):
+        if row.fluent in seen:
+            raise FluentActionInvalid(
+                f"row {number}: <{row.fluent}> appears in more than one row; the rows of a firing "
+                "are one transaction, which changes each fluent once"
             )
-        except (FluentError, SequenceError, FusekiError) as exc:
-            reason = re.sub(r"\s+", " ", str(exc)).strip()[:300]
-            if applied == 0:
-                raise FluentActionInvalid(f"row 1 of {len(rows)} could not be applied: {reason}") from exc
-            return FluentOutcome(
-                applied, len(rows), failure=f"row {applied + 1} of {len(rows)} could not be applied: {reason}"
-            )
-        applied += 1
-    return FluentOutcome(applied, len(rows))
+        seen.add(row.fluent)
+    times = {row.asserted_at for row in rows}
+    if len(times) > 1:
+        raise FluentActionInvalid(
+            "the rows give different ?assertedAt values; the rows of a firing are one transaction "
+            "with one valid time, so give every row the same ?assertedAt or none"
+        )
+
+    try:
+        await update_fluents(
+            client,
+            conn,
+            ops=[
+                FluentOp(
+                    fluent=row.fluent,
+                    operation=row.operation,
+                    value=row.value,
+                    is_iri=row.is_iri,
+                    description=row.description,
+                )
+                for row in rows
+            ],
+            asserted_by=trig.armed_by,
+            asserted_datetime=times.pop(),
+            description=f"trigger {trig.id}",
+        )
+    except (FluentError, SequenceError, FusekiError) as exc:
+        reason = re.sub(r"\s+", " ", str(exc)).strip()[:300]
+        raise FluentActionInvalid(f"none of the {len(rows)} row(s) was applied: {reason}") from exc
+    return FluentOutcome(len(rows), len(rows))
