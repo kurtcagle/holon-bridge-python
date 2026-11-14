@@ -748,3 +748,36 @@ async def test_status_and_delete_handlers_and_unfreezing_the_property(routes, re
     assert await governing_portals(store, conn, LOC) == []
     listed = await pr.list_portals(conn, store, ANIMUS, portal_status=None)
     assert listed["count"] == 0 and listed["portals"] == []
+
+
+# --- a fluent trigger's rows are one transaction -------------------------------------
+
+
+def _action(rows_sparql: str) -> NamedQuery:
+    return NamedQuery(id="act", iri="urn:q:act", vocabulary="hb", sparql=rows_sparql)
+
+
+async def test_a_fluent_trigger_applies_its_rows_all_or_none():
+    from holonbridge.fluent_trigger_action import FluentActionInvalid, fire_fluent
+
+    conn, store = _world()
+    trig = SimpleNamespace(id="move", armed_by=ALICE)
+
+    good = _action(
+        f"SELECT ?fluent ?value ?operation ?isIri WHERE {{ "
+        f"{{ BIND(<{LOC}> AS ?fluent) BIND(\"{DOVER}\" AS ?value) BIND(\"Set\" AS ?operation) BIND(true AS ?isIri) }} UNION "
+        f"{{ BIND(<{PURSE}> AS ?fluent) BIND(3 AS ?value) BIND(\"Remove\" AS ?operation) BIND(false AS ?isIri) }} }}"
+    )
+    outcome = await fire_fluent(store, conn, trig, ANN, action_query=good)
+    assert (outcome.applied, outcome.total) == (2, 2)
+    assert value_of(store, conn, LOC) == DOVER and Decimal(value_of(store, conn, PURSE)) == 7
+
+    # The second row cannot apply (no operation mode declared), so the first must not either.
+    bad = _action(
+        f"SELECT ?fluent ?value ?operation ?isIri WHERE {{ "
+        f"{{ BIND(<{LOC}> AS ?fluent) BIND(\"{CALAIS}\" AS ?value) BIND(\"Set\" AS ?operation) BIND(true AS ?isIri) }} UNION "
+        f"{{ BIND(<{EX}unmodelled> AS ?fluent) BIND(1 AS ?value) BIND(\"Set\" AS ?operation) BIND(false AS ?isIri) }} }}"
+    )
+    with pytest.raises(FluentActionInvalid, match="none of the 2"):
+        await fire_fluent(store, conn, trig, ANN, action_query=bad)
+    assert value_of(store, conn, LOC) == DOVER  # not moved back

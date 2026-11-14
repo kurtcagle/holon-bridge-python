@@ -2,9 +2,9 @@
 
 Same technique as ``test_trigger_rearm.py``: ``LedgerStub`` models the firing
 ledger in memory, and this module adds a trigger and a pair of named queries to
-it. ``update_fluent`` is replaced by a recorder (its own behaviour is covered by
-``test_fluent_*``), so these tests are about what the trigger asks it to do, who
-it does it as, and what is recorded when it goes wrong.
+it. ``update_fluents`` is replaced by a recorder (its own behaviour is covered by
+``test_fluent_transaction``), so these tests are about what the trigger asks it to
+do, who it does it as, and what is recorded when it goes wrong.
 """
 
 from __future__ import annotations
@@ -100,7 +100,7 @@ class FluentStub(LedgerStub):
 
 
 class Recorder:
-    """Stands in for ``update_fluent``: records each call, can fail on one."""
+    """Stands in for ``update_fluents``: records each transaction, can refuse one."""
 
     def __init__(self) -> None:
         self.calls: list[dict] = []
@@ -125,7 +125,7 @@ def conn() -> Conn:
 @pytest.fixture
 def recorder(monkeypatch) -> Recorder:
     rec = Recorder()
-    monkeypatch.setattr(action_mod, "update_fluent", rec)
+    monkeypatch.setattr(action_mod, "update_fluents", rec)
     monkeypatch.setattr(triggers_mod, "_recheck_cache", {})
     return rec
 
@@ -306,8 +306,9 @@ async def test_a_matching_focus_applies_the_rows_as_the_definer(stub, conn, reco
     assert [f.outcome for f in firings] == ["applied"]
     assert "1 of 1" in firings[0].detail
     (call,) = recorder.calls
-    assert call["fluent"] == CLOCK and call["value"] == 5
-    assert call["operation"] is Operation.SET
+    (op,) = call["ops"]
+    assert op.fluent == CLOCK and op.value == 5
+    assert op.operation is Operation.SET
     assert call["asserted_by"] == DEFINER
     assert call["description"] == "trigger tick"
     assert len(stub.live(TICK)) == 1
@@ -322,17 +323,42 @@ async def test_an_edge_trigger_applies_once_while_the_condition_holds(stub, conn
     assert stub.action_runs == 1
 
 
-async def test_rows_are_applied_in_order_and_carry_their_own_columns(stub, conn, recorder):
+async def test_the_rows_are_one_transaction_and_carry_their_own_columns(stub, conn, recorder):
+    when = "2026-11-13T09:00:00Z"
     stub.action_rows = [
-        fluent_row(fluent=iri(CLOCK), value=typed(1, "integer"), operation="Insert", description="step"),
-        fluent_row(fluent=iri(GATE), value=iri("urn:ds:state:open"), assertedAt="2026-11-13T09:00:00Z"),
+        fluent_row(fluent=iri(CLOCK), value=typed(1, "integer"), operation="Insert", description="step",
+                   assertedAt=when),
+        fluent_row(fluent=iri(GATE), value=iri("urn:ds:state:open"), assertedAt=when),
     ]
     await evaluate_triggers(stub, conn, kind=TRIGGER_STATE)
 
-    first, second = recorder.calls
-    assert (first["fluent"], first["operation"], first["description"]) == (CLOCK, Operation.INSERT, "step")
-    assert second["fluent"] == GATE and second["is_iri"] is True
-    assert second["asserted_datetime"] == datetime(2026, 11, 13, 9, tzinfo=timezone.utc)
+    (call,) = recorder.calls  # one transaction, not one call per row
+    first, second = call["ops"]
+    assert (first.fluent, first.operation, first.description) == (CLOCK, Operation.INSERT, "step")
+    assert second.fluent == GATE and second.is_iri is True
+    assert call["asserted_datetime"] == datetime(2026, 11, 13, 9, tzinfo=timezone.utc)
+
+
+async def test_rows_with_different_valid_times_are_refused(stub, conn, recorder):
+    stub.action_rows = [
+        fluent_row(fluent=iri(CLOCK), value=typed(1, "integer"), assertedAt="2026-11-13T09:00:00Z"),
+        fluent_row(fluent=iri(GATE), value=typed(1, "integer"), assertedAt="2026-11-13T09:05:00Z"),
+    ]
+    firings = only(await evaluate_triggers(stub, conn, kind=TRIGGER_STATE), "tick")
+    assert [f.outcome for f in firings] == ["failed"]
+    assert "different ?assertedAt" in firings[0].detail
+    assert recorder.calls == [] and stub.live(TICK) == []
+
+
+async def test_a_fluent_named_in_two_rows_is_refused(stub, conn, recorder):
+    stub.action_rows = [
+        fluent_row(fluent=iri(CLOCK), value=typed(1, "integer"), operation="Insert"),
+        fluent_row(fluent=iri(CLOCK), value=typed(2, "integer"), operation="Insert"),
+    ]
+    firings = only(await evaluate_triggers(stub, conn, kind=TRIGGER_STATE), "tick")
+    assert [f.outcome for f in firings] == ["failed"]
+    assert "row 2" in firings[0].detail and "more than one row" in firings[0].detail
+    assert recorder.calls == []
 
 
 async def test_a_bad_row_fails_the_firing_before_anything_is_applied(stub, conn, recorder):
@@ -349,34 +375,22 @@ async def test_a_bad_row_fails_the_firing_before_anything_is_applied(stub, conn,
     assert stub.live(TICK) == []
 
 
-async def test_a_first_row_failure_is_a_failed_firing_and_is_retried(stub, conn, recorder):
+async def test_a_failed_transaction_writes_nothing_and_is_retried(stub, conn, recorder):
+    stub.action_rows = [
+        fluent_row(fluent=iri(CLOCK), value=typed(1, "integer"), operation="Insert"),
+        fluent_row(fluent=iri(GATE), value=typed(1, "integer"), operation="Insert"),
+    ]
     recorder.fail_on = 1
     firings = only(await evaluate_triggers(stub, conn, kind=TRIGGER_STATE), "tick")
     assert [f.outcome for f in firings] == ["failed"]
-    assert stub.live(TICK) == []
+    assert "none of the 2 row(s) was applied" in firings[0].detail
+    assert stub.live(TICK) == []  # not recorded, so the focus fires again
 
     recorder.fail_on = None
     retry = only(await evaluate_triggers(stub, conn, kind=TRIGGER_STATE), "tick")
     assert [f.outcome for f in retry] == ["applied"]
-
-
-async def test_a_failure_part_way_is_recorded_as_partial_and_not_retried(stub, conn, recorder):
-    stub.action_rows = [
-        fluent_row(fluent=iri(CLOCK), value=typed(1, "integer"), operation="Insert"),
-        fluent_row(fluent=iri(GATE), value=typed(1, "integer"), operation="Insert"),
-        fluent_row(fluent=iri(GATE), value=typed(1, "integer"), operation="Insert"),
-    ]
-    recorder.fail_on = 2
-    firings = only(await evaluate_triggers(stub, conn, kind=TRIGGER_STATE), "tick")
-
-    assert [f.outcome for f in firings] == ["partial"]
-    assert "1 of 3" in firings[0].detail and "row 2 of 3" in firings[0].detail
-    assert len(recorder.calls) == 2  # the third row was never attempted
-    assert len(stub.live(TICK)) == 1
-
-    again = only(await evaluate_triggers(stub, conn, kind=TRIGGER_STATE), "tick")
-    assert again == []
-    assert len(recorder.calls) == 2  # an Insert is not applied twice
+    assert "2 of 2" in retry[0].detail
+    assert len(recorder.calls) == 2  # the failed attempt and the retry, each a whole transaction
 
 
 async def test_an_empty_result_records_a_firing_that_did_nothing(stub, conn, recorder):

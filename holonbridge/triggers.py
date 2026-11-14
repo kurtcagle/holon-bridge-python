@@ -1415,17 +1415,14 @@ async def _evaluate(
                         log.warning("trigger %s could not apply fluent updates for <%s>: %s", trig.id, focus, exc)
                         firings.append(TriggerFiring(trig.id, focus, "failed", detail=str(exc)))
                         continue
-                    # Recorded even when partial: some rows are already
-                    # applied, and applying them again on the next evaluation
-                    # could double an Insert.
-                    kind_word = "partial" if outcome.partial else "applied"
+                    # The rows were one transaction, so there is no half-applied
+                    # state to guard against: it either landed or it raised above.
+                    kind_word = "applied"
                     await _record_firing(
                         client, conn, log_graph=log_graph, trigger=trig, focus=focus,
                         outcome=kind_word, candidate_iri=None,
                     )
                     detail = f"{outcome.applied} of {outcome.total} fluent update(s) applied"
-                    if outcome.failure:
-                        detail += f"; stopped: {outcome.failure}"
                     firings.append(TriggerFiring(trig.id, focus, kind_word, detail=detail))
                 elif trig.review_required:
                     # A re-armed focus may still have the proposal from its

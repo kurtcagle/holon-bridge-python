@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.32
+version: 1.0.33
 created: 2026-09-27
 updated: 2026-11-13
 author:
@@ -45,6 +45,17 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-11-13 (fluent triggers apply their rows all-or-none)
+
+- **The rows of an `on_fire_fluent_query` firing are now one transaction.** They used
+  to be applied one at a time, so a failure part-way left the world half moved and the
+  firing was recorded as `partial`. They now go through `update_fluents`: every row lands
+  or none does, and a firing that cannot be applied is a `failed` one, retried on the
+  next evaluation. The `partial` outcome is gone. Three constraints come with it: the
+  rows of one firing share one valid time (give every row the same `?assertedAt`, or
+  none; differing values are refused), a fluent may appear in only one row, and a
+  firing is capped at 20 rows, down from 50. A portal-governed fluent is still refused.
 
 ### 2026-11-13 (hb:Portal: a door between holons, and multi-fluent transactions)
 
@@ -101,10 +112,9 @@ process:
   because a fluent update cannot wait in the candidate queue (the loader skips a
   fluent trigger that does not say so); a trigger names exactly one of `on_fire`,
   `on_fire_agent` and `on_fire_fluent_query`. Rows are all checked before any is
-  applied, capped at 50 a firing, then applied one at a time, which is not atomic:
-  a failure on the first row is a `failed` firing and is retried, a failure after
-  that is recorded as `partial` and is not retried, so write `Insert` rows knowing
-  that. The updates do not themselves fire state triggers (the existing re-entrancy
+  applied and capped at 20 a firing. (This entry originally described rows applied
+  one at a time with a `partial` outcome; the next entry up replaced that with a
+  single all-or-none transaction.) The updates do not themselves fire state triggers (the existing re-entrancy
   guard), so a chain of arrivals advances one step per evaluation. A fluent trigger is Edge-fired only: `fireMode EveryEvaluation` is refused at
   registration and skipped by the loader, because a repeated `Insert` is almost
   never intended. Evaluating one on demand needs the same three write grants as
@@ -820,6 +830,11 @@ process:
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
 
+hb:release-2026-11-13-i a hb:ReleaseNote ;
+    dcterms:date "2026-11-13"^^xsd:date ;
+    rdfs:label "Fluent triggers apply their rows as one transaction" ;
+    dcterms:description "The rows of an onFireFluentQuery firing used to be applied one at a time through update_fluent, with a partial outcome when a later row failed. They now go through update_fluents, so all rows land or none does and the partial outcome no longer exists; a firing that cannot be applied is failed and retried on the next evaluation. Constraints: one shared valid time per firing (rows with differing assertedAt are refused), each fluent in at most one row, at most 20 rows (was 50). Portal-governed fluents are still refused. Tested against the real transaction code on rdflib and against stubs; not run against a live Fuseki." .
+
 hb:release-2026-11-13-h a hb:ReleaseNote ;
     dcterms:date "2026-11-13"^^xsd:date ;
     rdfs:label "hb:Portal and atomic multi-fluent transactions" ;
@@ -828,7 +843,7 @@ hb:release-2026-11-13-h a hb:ReleaseNote ;
 hb:release-2026-11-13-g a hb:ReleaseNote ;
     dcterms:date "2026-11-13"^^xsd:date ;
     rdfs:label "Triggers can act by updating fluents (onFireFluentQuery)" ;
-    dcterms:description "A new hev:onFireFluentQuery action names a SELECT returning ?fluent and ?value rows (optional ?operation, ?isIri, ?assertedAt, ?description), bound to the focus if it declares a focus parameter, applied through update_fluent as the trigger's definer. Needs reviewRequired=false (enforced at registration, activation and load), read on the condition and action query, and write on the events, scene and sequences graphs, re-checked at firing. Exactly one of onFire, onFireAgent and onFireFluentQuery. Rows are validated first, capped at 50, then applied sequentially and not atomically: a first-row failure is a failed firing and is retried, a later failure is recorded as partial and not retried. No cascade within an evaluation; fireMode EveryEvaluation is refused for these triggers. Tested against stubs with update_fluent replaced by a recorder; not run against a live Fuseki." ;
+    dcterms:description "A new hev:onFireFluentQuery action names a SELECT returning ?fluent and ?value rows (optional ?operation, ?isIri, ?assertedAt, ?description), bound to the focus if it declares a focus parameter, applied through update_fluent as the trigger's definer. Needs reviewRequired=false (enforced at registration, activation and load), read on the condition and action query, and write on the events, scene and sequences graphs, re-checked at firing. Exactly one of onFire, onFireAgent and onFireFluentQuery. Rows are validated first, capped at 50, then applied sequentially and not atomically: a first-row failure is a failed firing and is retried, a later failure is recorded as partial and not retried. No cascade within an evaluation; fireMode EveryEvaluation is refused for these triggers. Tested against stubs with update_fluent replaced by a recorder; not run against a live Fuseki. Superseded in part by hb:release-2026-11-13-i: rows are now applied as one all-or-none transaction, capped at 20, with no partial outcome." ;
     rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/issues/86> .
 
 hb:release-2026-11-13-f a hb:ReleaseNote ;
