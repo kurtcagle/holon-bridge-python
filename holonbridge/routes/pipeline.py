@@ -59,6 +59,14 @@ arbitrary-graph, no auth at all) even though it sat outside the
 ingest/pipeline surface this work was scoped to. Fixed 2026-08-31 — see
 that route's own docstring in `routes/named_rules.py`. `DELETE /graph`
 (`routes/graphs.py`) remains ungated; not touched by that fix.
+
+CHANGED 2026-11-17: `/ingest` of a DataBook (inline, or fetched and detected as
+one) now leaves a receipt: an `hb:Packet` node in the dataset's `inbox` graph,
+written after the payload has landed, followed by the post-write hook so a named
+trigger can dispatch on it. See `holonbridge/packet.py` and
+`docs/architecture/packet-ingestion.databook.md`. A raw `turtle` payload or a
+`source_graph` has no header and so no packet. Nothing else about `/ingest`
+changes: same ACL, same SHACL gate, same write lock, same optional `pipeline`.
 """
 
 from __future__ import annotations
@@ -85,6 +93,7 @@ from ..messages import (
     mark_completed,
     mark_running,
 )
+from ..packet import Packet, record_packet
 from ..pipeline import (
     BUILD,
     PipelineError,
@@ -529,8 +538,9 @@ def _looks_like_databook(content: str, content_type: str) -> bool:
     return content.lstrip().startswith("---") or "markdown" in content_type.lower()
 
 
-def _extract_databook(text: str, graph_iri: str | None) -> tuple[str, str | None]:
-    """Parse a DataBook and return its primary RDF block plus a target graph.
+def _extract_databook(text: str, graph_iri: str | None) -> tuple[str, str | None, DataBook]:
+    """Parse a DataBook and return its primary RDF block, a target graph, and
+    the parsed document (its header is what becomes the packet's claims).
 
     An explicit ``graph_iri`` always wins over what the DataBook's own
     frontmatter declares — the caller's instruction is more specific than
@@ -538,7 +548,14 @@ def _extract_databook(text: str, graph_iri: str | None) -> tuple[str, str | None
     """
     db = DataBook.parse(text)
     turtle = db.primary_graph_block().body
-    return turtle, graph_iri or db.named_graph
+    return turtle, graph_iri or db.named_graph, db
+
+
+def _with_packet(payload: dict[str, Any], packet: Packet | None) -> dict[str, Any]:
+    """Add the packet receipt to an ingest response, when there is one."""
+    if packet is not None:
+        payload["packet"] = packet.as_dict()
+    return payload
 
 
 class IngestRequest(BaseModel):
@@ -611,6 +628,13 @@ async def ingest(
     those two shapes — a DataBook that already declares where it belongs
     shouldn't require the caller to repeat that. An explicit `graph_iri`
     always wins over what the DataBook declares.
+
+    CHANGED 2026-11-17: a DataBook source also leaves an ``hb:Packet`` receipt in
+    the ``inbox`` graph once its payload has landed, and the response carries
+    it under ``packet``. The receipt records what the document *claims* (id,
+    type, profiles) next to what the bridge *observed* (sender, time, payload
+    hash, landing graph); a named trigger can dispatch on it. See
+    ``holonbridge.packet``.
     """
     sources = (body.turtle, body.databook, body.source_graph, body.source_url)
     if sum(bool(s) for s in sources) != 1:
@@ -632,6 +656,8 @@ async def ingest(
     message.stages.append(landing)
 
     graph_iri = body.graph_iri
+    databook: DataBook | None = None
+    packet: Packet | None = None
 
     try:
         turtle = body.turtle
@@ -642,7 +668,7 @@ async def ingest(
                 raise PipelineError(f"<{body.source_graph}> is empty or absent")
 
         elif body.databook:
-            turtle, graph_iri = _extract_databook(body.databook, graph_iri)
+            turtle, graph_iri, databook = _extract_databook(body.databook, graph_iri)
 
         elif body.source_url:
             fetch_stage = StageRecord(name="fetch", transformer="source_url", order=0)
@@ -658,7 +684,7 @@ async def ingest(
             fetch_stage.detail = f"{len(content)} bytes, {content_type or 'no content-type'}"
 
             if _looks_like_databook(content, content_type):
-                turtle, graph_iri = _extract_databook(content, graph_iri)
+                turtle, graph_iri, databook = _extract_databook(content, graph_iri)
             else:
                 turtle = content
 
@@ -701,6 +727,37 @@ async def ingest(
         landing.status = "Completed"
         landing.detail = f"{body.mode} into <{graph_iri}>"
 
+        if databook is not None:
+            # The payload is in. Record the receipt now, so a handler that
+            # fires on it finds the payload where the packet says it is.
+            packet_stage = StageRecord(name="packet", transformer="inbox", order=landing.order + 1)
+            message.stages.append(packet_stage)
+            try:
+                packet = await record_packet(
+                    client=client,
+                    conn=conn,
+                    frontmatter=databook.frontmatter,
+                    payload=turtle,
+                    payload_graph=graph_iri,
+                    packet_id=message.id,
+                    received_from=animus.person,
+                )
+            except FusekiError as exc:
+                # Not the outer ``ingest_failed``: the landing succeeded, and
+                # saying otherwise would send a caller to re-send a payload
+                # that is already there.
+                packet_stage.status = "Failed"
+                packet_stage.detail = str(exc)
+                error = f"payload landed in <{graph_iri}> but its packet record was not written: {exc}"
+                mark_completed(message, failed=True, error=error)
+                await store.save(conn, message)
+                raise HTTPException(
+                    status.HTTP_502_BAD_GATEWAY,
+                    detail={"error": "packet_record_failed", "messageId": message.id, "message": error},
+                ) from exc
+            packet_stage.status = "Completed"
+            packet_stage.detail = f"{packet.status} <{packet.iri}>"
+
     except HTTPException:
         raise
     except (PipelineError, FusekiError, SourceFetchError, ValueError) as exc:
@@ -716,7 +773,7 @@ async def ingest(
     if not body.pipeline:
         mark_completed(message)
         await store.save(conn, message)
-        return message.as_dict()
+        return _with_packet(message.as_dict(), packet)
 
     manifest = await load_manifest(client, conn, body.pipeline)
     if not manifest.nodes:
@@ -731,12 +788,14 @@ async def ingest(
 
     if body.wait:
         await _execute(conn, client, manifest, message, body.params, True, animus.person)
-        return message.as_dict()
+        return _with_packet(message.as_dict(), packet)
 
     _spawn(
         request, _execute(conn, client, manifest, message, body.params, True, animus.person)
     )
-    return {"messageId": message.id, "status": message.status, "pipeline": body.pipeline}
+    return _with_packet(
+        {"messageId": message.id, "status": message.status, "pipeline": body.pipeline}, packet
+    )
 
 
 # --- messages -----------------------------------------------------------------
