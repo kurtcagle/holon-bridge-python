@@ -37,6 +37,10 @@ explanation. ``POST /sequence/mint`` has always mapped the same error to a 409.
 This route now does too, with the same ``error``/``message`` body the other
 fluent refusals use. Nothing of the transition was written (an attempt that
 loses writes neither half of it), so the caller can simply retry.
+
+CHANGED 2026-11-17: both update routes also refuse a fluent whose holder is
+Inactive or Tombstoned (409 ``holon_inactive``), and a holon's lifecycle fluent
+itself (409 ``lifecycle_governed``). See :mod:`holonbridge.lifecycle`.
 """
 
 from __future__ import annotations
@@ -55,6 +59,7 @@ from ..deps import AnimusDep, ClientDep, ConnDep, SettingsDep
 from ..fluent import FluentError, FluentUpdateResult, Operation, TypedValue, prior_value, update_fluent
 from ..fluent_transaction import MAX_OPS, FluentOp, update_fluents
 from ..fuseki import FusekiError
+from ..lifecycle import write_block
 from ..portal import governing_portals, portal_governed_message
 from ..sequence import SequenceError
 
@@ -175,6 +180,9 @@ async def update(
                 "portals": governed,
             },
         )
+    blocked = await write_block(client, conn, fluent)
+    if blocked:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=blocked.detail())
 
     try:
         result = await update_fluent(
@@ -290,6 +298,9 @@ async def update_many(
                     "portals": governed,
                 },
             )
+        blocked = await write_block(client, conn, op.fluent)
+        if blocked:
+            raise HTTPException(status.HTTP_409_CONFLICT, detail=blocked.detail())
 
     try:
         result = await update_fluents(

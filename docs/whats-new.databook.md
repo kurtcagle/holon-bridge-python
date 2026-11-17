@@ -2,9 +2,9 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.33
+version: 1.0.34
 created: 2026-09-27
-updated: 2026-11-13
+updated: 2026-11-17
 author:
   - name: Kurt Cagle
     iri: https://holongraph.com/people/kurt-cagle
@@ -45,6 +45,23 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-11-17 (holon lifecycle: Active, Inactive, Tombstoned)
+
+- **A holon can now be deactivated, tombstoned and brought back.** `POST /holon/lifecycle`
+  (`set_holon_lifecycle` in MCP) moves a holon between `Active`, `Inactive` and `Tombstoned`;
+  `GET /holon/lifecycle` (`get_holon_lifecycle`) reads the state. The state is a fluent
+  (`hb:lifecycleStatus`, set-value), so every change is on the ledger with its valid time and
+  reason. Any state may move to any other; a holon with no lifecycle fluent is Active. An
+  Inactive or Tombstoned holon can be read but its fluents refuse changes (409
+  `holon_inactive`) on `/fluent/update`, `/fluent/update-many`, a trigger's fluent action and a
+  portal crossing; the lifecycle fluent itself can only be changed through the lifecycle route
+  (409 `lifecycle_governed` elsewhere). A Tombstoned holon is left out of neighbour discovery
+  unless `include_tombstoned` is set, and `get_holon` reports a `lifecycle` block. This is a
+  fluent-level freeze only: `/ingest`, `POST /holon`, named-rule writes and raw SPARQL Update can
+  still change an Inactive holon's structural triples, and succession (opening a successor
+  seeded from the final fluent values) is not built. See
+  `docs/architecture/holon-lifecycle.databook.md`.
 
 ### 2026-11-13 (fluent triggers apply their rows all-or-none)
 
@@ -829,6 +846,11 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-11-17-a a hb:ReleaseNote ;
+    dcterms:date "2026-11-17"^^xsd:date ;
+    rdfs:label "Holon lifecycle: Active, Inactive and Tombstoned" ;
+    dcterms:description "POST /holon/lifecycle and GET /holon/lifecycle (set_holon_lifecycle, get_holon_lifecycle) move a holon between Active, Inactive and Tombstoned, recorded as a SetValueMode fluent on the hb:lifecycleStatus property with a ledger entry, valid time and optional reason. Any state may move to any other and no fluent means Active. A shared write_block guard makes /fluent/update, update-many, trigger fluent actions and portal crossings refuse fluents of an Inactive or Tombstoned holder (409 holon_inactive) and any write to the lifecycle fluent (409 lifecycle_governed); it fails closed. Neighbour traversal hides Tombstoned holons unless include_tombstoned is set, and get_holon reports a lifecycle block (current state, even on as-of reads). The write needs the fluent-update grants plus the holons graph, and the ontology graph the first time. Not built: structural freeze on ingest paths, trigger-driven deactivation, succession. Vocabulary is in hb: pending HCG ratification. Tested on rdflib; not run against a live Fuseki." .
 
 hb:release-2026-11-13-i a hb:ReleaseNote ;
     dcterms:date "2026-11-13"^^xsd:date ;

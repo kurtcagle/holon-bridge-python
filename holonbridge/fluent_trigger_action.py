@@ -332,12 +332,18 @@ async def fire_fluent(
 
     # A traveller's position changes only by crossing a portal (holonbridge/portal.py).
     # Checked for every row before any is applied, like the rest of the validation.
+    from .lifecycle import write_block  # noqa: PLC0415
     from .portal import governing_portals, portal_governed_message  # noqa: PLC0415
 
     for number, row in enumerate(rows, start=1):
         governed = await governing_portals(client, conn, row.fluent)
         if governed:
             raise FluentActionInvalid(f"row {number}: {portal_governed_message(row.fluent, governed)}")
+        # An inactive holon's fluents do not change, and a holon's lifecycle state changes
+        # only through POST /holon/lifecycle (holonbridge/lifecycle.py).
+        blocked = await write_block(client, conn, row.fluent)
+        if blocked:
+            raise FluentActionInvalid(f"row {number}: {blocked.message}")
 
     if not rows:
         return FluentOutcome(0, 0)
