@@ -67,7 +67,7 @@ process:
 - Raw Turtle and graph-to-graph ingests have no header and are unchanged. The response gains
   a `packet` object and the ingest message a `packet` stage. Three existing ingest tests that
   read the last push now filter out the inbox write. Design note for the HCG messaging team:
-  `docs/architecture/packet-ingestion.databook.md`. [PR](https://github.com/kurtcagle/holon-bridge-python/pulls)
+  `docs/architecture/packet-ingestion.databook.md`. [PR #103](https://github.com/kurtcagle/holon-bridge-python/pull/103)
 
 ### 2026-11-13 (fluent triggers apply their rows all-or-none)
 
@@ -857,7 +857,7 @@ hb:release-2026-11-17-a a hb:ReleaseNote ;
     dcterms:date "2026-11-17"^^xsd:date ;
     rdfs:label "An ingested DataBook leaves a receipt in a new inbox graph that triggers can dispatch on" ;
     dcterms:description "/ingest of a DataBook (inline, or fetched and detected as one) now writes an hb:Packet node to urn:{dataset}:inbox after the payload lands, then calls the post-write hook. Observed facts (hb:receivedFrom, hb:receivedAt, hb:payloadHash, hb:payloadGraph) are kept apart from the document's claims (hb:declaredId, hb:declaredType, hb:declaresProfile); the header never names a handler, a trigger bound to the claimed profile does. A header with an inline JSON-LD @context is lifted into a per-packet graph (urn:{dataset}:inbox:{id}:header) and never into inbox, so a header cannot forge a receipt; a failed lift is recorded and does not fail the ingest. Same declared id and payload hash twice is recorded as Duplicate and not dispatched. New graph role inbox (not a system graph, or the hook would skip it). Raw Turtle and graph-to-graph ingests are unchanged. Tested against stubs and an rdflib dataset, not Jena." ;
-    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pulls> .
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/103> .
 
 hb:release-2026-11-13-i a hb:ReleaseNote ;
     dcterms:date "2026-11-13"^^xsd:date ;
