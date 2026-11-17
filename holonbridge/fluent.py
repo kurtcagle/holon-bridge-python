@@ -160,6 +160,7 @@ from enum import Enum
 from typing import Any, Literal
 
 from . import sequence
+from . import fluree_shacl
 from . import shacl as shacl_mod
 from .conn import Conn
 from .fuseki import FusekiClient
@@ -459,10 +460,20 @@ async def _precommit_check_many(
     )
     trial_scene = scene_update.replace(f"<{scene_graph}>", f"<{scratch_scene}>")
 
+    readonly = fluree_shacl.is_fluree(conn)
+    mem = None
     try:
-        await client.update(conn, f"COPY SILENT GRAPH <{events_graph}> TO <{scratch_events}>")
-        await client.update(conn, f"COPY SILENT GRAPH <{scene_graph}> TO <{scratch_scene}>")
-        await client.update(conn, f"{_PREFIXES}\n{trial_ledger}\n;\n{trial_scene}")
+        if readonly:
+            # Fluree: no SHACL endpoint and every scratch write is a commit, so
+            # the candidate transition is applied to in-memory copies instead.
+            mem = await _readonly_candidate(
+                client, conn, events_graph, scene_graph, scratch_events, scratch_scene,
+                f"{_PREFIXES}\n{trial_ledger}\n;\n{trial_scene}",
+            )
+        else:
+            await client.update(conn, f"COPY SILENT GRAPH <{events_graph}> TO <{scratch_events}>")
+            await client.update(conn, f"COPY SILENT GRAPH <{scene_graph}> TO <{scratch_scene}>")
+            await client.update(conn, f"{_PREFIXES}\n{trial_ledger}\n;\n{trial_scene}")
 
         if len(fluents) == 1:
             scope_query = f"""{_PREFIXES}
@@ -486,7 +497,7 @@ WHERE {{
     FILTER NOT EXISTS {{ ?later hevt:supersedes ?assertion }}
   }}
 }}"""
-        scoped_turtle = await client.construct(conn, scope_query)
+        scoped_turtle = _mem_construct(mem, scope_query) if readonly else await client.construct(conn, scope_query)
         if not scoped_turtle.strip() or not _has_triples(scoped_turtle):
             # The candidate did not fire on the scratch copy, so there is
             # nothing to validate. Passing it through would be fail-open, and
@@ -511,31 +522,54 @@ WHERE {{
         extra_turtles: list[str] = []
         if gate_scope == GATE_SCOPE_HOLDER:
             for each in fluents:
+                hq = _holder_scope_query(conn, fluent=each, scratch_scene=scratch_scene)
                 extra_turtles.append(
-                    await client.construct(
-                        conn,
-                        _holder_scope_query(conn, fluent=each, scratch_scene=scratch_scene),
-                    )
+                    _mem_construct(mem, hq) if readonly else await client.construct(conn, hq)
                 )
 
-        validate_scratch = f"urn:{conn.dataset}:scratch:fluent-validate-{token}"
-        try:
-            await client.post_graph(conn, validate_scratch, scoped_turtle)
-            for extra_turtle in extra_turtles:
-                if extra_turtle.strip() and _has_triples(extra_turtle):
-                    # A separate POST each, not concatenated Turtle: the
-                    # documents' blank nodes must stay distinct.
-                    await client.post_graph(conn, validate_scratch, extra_turtle)
-            report_turtle = await client.shacl_validate(
-                conn, target_graph=validate_scratch, shapes_turtle=shapes_turtle
+        if readonly:
+            merged = fluree_shacl.merge_documents(
+                "", scoped_turtle, [t for t in extra_turtles if t.strip() and _has_triples(t)]
             )
-        finally:
-            await client.drop_graph(conn, validate_scratch)
+            report_turtle = await fluree_shacl.run_validate(merged, shapes_turtle)
+        else:
+            validate_scratch = f"urn:{conn.dataset}:scratch:fluent-validate-{token}"
+            try:
+                await client.post_graph(conn, validate_scratch, scoped_turtle)
+                for extra_turtle in extra_turtles:
+                    if extra_turtle.strip() and _has_triples(extra_turtle):
+                        # A separate POST each, not concatenated Turtle: the
+                        # documents' blank nodes must stay distinct.
+                        await client.post_graph(conn, validate_scratch, extra_turtle)
+                report_turtle = await client.shacl_validate(
+                    conn, target_graph=validate_scratch, shapes_turtle=shapes_turtle
+                )
+            finally:
+                await client.drop_graph(conn, validate_scratch)
 
         return shacl_mod.parse_report(report_turtle)
     finally:
-        await client.drop_graph(conn, scratch_events)
-        await client.drop_graph(conn, scratch_scene)
+        if not readonly:
+            await client.drop_graph(conn, scratch_events)
+            await client.drop_graph(conn, scratch_scene)
+
+
+async def _readonly_candidate(client, conn, events_graph, scene_graph, scratch_events, scratch_scene, update):
+    """In-memory Dataset holding copies of the two live graphs (read with GET only)
+    under the scratch IRIs, with the candidate transition applied to them."""
+    from rdflib import Dataset, URIRef  # noqa: PLC0415
+
+    ds = Dataset()
+    for live, scratch in ((events_graph, scratch_events), (scene_graph, scratch_scene)):
+        ttl = await client.get_graph(conn, live)
+        if ttl.strip():
+            ds.graph(URIRef(scratch)).parse(data=ttl, format="turtle")
+    ds.update(update)
+    return ds
+
+
+def _mem_construct(ds, query: str) -> str:
+    return ds.query(query).serialize(format="turtle")
 
 
 def _where(scene_graph: str, guard_clause: str) -> str:
