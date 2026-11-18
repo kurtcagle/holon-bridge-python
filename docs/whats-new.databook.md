@@ -53,8 +53,8 @@ process:
   `write_turtle_to_graph`, so it covers `/holon`, `/graph/push`, `/ingest`, `/message/create`
   and trigger rule writes, and in `/sparql/update` for the subjects the update names outright.
   It also refuses any write that uses `hb:lifecycleStatus` or names a lifecycle fluent
-  (`lifecycle_governed`), a `replace` of a graph that holds such subjects or any lifecycle state,
-  and a payload it cannot read (RDF 1.2) while any holon is inactive. This is not a seal: a
+  (`lifecycle_governed`), a `replace` of a graph that holds such subjects or any lifecycle state
+  unless the payload carries every protected triple over unchanged, and a payload it cannot read (RDF 1.2) while any holon is inactive. This is not a seal: a
   SPARQL update whose subjects come from its WHERE clause, whole-graph operations, named-rule
   writes and `/graph-op` are not checked. See `docs/architecture/holon-lifecycle.databook.md`.
 
