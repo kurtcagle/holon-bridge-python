@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.34
+version: 1.0.35
 created: 2026-09-27
 updated: 2026-11-17
 author:
@@ -45,6 +45,18 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-11-17 (an inactive holon can no longer be rewritten through the ingest paths)
+
+- **A Turtle write or a SPARQL update that names an Inactive or Tombstoned holon, or one of
+  its fluents, as a subject is refused with a 409.** The check sits in
+  `write_turtle_to_graph`, so it covers `/holon`, `/graph/push`, `/ingest`, `/message/create`
+  and trigger rule writes, and in `/sparql/update` for the subjects the update names outright.
+  It also refuses any write that uses `hb:lifecycleStatus` or names a lifecycle fluent
+  (`lifecycle_governed`), a `replace` of a graph that holds such subjects or any lifecycle state
+  unless the payload carries every protected triple over unchanged, and a payload it cannot read (RDF 1.2) while any holon is inactive. This is not a seal: a
+  SPARQL update whose subjects come from its WHERE clause, whole-graph operations, named-rule
+  writes and `/graph-op` are not checked. See `docs/architecture/holon-lifecycle.databook.md`.
 
 ### 2026-11-17 (holon lifecycle: Active, Inactive, Tombstoned)
 
@@ -846,6 +858,11 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-11-17-b a hb:ReleaseNote ;
+    dcterms:date "2026-11-17"^^xsd:date ;
+    rdfs:label "Structural freeze: ingest paths refuse inactive holons" ;
+    dcterms:description "structural_freeze.structural_block runs in write_turtle_to_graph (/holon, /graph/push, /ingest, /message/create, trigger rule writes) and in /sparql/update. It returns 409 holon_inactive when the write has an Inactive or Tombstoned holon, or a fluent of one, as a subject; 409 lifecycle_governed for any use of hb:lifecycleStatus or a lifecycle fluent subject; holon_inactive of kind replace when a replace would rewrite a graph holding such subjects or any lifecycle state, unless the payload carries every protected triple over verbatim and adds none; and holon_inactive of kind unreadable for an RDF 1.2 payload while any holon is inactive. Subjects are read with turtle_subjects and update_subjects; only subjects a SPARQL update names outright are checked. Not covered: updates whose subjects come from a WHERE clause, CLEAR/DROP/LOAD/COPY/MOVE/ADD, named-rule writes, /graph-op. Fuseki errors during the check refuse the write. Tested on rdflib; not run against a live Fuseki." .
 
 hb:release-2026-11-17-a a hb:ReleaseNote ;
     dcterms:date "2026-11-17"^^xsd:date ;

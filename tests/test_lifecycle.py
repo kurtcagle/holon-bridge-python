@@ -55,6 +55,10 @@ class Store(GatedStore):
     """GatedStore plus ASK: the production client returns ``{"boolean": ...}`` for an
     ASK query through the same ``select`` call, which the base stand-in does not model."""
 
+    async def put_graph(self, conn, graph_iri: str, turtle: str) -> None:
+        self.ds.update(f"DROP SILENT GRAPH <{graph_iri}>")
+        await self.post_graph(conn, graph_iri, turtle)
+
     async def select(self, conn, query: str) -> dict:
         result = self.ds.query(query)
         if result.type == "ASK":
@@ -73,7 +77,7 @@ def _no_triggers(monkeypatch):
 
 
 def _add(g, s, p, o):
-    g.add((URIRef(s), URIRef(p), o if not isinstance(o, str) else URIRef(o)))
+    g.add((URIRef(s), URIRef(p), o if isinstance(o, (Literal, URIRef)) else URIRef(o)))
 
 
 def _world():

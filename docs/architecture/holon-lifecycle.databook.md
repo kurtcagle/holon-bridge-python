@@ -2,13 +2,13 @@
 id: https://w3id.org/databook/holon-lifecycle
 title: "Holon Lifecycle: Active, Inactive and Tombstoned"
 type: databook
-version: 0.2.0
+version: 0.3.0
 created: 2026-11-17
 description: >
   How a holon is deactivated, reactivated and tombstoned in holon-bridge-python: the
   three states, the decisions that shaped them, what the first implementation
   (fluent-level freeze, discovery filter) does and does not guarantee, and what is
-  left for structural freeze and succession. Vocabulary is in the hb: namespace
+  left for succession. Vocabulary is in the hb: namespace
   pending HCG ratification.
 subject:
   - holon lifecycle
@@ -125,7 +125,7 @@ The write needs the same grants as a fluent update on the events, scene and sequ
 
 This is the part to read before relying on it.
 
-- **Fluent-level freeze only.** `/ingest`, `POST /holon`, named-rule writes and raw SPARQL Update can still change an Inactive holon's structural triples. Phase 2 guards the ingest paths; arbitrary SPARQL Update stays an access-control matter.
+- **The structural freeze is not a seal.** Phase 2 (below) guards Turtle writes and the subjects a SPARQL update names outright. A SPARQL update whose subjects come from its WHERE clause, a whole-graph operation (CLEAR, DROP, LOAD, COPY, MOVE, ADD), named-rule writes and `/graph-op` are not checked; they stay an access-control matter.
 - **Discovery filtering is built into neighbour traversal only.** An arbitrary SPARQL query will still return Tombstoned holons. `tombstoned_filter` is the pattern to add to a query that should hide them.
 - **As-of reads show current lifecycle state**, not the state at `observed_at`; the frontmatter says so.
 - **No trigger action** that changes lifecycle yet.
@@ -134,8 +134,21 @@ This is the part to read before relying on it.
 
 ## Next phases
 
-### Phase 2: structural freeze
-A guard on the ingest paths comparing the payload's subjects with the Inactive set.
+### Phase 2: structural freeze (built)
+
+`structural_freeze.structural_block` runs on every Turtle write (`/holon`, `/graph/push`, `/ingest`, `/message/create`, trigger rule writes, all through `write_turtle_to_graph`) and on `/sparql/update`. It refuses with a 409 when:
+
+| The write | Refused as |
+|---|---|
+| has an Inactive or Tombstoned holon as a subject | `holon_inactive` |
+| has a fluent of such a holon as a subject (this closes the route round to the scene graph) | `holon_inactive` |
+| uses `hb:lifecycleStatus` as a predicate, or has a lifecycle fluent as a subject | `lifecycle_governed` |
+| replaces a graph that holds any of the above, or any lifecycle state, **unless** the payload carries every such triple over verbatim and adds none | `holon_inactive`, kind `replace` |
+| cannot be read (RDF 1.2) while any holon is Inactive or Tombstoned | `holon_inactive`, kind `unreadable` |
+
+An unreadable payload is allowed in a dataset where every holon is Active, so RDF 1.2 writes are not penalised. A replace of a graph holding lifecycle state is allowed only if its payload re-asserts every protected triple exactly (all triples of an inactive holon, its fluents and the lifecycle fluents, plus every `hb:lifecycleStatus` link) and adds none about them. Anything else is refused. A protected triple with a blank node cannot be compared, so such a replace is refused too. Dumping the graph, editing other holons and replacing is therefore fine. Fuseki errors during the check refuse the write rather than let it through.
+
+The check runs after the access-control decision and before the write lock. `POST /holon/lifecycle` writes its own fluent directly, so the freeze does not stand in its way.
 
 ### Phase 3: succession
 One transition that deactivates A, creates B, seeds B's fluents from A's final values (each new assertion carrying `prov:wasDerivedFrom` to A's), links predecessor and successor, and re-registers referenced entities, in a single request. This extends `fluent_transaction` to the holons graph. It needs list-mode fluents to work in as-of reads, portal resolution through the successor, and a rule that a holon with a successor refuses reactivation. One dataset only; cross-dataset succession would need a saga.
@@ -154,5 +167,6 @@ A new trigger action kind, so a process (for instance one minimising energy) can
 
 - `holonbridge/lifecycle.py`: states, `set_state`, `write_block`, `tombstoned_filter`.
 - `holonbridge/routes/lifecycle.py`: the two routes and their grants.
+- `holonbridge/structural_freeze.py`: the subject guard for Turtle writes and SPARQL updates.
 - `holonbridge/routes/fluent.py`, `fluent_trigger_action.py`, `portal.py`: the guard sites.
-- `tests/test_lifecycle.py`: 37 tests against rdflib's SPARQL engine, not a live Fuseki.
+- `tests/test_lifecycle.py`, `tests/test_structural_freeze.py`: 66 tests against rdflib's SPARQL engine, not a live Fuseki.
