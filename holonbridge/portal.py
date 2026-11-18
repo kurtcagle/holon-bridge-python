@@ -477,6 +477,16 @@ async def traverse(
             )
         effects = len(parsed)
 
+    # A crossing changes the traveller's position and every effect row; none of them
+    # may belong to an inactive holon, and none may be a lifecycle state.
+    from .lifecycle import write_block  # noqa: PLC0415
+
+    for op in ops:
+        blocked = await write_block(client, conn, op.fluent)
+        if blocked:
+            extra = {k: v for k, v in blocked.detail().items() if k not in ("error", "message")}
+            raise PortalError(blocked.error, blocked.message, status=409, extra=extra)
+
     try:
         transaction = await update_fluents(
             client,
