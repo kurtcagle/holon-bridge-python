@@ -51,6 +51,8 @@ from ..acl import analyse_graph_refs, authorize_query, authorize_update
 from ..deps import AnimusDep, ClientDep, ConnDep
 from ..fuseki import JSONLD, FusekiError
 from ..jsonld import JsonLdError, render, settings_for, to_http
+from ..structural_freeze import check_structural
+from ..touched import update_predicates, update_subjects
 from ..trigger_hook import after_write_update
 from ..sparql_kind import classify
 
@@ -195,6 +197,16 @@ async def update(
     digest, size = audit.payload_digest(body.update)
     audit.annotate(payload_hash=digest, payload_bytes=size)
     await _authorize_write(body.update, conn, client, animus)
+    # Only the subjects the update names outright can be checked; one taken from its
+    # WHERE clause, or a whole-graph operation, cannot (see structural_freeze).
+    subjects, _complete = update_subjects(body.update)
+    await check_structural(
+        client,
+        conn,
+        subjects=subjects,
+        predicates=update_predicates(body.update),
+        raw_text=body.update,
+    )
     try:
         await client.update(conn, body.update)
     except FusekiError as exc:

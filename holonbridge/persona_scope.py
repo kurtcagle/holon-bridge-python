@@ -65,6 +65,7 @@ from dataclasses import dataclass
 from typing import Final
 
 from .conn import Conn
+from .lifecycle import tombstoned_filter
 
 #: Graph roles that get persona-scoped. Conn.GRAPH_ROLES has thirteen
 #: roles; only these two are in play here. `events` (the fluent ledger) is
@@ -180,6 +181,7 @@ def build_neighbour_query(
     root: str,
     direction: str,
     include_scene: bool = False,
+    hide_tombstoned: bool = False,
 ) -> str:
     """Role-discovering neighbourhood query (up / down / across), scoped
     across `scope` instead of pinned to conn.holons_graph alone.
@@ -205,6 +207,11 @@ def build_neighbour_query(
     `lib/holon.js`'s `fetchHolonProjection` in the Node reference
     implementation already gets this right with an equivalent UNION.
     `across` now unions both triple shapes to match.
+
+    `hide_tombstoned=True` leaves out neighbours that are Tombstoned holons (see
+    holonbridge/lifecycle.py): discovery skips them, a direct read of one does not.
+    Off by default so existing callers see no change. It reads ground truth, not
+    the persona overlay.
     """
     graphs = scope if include_scene else [g for g in scope if g.role == "holons"]
     values = " ".join(f"<{g.iri}>" for g in graphs)
@@ -229,6 +236,7 @@ WHERE {{
     {pattern}
     OPTIONAL {{ ?neighbour rdfs:label ?label . }}
   }}
+  {tombstoned_filter(conn) if hide_tombstoned else ""}
 }}
 ORDER BY ?predicate ?neighbour"""
 
