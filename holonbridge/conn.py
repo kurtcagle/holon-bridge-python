@@ -125,6 +125,7 @@ GRAPH_ROLES: Final = (
     "agent-calls",
     "pipelines",
     "messages",
+    "inbox",
     "projections",
     "projection-log",
     "sequences",
