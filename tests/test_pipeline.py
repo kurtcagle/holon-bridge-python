@@ -59,6 +59,12 @@ graph:
 """
 
 
+def payload_pushes(stub: "PipelineStub") -> list[tuple[str, str]]:
+    """What the route landed, without the packet receipt a DataBook ingest now
+    also writes to the inbox graph (see ``test_packet.py``)."""
+    return [p for p in stub.pushed if not p[0].startswith("urn:ds:inbox")]
+
+
 def manifest_rows() -> list[dict]:
     """A diamond: source -> two stages -> target."""
     rows: list[dict] = []
@@ -723,7 +729,7 @@ def test_ingest_from_an_inline_databook(client, stub):
     body = client.post("/ingest", json={"databook": DATABOOK_TEXT}, headers=auth()).json()
     assert body["status"] == "Completed"
     assert body["targetGraph"] == "urn:ds:sensor-grid"
-    assert stub.pushed[-1] == ("urn:ds:sensor-grid", "<urn:a> <urn:b> <urn:c> .")
+    assert payload_pushes(stub)[-1] == ("urn:ds:sensor-grid", "<urn:a> <urn:b> <urn:c> .")
 
 
 def test_ingest_databook_explicit_graph_iri_wins(client, stub):
@@ -732,7 +738,7 @@ def test_ingest_databook_explicit_graph_iri_wins(client, stub):
         json={"databook": DATABOOK_TEXT, "graph_iri": "urn:ds:override"},
         headers=auth(),
     )
-    assert stub.pushed[-1][0] == "urn:ds:override"
+    assert payload_pushes(stub)[-1][0] == "urn:ds:override"
 
 
 def test_ingest_databook_without_named_graph_needs_graph_iri(client):
@@ -784,7 +790,7 @@ def test_ingest_from_a_source_url_that_is_a_databook(client, stub, monkeypatch):
     ).json()
 
     assert body["status"] == "Completed"
-    assert stub.pushed[-1][0] == "urn:ds:sensor-grid"
+    assert payload_pushes(stub)[-1][0] == "urn:ds:sensor-grid"
 
 
 def test_ingest_source_url_fetch_failure_is_recorded(client, monkeypatch):
