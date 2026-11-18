@@ -78,7 +78,7 @@ from .acl import Animus, check_replace, check_write
 from .conn import Conn
 from .fuseki import FusekiClient, FusekiError
 from .structural_freeze import check_structural
-from .touched import turtle_predicates, turtle_subjects
+from .touched import turtle_graph, turtle_predicates, turtle_subjects
 from .trigger_hook import after_write
 
 
@@ -149,6 +149,7 @@ async def write_turtle_to_graph(
         raw_text=turtle,
         graph=graph_iri,
         replace=mode == "replace",
+        payload=turtle_graph(turtle) if mode == "replace" else None,
     )
 
     resolved_shapes_graph = shapes_graph

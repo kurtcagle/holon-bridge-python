@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
-from rdflib import Literal, URIRef
+from rdflib import Graph, Literal, URIRef
 from rdflib.namespace import RDFS
 
 pytest.importorskip("pyshacl")
@@ -338,3 +338,84 @@ async def test_a_replace_would_also_drop_lifecycle_state_of_an_active_holon():
     )
     assert block is not None and block.kind == "replace" and block.state is None
     assert "lifecycle state" in block.message
+
+
+# --- a replace that keeps every protected triple ---------------------------------------------------
+
+
+def dump(store, conn, graph: str | None = None):
+    g = store.ds.graph(URIRef(graph or conn.holons_graph))
+    return Graph().parse(data=g.serialize(format="turtle"), format="turtle")
+
+
+def serialise(g) -> str:
+    return g.serialize(format="turtle")
+
+
+async def test_a_replace_that_carries_every_protected_triple_over_is_allowed(allowed):
+    conn, store = _world()
+    await go(store, conn, "Inactive")
+    payload = dump(store, conn)
+    payload.add((URIRef(NEW), RDFS.label, Literal("Newcomer")))
+    payload.add((URIRef(OTHER), RDFS.comment, Literal("edited")))  # an Active holon: free to change
+    await push(store, conn, serialise(payload), mode="replace")
+    after = store.ds.graph(URIRef(conn.holons_graph))
+    assert (URIRef(NEW), RDFS.label, Literal("Newcomer")) in after
+    assert (await lc.read_state(store, conn, TEAM)).state == "Inactive"
+
+
+async def test_a_replace_that_drops_a_protected_triple_is_refused(allowed):
+    conn, store = _world()
+    await go(store, conn, "Inactive")
+    payload = dump(store, conn)
+    payload.remove((URIRef(TEAM), RDFS.label, None))
+    with pytest.raises(HTTPException) as err:
+        await push(store, conn, serialise(payload), mode="replace")
+    assert err.value.status_code == 409 and err.value.detail["kind"] == "replace"
+
+
+async def test_a_replace_that_adds_to_a_frozen_subject_is_refused(allowed):
+    conn, store = _world()
+    await go(store, conn, "Inactive")
+    payload = dump(store, conn)
+    payload.add((URIRef(TEAM), RDFS.comment, Literal("sneaked in")))
+    with pytest.raises(HTTPException) as err:
+        await push(store, conn, serialise(payload), mode="replace")
+    assert err.value.status_code == 409
+    assert (URIRef(TEAM), RDFS.comment, Literal("sneaked in")) not in store.ds.graph(
+        URIRef(conn.holons_graph)
+    )
+
+
+async def test_a_replace_that_changes_a_lifecycle_link_is_refused(allowed):
+    conn, store = _world()
+    await go(store, conn, "Inactive")
+    await go(store, conn, "Active")
+    payload = dump(store, conn)
+    payload.remove((None, URIRef(lc.LIFECYCLE_PROPERTY), None))
+    with pytest.raises(HTTPException) as err:
+        await push(store, conn, serialise(payload), mode="replace")
+    assert err.value.status_code == 409
+
+
+async def test_a_replace_that_keeps_lifecycle_state_of_active_holons_is_allowed(allowed):
+    conn, store = _world()
+    await go(store, conn, "Inactive")
+    await go(store, conn, "Active")
+    payload = dump(store, conn)
+    payload.add((URIRef(NEW), RDFS.label, Literal("Newcomer")))
+    await push(store, conn, serialise(payload), mode="replace")
+    assert await lc.read_state(store, conn, TEAM) is not None
+
+
+async def test_a_preserving_replace_still_checks_subjects_frozen_elsewhere(allowed):
+    conn, store = _world()
+    await go(store, conn, "Inactive")  # TEAM's own triples live in the holons graph
+    other_graph = f"{EX}side-graph"
+    store.ds.graph(URIRef(other_graph)).add((URIRef(OTHER), RDFS.label, Literal("Other")))
+    payload = Graph()
+    payload.add((URIRef(OTHER), RDFS.label, Literal("Other")))
+    payload.add((URIRef(TEAM), RDFS.comment, Literal("from a side graph")))
+    with pytest.raises(HTTPException) as err:
+        await push(store, conn, serialise(payload), graph=other_graph, mode="replace")
+    assert err.value.status_code == 409 and err.value.detail["error"] == "holon_inactive"

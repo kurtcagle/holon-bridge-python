@@ -143,10 +143,10 @@ This is the part to read before relying on it.
 | has an Inactive or Tombstoned holon as a subject | `holon_inactive` |
 | has a fluent of such a holon as a subject (this closes the route round to the scene graph) | `holon_inactive` |
 | uses `hb:lifecycleStatus` as a predicate, or has a lifecycle fluent as a subject | `lifecycle_governed` |
-| replaces a graph that holds any of the above, or any lifecycle state | `holon_inactive`, kind `replace` |
+| replaces a graph that holds any of the above, or any lifecycle state, **unless** the payload carries every such triple over verbatim and adds none | `holon_inactive`, kind `replace` |
 | cannot be read (RDF 1.2) while any holon is Inactive or Tombstoned | `holon_inactive`, kind `unreadable` |
 
-An unreadable payload is allowed in a dataset where every holon is Active, so RDF 1.2 writes are not penalised. A replace of a graph holding lifecycle state is refused even when every holon is Active, because the replace would drop that state; use merge, or write to another graph. Fuseki errors during the check refuse the write rather than let it through.
+An unreadable payload is allowed in a dataset where every holon is Active, so RDF 1.2 writes are not penalised. A replace of a graph holding lifecycle state is allowed only if its payload re-asserts every protected triple exactly (all triples of an inactive holon, its fluents and the lifecycle fluents, plus every `hb:lifecycleStatus` link) and adds none about them. Anything else is refused. A protected triple with a blank node cannot be compared, so such a replace is refused too. Dumping the graph, editing other holons and replacing is therefore fine. Fuseki errors during the check refuse the write rather than let it through.
 
 The check runs after the access-control decision and before the write lock. `POST /holon/lifecycle` writes its own fluent directly, so the freeze does not stand in its way.
 

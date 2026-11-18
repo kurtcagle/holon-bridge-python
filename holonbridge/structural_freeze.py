@@ -40,6 +40,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from fastapi import HTTPException
+from rdflib import Graph, Literal, URIRef
 
 from .conn import Conn
 from .fuseki import FusekiClient
@@ -156,6 +157,55 @@ def _block(rows: list[dict], *, replace: bool = False) -> StructuralBlock | None
     return StructuralBlock("replace" if replace else "inactive", subjects, holders, state)
 
 
+def _term(binding: dict):
+    """A SPARQL JSON binding as an rdflib term, or ``None`` for a blank node (which
+    cannot be compared across a parse and so cannot be proven preserved)."""
+    kind, value = binding["type"], binding["value"]
+    if kind == "uri":
+        return URIRef(value)
+    if kind == "literal" or kind == "typed-literal":
+        lang, datatype = binding.get("xml:lang"), binding.get("datatype")
+        return Literal(value, lang=lang) if lang else Literal(value, datatype=datatype)
+    return None
+
+
+async def _protected_triples(client: FusekiClient, conn: Conn, graph: str):
+    """What a replace of ``graph`` must carry over unchanged: ``(whole, triples)``, or
+    ``None`` if a protected triple has a blank node.
+
+    ``whole`` is the frozen and lifecycle subjects in the graph, all of whose triples
+    are protected; ``triples`` is those plus every ``hb:lifecycleStatus`` link, whose
+    subject may be an Active holon (only that one triple of its is protected).
+    """
+    query = f"""{_PREFIXES}
+SELECT ?s ?p ?o ?whole WHERE {{
+  {{
+    {{ SELECT DISTINCT ?s WHERE {{ GRAPH <{graph}> {{ ?s ?sp ?so . }} {_matcher(conn)} }} }}
+    GRAPH <{graph}> {{ ?s ?p ?o . }}
+    BIND(1 AS ?whole)
+  }} UNION {{
+    GRAPH <{graph}> {{ ?s ?p ?o . FILTER (?p = hb:lifecycleStatus) }}
+  }}
+}}"""
+    rows = (await client.select(conn, query)).get("results", {}).get("bindings", [])
+    whole: set = set()
+    triples: set = set()
+    for row in rows:
+        triple = tuple(_term(row[k]) for k in ("s", "p", "o"))
+        if None in triple:
+            return None
+        triples.add(triple)
+        if "whole" in row:
+            whole.add(triple[0])
+    return whole, triples
+
+
+def _payload_protected(payload: Graph, whole: set) -> set:
+    """The payload's triples that fall under the same protection."""
+    lifecycle = URIRef(LIFECYCLE_PROPERTY)
+    return {(s, p, o) for s, p, o in payload if s in whole or p == lifecycle}
+
+
 async def _any_inactive(client: FusekiClient, conn: Conn) -> bool:
     query = f"""{_PREFIXES}
 ASK {{
@@ -175,35 +225,44 @@ async def structural_block(
     raw_text: str | None = None,
     graph: str | None = None,
     replace: bool = False,
+    payload: Graph | None = None,
 ) -> StructuralBlock | None:
     """``None`` if the write may go ahead, otherwise why not.
 
     ``subjects`` is ``None`` when the payload could not be read. ``predicates`` and
     ``raw_text`` are only used to catch ``hb:lifecycleStatus``. ``graph`` and
-    ``replace`` together mean "this write replaces ``graph``". Errors from Fuseki
-    propagate: failing open would unfreeze every holon exactly when the store
-    cannot be read.
+    ``replace`` together mean "this write replaces ``graph``"; ``payload`` is the
+    parsed Turtle, and lets a replace through when it carries every protected triple
+    of ``graph`` over unchanged and adds none. Errors from Fuseki propagate: failing
+    open would unfreeze every holon exactly when the store cannot be read.
     """
-    if predicates is not None and LIFECYCLE_PROPERTY in set(predicates):
+    kept: set[str] = set()  # frozen subjects a replace has been shown to carry over verbatim
+    preserved = False  # a replace shown to leave every protected triple as it is
+    if replace and graph:
+        scan = await _rows(client, conn, f"GRAPH <{graph}> {{ ?s ?sp ?so . }}")
+        if scan:
+            protected = (
+                await _protected_triples(client, conn, graph)
+                if payload is not None and subjects is not None
+                else None
+            )
+            if protected is None or _payload_protected(payload, protected[0]) != protected[1]:
+                return _block(scan, replace=True)
+            kept = {str(s) for s in protected[0]}
+            preserved = True
+        replace = False  # the graph has been dealt with
+        if kept and subjects is not None:
+            subjects = None if subjects is None else {str(s) for s in subjects} - kept
+
+    if not preserved and predicates is not None and LIFECYCLE_PROPERTY in set(predicates):
         return StructuralBlock("governed")
 
     if subjects is None:
         if raw_text and "lifecycleStatus" in raw_text:
             return StructuralBlock("governed")
-        if replace and graph:
-            hit = _block(
-                await _rows(client, conn, f"GRAPH <{graph}> {{ ?s ?sp ?so . }}"), replace=True
-            )
-            if hit:
-                return hit
         if await _any_inactive(client, conn):
             return StructuralBlock("unreadable")
         return None
-
-    if replace and graph:
-        hit = _block(await _rows(client, conn, f"GRAPH <{graph}> {{ ?s ?sp ?so . }}"), replace=True)
-        if hit:
-            return hit
 
     # An IRI that could not appear inside <...> cannot name a holon either.
     names = sorted(i for i in set(subjects) if not _UNSAFE_IRI.search(i))

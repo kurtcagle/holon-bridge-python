@@ -19,7 +19,7 @@ from rdflib import Graph, URIRef, Variable
 
 from .turtle import looks_like_rdf12
 
-__all__ = ["turtle_predicates", "turtle_subjects", "update_predicates", "update_subjects"]
+__all__ = ["turtle_graph", "turtle_predicates", "turtle_subjects", "update_predicates", "update_subjects"]
 
 
 def turtle_predicates(turtle: str) -> frozenset[str] | None:
@@ -31,6 +31,16 @@ def turtle_predicates(turtle: str) -> frozenset[str] | None:
     except Exception:  # noqa: BLE001 - any failure means "could not tell"
         return None
     return frozenset(str(p) for p in set(graph.predicates()))
+
+
+def turtle_graph(turtle: str) -> Graph | None:
+    """``turtle`` parsed, or ``None`` if it can't be read (same rule as the others)."""
+    if not turtle or looks_like_rdf12(turtle):
+        return None if turtle else Graph()
+    try:
+        return Graph().parse(data=turtle, format="turtle")
+    except Exception:  # noqa: BLE001 - any failure means "could not tell"
+        return None
 
 
 def turtle_subjects(turtle: str) -> frozenset[str] | None:
