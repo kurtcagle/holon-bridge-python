@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.39
+version: 1.0.40
 created: 2026-09-27
 updated: 2026-11-17
 author:
@@ -45,6 +45,21 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-11-17 (focus: which avatar you read as, and where it is)
+
+- **`list_avatars`, `get_focus` and `set_focus` MCP tools, over `GET/POST /focus` and
+  `GET /focus/avatars`.** A focus is an avatar plus an optional time; the place is read from
+  the avatar's own focus fluents, not stored. What can take a focus is declared in the graph
+  (`holon:Avatar`, `holon:FocusProperty`, `holon:focusWithin`, `holon:defaultAvatar`). The
+  avatar is the explicit argument, else the caller's saved one, else the dataset's default,
+  and the bridge refuses rather than guess when there is none or when two defaults are
+  declared. The time is explicit, else saved, else now, read at each call. A saved focus is
+  per person and dataset (`FocusStore`, `HOLONBRIDGE_FOCUS_STATE_FILE`), is resolved before
+  it is saved, writes nothing to any graph and needs no write grant. An Inactive avatar is
+  allowed, a Tombstoned one refused, a succeeded one followed to its successor. Not done:
+  `get_holon` does not follow the focus yet. See
+  `docs/architecture/holon-focus.databook.md`.
 
 ### 2026-11-17 (an ingested DataBook leaves a receipt the graph can react to)
 
@@ -918,6 +933,12 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-11-17-f a hb:ReleaseNote ;
+    dcterms:date "2026-11-17"^^xsd:date ;
+    rdfs:label "Focus: list_avatars, get_focus and set_focus" ;
+    dcterms:description "A focus is an avatar (typed holon:Avatar) plus an optional time; the place is read from the avatar's focus fluents (properties typed holon:FocusProperty, nested by holon:focusWithin), from the scene graph for now and from the ledger, as holon.as_of_query reads it, for a past time. Avatar precedence is explicit, then saved, then the dataset's holon:defaultAvatar; none, or two different defaults, is refused. Saved per person and dataset in FocusStore, written through to a JSON file; setting a focus writes no graph and needs no write grant, and is resolved before it is saved. Inactive avatars allowed, Tombstoned refused, succeeded avatars followed. Tested against rdflib's SPARQL engine, not Jena. Vocabulary is in the holon: namespace and not ratified. get_holon does not follow the focus yet." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pulls> .
 
 hb:release-2026-11-17-e a hb:ReleaseNote ;
     dcterms:date "2026-11-17"^^xsd:date ;

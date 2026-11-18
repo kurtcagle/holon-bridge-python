@@ -21,6 +21,7 @@ from .config import BankStore, Settings, get_settings
 from .store import make_client
 from .cache import RegistryCache
 from .conn import resolve_conn
+from .focus import FocusStore
 from .persona_state import PersonaStore
 from .routes import (
     agents as agent_routes,
@@ -33,6 +34,7 @@ from .routes import (
     dataset_snapshot,
     delegation,
     events,
+    focus,
     fluent,
     graphs,
     holon_routes,
@@ -69,6 +71,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # rather than as MCP-layer module state like the dataset/bank
         # overrides.
         application.state.personas = PersonaStore()
+        # Per-person saved focus (avatar + optional time) -- see focus.py.
+        application.state.focus = FocusStore()
         # Admin act_as impersonation state -- see acting_as.py. Same
         # per-process, held-on-app.state shape as personas above, but
         # deliberately not persisted to disk: a restart should always
@@ -147,6 +151,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(scheduler_routes.router)
     app.include_router(projection.router)
     app.include_router(persona.router)
+    app.include_router(focus.router)
     app.include_router(whoami.router)
     return app
 

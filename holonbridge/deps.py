@@ -64,6 +64,7 @@ from .conn import DATASET_OVERRIDE_HEADER, Conn, resolve_conn
 from .cache import RegistryCache
 from .claim import claimant as claim_eligibility, is_unclaimed
 from .store import Store
+from .focus import FocusStore
 from .persona_state import PersonaStore
 
 ANIMUS_ID_HEADER = "x-holon-animus-id"
@@ -89,6 +90,10 @@ def get_registry(request: Request) -> RegistryCache:
 
 def get_personas(request: Request) -> PersonaStore:
     return request.app.state.personas
+
+
+def get_focus_store(request: Request) -> FocusStore:
+    return request.app.state.focus
 
 
 def get_acting_as(request: Request) -> ActingAsStore:
@@ -344,4 +349,5 @@ BanksDep = Annotated[BankStore, Depends(get_banks)]
 RegistryDep = Annotated[RegistryCache, Depends(get_registry)]
 AnimusDep = Annotated[Animus, Depends(require_animus)]
 PersonasDep = Annotated[PersonaStore, Depends(get_personas)]
+FocusDep = Annotated[FocusStore, Depends(get_focus_store)]
 ActingAsDep = Annotated[ActingAsStore, Depends(get_acting_as)]
