@@ -50,6 +50,10 @@ class RecordingClient:
     async def put_graph(self, conn, graph_iri, turtle):
         self.put.append((graph_iri, turtle))
 
+    async def select(self, conn, query):
+        # The structural-freeze check reads the dataset; nothing is inactive here.
+        return {"boolean": False, "results": {"bindings": []}}
+
 
 def _bypass_acl(monkeypatch) -> None:
     async def _always_allowed(query_fn, holons_graph, *, person, target):

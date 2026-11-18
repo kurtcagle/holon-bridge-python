@@ -2,9 +2,9 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.33
+version: 1.0.39
 created: 2026-09-27
-updated: 2026-11-13
+updated: 2026-11-17
 author:
   - name: Kurt Cagle
     iri: https://holongraph.com/people/kurt-cagle
@@ -45,6 +45,84 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-11-17 (an ingested DataBook leaves a receipt the graph can react to)
+
+- **`/ingest` of a DataBook now writes an `hb:Packet` receipt into a new `inbox` graph,
+  and a named trigger can dispatch on it.** Until now the bridge read `graph.named_graph`
+  and the first RDF block from a DataBook and discarded the rest, so processing was
+  whatever the caller put in the request. After the payload lands (same ACL, SHACL gate and
+  write lock as before), the bridge records a receipt: what it observed (sender, time,
+  payload hash, landing graph) as facts, and what the document says about itself (`id`,
+  `type`, `profiles`) as claims (`hb:declaredId`, `hb:declaredType`, `hb:declaresProfile`),
+  then runs the post-write hook. A state trigger whose condition selects received packets of
+  a profile runs a named rule, agent call or fluent update, so which handler runs is data in
+  the graph, not code in `/ingest`. The header never names a handler.
+- **A header's own RDF is quarantined.** A header with an inline JSON-LD `@context` is lifted
+  with the existing safe path (remote contexts refused) into `urn:{dataset}:inbox:{id}:header`,
+  never into `inbox`, so a header cannot forge a receipt. A lift that fails is recorded on the
+  receipt and does not fail the ingest. A repeat of the same declared id and payload hash is
+  recorded as `Duplicate` and not dispatched. The inbox is a receipt log: the bridge never
+  changes a status.
+- Raw Turtle and graph-to-graph ingests have no header and are unchanged. The response gains
+  a `packet` object and the ingest message a `packet` stage. Three existing ingest tests that
+  read the last push now filter out the inbox write. Design note for the HCG messaging team:
+  `docs/architecture/packet-ingestion.databook.md`. [PR #103](https://github.com/kurtcagle/holon-bridge-python/pull/103)
+
+### 2026-11-17 (a holon can be succeeded)
+
+- **`POST /holon/succeed` (MCP `succeed_holon`) closes a holon and opens a successor that
+  carries its final state.** The predecessor is made Inactive (or Tombstoned) first, so its
+  fluents cannot move while they are read. The successor then gets the predecessor's
+  outgoing triples, a fluent of its own for each of the predecessor's fluents, and each
+  fluent's final value (every member of a list), written as new ledger assertions with
+  `prov:wasDerivedFrom` to the originals. `hb:succeededBy` and `hb:predecessor` link the
+  two. A holon with a successor cannot be reactivated, and a portal crossing into it lands
+  on the end of its succession chain (the response carries `redirectedFrom`). If anything
+  fails the successor is removed and the predecessor restored. It is not one atomic
+  transaction: values go across in rounds (list members one per round), and the ledger
+  entries of a rolled-back attempt stay. One-to-one, at most 20 values, blank-node triples
+  not copied, incoming links not moved, one dataset.
+
+### 2026-11-17 (a trigger can deactivate a holon)
+
+- **A fluent-action trigger can now move a holon to a lifecycle state.** The action query
+  may return `?holon` and `?state` (`Active`, `Inactive` or `Tombstoned`, optional `?reason`)
+  instead of `?fluent` and `?value`. A lifecycle row is one more member of the firing's
+  all-or-none transaction, so a firing can set a holon's final fluent values and deactivate
+  it together; a holon already in the state is skipped. The definer needs write access to
+  the holons graph (and the ontology graph the first time) as well as the usual three, checked
+  at each firing. No new trigger kind, route or MCP argument. Portal effects do not take
+  lifecycle rows.
+
+### 2026-11-17 (an inactive holon can no longer be rewritten through the ingest paths)
+
+- **A Turtle write or a SPARQL update that names an Inactive or Tombstoned holon, or one of
+  its fluents, as a subject is refused with a 409.** The check sits in
+  `write_turtle_to_graph`, so it covers `/holon`, `/graph/push`, `/ingest`, `/message/create`
+  and trigger rule writes, and in `/sparql/update` for the subjects the update names outright.
+  It also refuses any write that uses `hb:lifecycleStatus` or names a lifecycle fluent
+  (`lifecycle_governed`), a `replace` of a graph that holds such subjects or any lifecycle state
+  unless the payload carries every protected triple over unchanged, and a payload it cannot read (RDF 1.2) while any holon is inactive. This is not a seal: a
+  SPARQL update whose subjects come from its WHERE clause, whole-graph operations, named-rule
+  writes and `/graph-op` are not checked. See `docs/architecture/holon-lifecycle.databook.md`.
+
+### 2026-11-17 (holon lifecycle: Active, Inactive, Tombstoned)
+
+- **A holon can now be deactivated, tombstoned and brought back.** `POST /holon/lifecycle`
+  (`set_holon_lifecycle` in MCP) moves a holon between `Active`, `Inactive` and `Tombstoned`;
+  `GET /holon/lifecycle` (`get_holon_lifecycle`) reads the state. The state is a fluent
+  (`hb:lifecycleStatus`, set-value), so every change is on the ledger with its valid time and
+  reason. Any state may move to any other; a holon with no lifecycle fluent is Active. An
+  Inactive or Tombstoned holon can be read but its fluents refuse changes (409
+  `holon_inactive`) on `/fluent/update`, `/fluent/update-many`, a trigger's fluent action and a
+  portal crossing; the lifecycle fluent itself can only be changed through the lifecycle route
+  (409 `lifecycle_governed` elsewhere). A Tombstoned holon is left out of neighbour discovery
+  unless `include_tombstoned` is set, and `get_holon` reports a `lifecycle` block. This is a
+  fluent-level freeze only: `/ingest`, `POST /holon`, named-rule writes and raw SPARQL Update can
+  still change an Inactive holon's structural triples, and succession (opening a successor
+  seeded from the final fluent values) is not built. See
+  `docs/architecture/holon-lifecycle.databook.md`.
 
 ### 2026-11-13 (fluent triggers apply their rows all-or-none)
 
@@ -214,6 +292,17 @@ process:
   (see `tests/test_get_holon_asof.py`); that wants a live Fuseki test.
 
 ## Log
+
+### 2026-11-09 (replace shrink guard)
+
+- **A `mode=replace` that would leave under 10% of a graph is refused:
+  [PR #84](https://github.com/kurtcagle/holon-bridge-python/pull/84).**
+  On `/graph/push`, `/holon` and the MCP `push_turtle` and `create_holon` tools,
+  a replace that would shrink a graph of 20 or more triples to under 10% of its
+  size returns 409 `replace_would_shrink_graph` with the before and after counts,
+  unless the caller sends `force_shrink=true`. Pipelines and triggers are not
+  guarded. A replace response carries `triplesBefore` and `triplesAfter`. Fuseki
+  store only.
 
 ### 2026-11-07 (env audit script)
 
@@ -830,6 +919,32 @@ process:
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
 
+hb:release-2026-11-17-e a hb:ReleaseNote ;
+    dcterms:date "2026-11-17"^^xsd:date ;
+    rdfs:label "An ingested DataBook leaves a receipt in a new inbox graph that triggers can dispatch on" ;
+    dcterms:description "/ingest of a DataBook (inline, or fetched and detected as one) now writes an hb:Packet node to urn:{dataset}:inbox after the payload lands, then calls the post-write hook. Observed facts (hb:receivedFrom, hb:receivedAt, hb:payloadHash, hb:payloadGraph) are kept apart from the document's claims (hb:declaredId, hb:declaredType, hb:declaresProfile); the header never names a handler, a trigger bound to the claimed profile does. A header with an inline JSON-LD @context is lifted into a per-packet graph (urn:{dataset}:inbox:{id}:header) and never into inbox, so a header cannot forge a receipt; a failed lift is recorded and does not fail the ingest. Same declared id and payload hash twice is recorded as Duplicate and not dispatched. New graph role inbox (not a system graph, or the hook would skip it). Raw Turtle and graph-to-graph ingests are unchanged. Tested against stubs and an rdflib dataset, not Jena." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/103> .
+
+hb:release-2026-11-17-d a hb:ReleaseNote ;
+    dcterms:date "2026-11-17"^^xsd:date ;
+    rdfs:label "Holon succession: close a holon and open a successor with its final state" ;
+    dcterms:description "POST /holon/succeed (succeed_holon) freezes the predecessor (Inactive, or Tombstoned on request), reads its final fluent values, creates the successor from the predecessor's outgoing triples (minus fluents, lifecycle and, when a label is given, labels), gives the successor a fluent of its own for each of the predecessor's, and seeds them through update_fluents with prov:wasDerivedFrom pointing at the original assertions. hb:succeededBy and hb:predecessor link the pair; prepare_transition refuses to reactivate a holon that has a successor (409 has_successor); portal crossings into a succeeded holon resolve to the end of its chain and report redirectedFrom. Refusals before anything changes: same_holon, unknown_holon (404), successor_exists, already_succeeded, too_large (more than 20 values), cannot_carry (a datatype or lexical form that would not round-trip). A failure after the freeze removes the successor and restores the predecessor. Not atomic end to end: list members go one per round because a transaction changes each fluent once, and the ledger entries of a rolled-back attempt remain. One-to-one only; blank-node triples are not copied; incoming links are not moved; avatars and cross-dataset succession do not exist. Vocabulary is in hb: pending HCG ratification. Tested on rdflib; not run against a live Fuseki." .
+
+hb:release-2026-11-17-c a hb:ReleaseNote ;
+    dcterms:date "2026-11-17"^^xsd:date ;
+    rdfs:label "Triggers can deactivate holons (lifecycle rows in a fluent action)" ;
+    dcterms:description "The rows of an onFireFluentQuery action may carry ?holon and ?state (Active, Inactive or Tombstoned, as a name or the hb: IRI) and an optional ?reason instead of ?fluent and ?value. Each such row becomes a SetValueMode operation on the holon's lifecycle fluent inside the firing's single update_fluents transaction, so final fluent values and the deactivation land together or not at all. Fluent rows are checked against holder state before the transaction. A holon already in the state is skipped and reported. The ledger note reads lifecycle: STATE (reason) [trigger ID] and the entry is attributed to the person who armed the trigger. The definer needs write access to the holons graph, and the ontology graph the first time a dataset uses lifecycle, checked at every firing. Portal effect rows do not accept lifecycle rows. Prepared steps (vocabulary declaration and creating the lifecycle fluent node) are idempotent and remain if the transaction fails. Tested on rdflib; not run against a live Fuseki." .
+
+hb:release-2026-11-17-b a hb:ReleaseNote ;
+    dcterms:date "2026-11-17"^^xsd:date ;
+    rdfs:label "Structural freeze: ingest paths refuse inactive holons" ;
+    dcterms:description "structural_freeze.structural_block runs in write_turtle_to_graph (/holon, /graph/push, /ingest, /message/create, trigger rule writes) and in /sparql/update. It returns 409 holon_inactive when the write has an Inactive or Tombstoned holon, or a fluent of one, as a subject; 409 lifecycle_governed for any use of hb:lifecycleStatus or a lifecycle fluent subject; holon_inactive of kind replace when a replace would rewrite a graph holding such subjects or any lifecycle state, unless the payload carries every protected triple over verbatim and adds none; and holon_inactive of kind unreadable for an RDF 1.2 payload while any holon is inactive. Subjects are read with turtle_subjects and update_subjects; only subjects a SPARQL update names outright are checked. Not covered: updates whose subjects come from a WHERE clause, CLEAR/DROP/LOAD/COPY/MOVE/ADD, named-rule writes, /graph-op. Fuseki errors during the check refuse the write. Tested on rdflib; not run against a live Fuseki." .
+
+hb:release-2026-11-17-a a hb:ReleaseNote ;
+    dcterms:date "2026-11-17"^^xsd:date ;
+    rdfs:label "Holon lifecycle: Active, Inactive and Tombstoned" ;
+    dcterms:description "POST /holon/lifecycle and GET /holon/lifecycle (set_holon_lifecycle, get_holon_lifecycle) move a holon between Active, Inactive and Tombstoned, recorded as a SetValueMode fluent on the hb:lifecycleStatus property with a ledger entry, valid time and optional reason. Any state may move to any other and no fluent means Active. A shared write_block guard makes /fluent/update, update-many, trigger fluent actions and portal crossings refuse fluents of an Inactive or Tombstoned holder (409 holon_inactive) and any write to the lifecycle fluent (409 lifecycle_governed); it fails closed. Neighbour traversal hides Tombstoned holons unless include_tombstoned is set, and get_holon reports a lifecycle block (current state, even on as-of reads). The write needs the fluent-update grants plus the holons graph, and the ontology graph the first time. Not built: structural freeze on ingest paths, trigger-driven deactivation, succession. Vocabulary is in hb: pending HCG ratification. Tested on rdflib; not run against a live Fuseki." .
+
 hb:release-2026-11-13-i a hb:ReleaseNote ;
     dcterms:date "2026-11-13"^^xsd:date ;
     rdfs:label "Fluent triggers apply their rows as one transaction" ;
@@ -881,6 +996,12 @@ hb:release-2026-11-13-a a hb:ReleaseNote ;
     rdfs:label "Fluent ledger: backdatable valid time and recorded insertion time" ;
     dcterms:description "update_fluent already accepted asserted_datetime in Python; the REST request model and the MCP tool now carry it too (naive timestamps read as UTC). Every StateAssertion is stamped hevt:insertedAt with the wall clock, never caller-supplied, so a fact learnt late has a valid time and a transaction time. get_holon's inserted_at now keeps only entries inserted by then and is exposed on MCP; with no inserted_at there is no transaction-time bound, where it previously defaulted to observed_at. Entries from before the change have no insertedAt and count as known. Tested against rdflib, not Jena; the nested FILTER in the as-of query's later-assertion clause is untested for the reason given in test_get_holon_asof.py." ;
     rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pulls> .
+
+hb:release-2026-11-09-a a hb:ReleaseNote ;
+    dcterms:date "2026-11-09"^^xsd:date ;
+    rdfs:label "Refuse a mode=replace that would leave under 10% of a graph; force_shrink overrides" ;
+    dcterms:description "On 6 Oct 2026 a push_turtle mode=replace with a partial payload emptied a 167-triple graph to 1 triple and reported conforms: true. /graph/push, /holon and the MCP push_turtle and create_holon tools now count the graph and the payload (in a throwaway Jena graph) before a replace, and refuse with a 409 when a graph of 20 or more triples would be left with under 10% of its triples, unless force_shrink is true. Pipelines and triggers are not guarded. Replace responses carry triplesBefore and triplesAfter. Fuseki store only; the Fluree store kind needs its own count." ;
+    rdfs:seeAlso <https://github.com/kurtcagle/holon-bridge-python/pull/84> .
 
 hb:release-2026-11-07-c a hb:ReleaseNote ;
     dcterms:date "2026-11-07"^^xsd:date ;

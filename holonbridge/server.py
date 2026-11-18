@@ -37,6 +37,7 @@ from .routes import (
     graphs,
     holon_routes,
     identity_admin,
+    lifecycle as lifecycle_routes,
     named_projections,
     named_queries,
     named_rules,
@@ -126,6 +127,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(sparql.router)
     app.include_router(graphs.router)
     app.include_router(holon_routes.router)
+    app.include_router(lifecycle_routes.router)
     app.include_router(events.router)
     app.include_router(fluent.router)
     app.include_router(identity_admin.router)

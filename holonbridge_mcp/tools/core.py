@@ -124,10 +124,14 @@ async def push_turtle(
     shapes_graph: str | None = None,
     mode: str = "merge",
     reduction_rule_id: str | None = None,
+    force_shrink: bool = False,
 ) -> dict:
     """Push Turtle into a named graph.
 
-    ``mode`` is ``merge`` (GSP POST) or ``replace`` (GSP PUT). Supplying
+    ``mode`` is ``merge`` (GSP POST) or ``replace`` (GSP PUT). A ``replace``
+    that would leave the graph with under 10% of its current triples is
+    refused with a 409 (a partial payload emptied a graph on 6 Oct 2026);
+    pass ``force_shrink=True`` only when that is really intended. Supplying
     ``shapes_graph`` validates before the write and rejects on new violations.
 
     ``reduction_rule_id`` names a registered named rule that reduces the
@@ -145,6 +149,7 @@ async def push_turtle(
             "shapes_graph": shapes_graph,
             "mode": mode,
             "reduction_rule_id": reduction_rule_id,
+            "force_shrink": force_shrink,
         },
     )
 
@@ -188,6 +193,7 @@ async def create_holon(
     shapes_graph: str | None = None,
     mode: str = "merge",
     reduction_rule_id: str | None = None,
+    force_shrink: bool = False,
 ) -> dict:
     """Create or merge into a holon from a DataBook message.
 
@@ -215,6 +221,7 @@ async def create_holon(
             "shapes_graph": shapes_graph,
             "mode": mode,
             "reduction_rule_id": reduction_rule_id,
+            "force_shrink": force_shrink,
         },
     )
 
@@ -226,8 +233,13 @@ async def get_holon(
     on_behalf_of: str | None = None,
     observed_at: str | None = None,
     inserted_at: str | None = None,
+    include_tombstoned: bool = False,
 ) -> str | dict:
     """Retrieve a holon as a DataBook.
+
+    The frontmatter reports the holon's ``lifecycle`` state (Active, Inactive or
+    Tombstoned). Neighbour lists leave out Tombstoned holons unless
+    ``include_tombstoned`` is true; the holon you ask for is returned whatever its state.
 
     Projection modes: immersive, cinematic, active_inference, exploded_view.
 
@@ -266,6 +278,8 @@ async def get_holon(
         params["observed_at"] = observed_at
     if inserted_at:
         params["inserted_at"] = inserted_at
+    if include_tombstoned:
+        params["include_tombstoned"] = "true"
     return await _call("GET", "/holon", params=params, text=True)
 
 

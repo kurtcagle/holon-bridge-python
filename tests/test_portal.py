@@ -188,6 +188,27 @@ async def test_a_portal_with_no_lock_or_effect_just_moves_the_traveller(registry
     assert Decimal(value_of(store, conn, PURSE)) == 10
 
 
+async def test_a_crossing_into_a_succeeded_holon_arrives_at_its_successor(registry):
+    conn, store = _world()
+    registry["queries"] = _queries(conn)
+    holons = store.ds.graph(URIRef(conn.holons_graph))
+    _add(holons, DOVER, f"{HB_NAMESPACE}succeededBy", f"{EX}dover-2")
+    _add(holons, f"{EX}dover-2", f"{HB_NAMESPACE}succeededBy", f"{EX}dover-3")
+
+    crossing = await cross(store, conn, _portal(conn))
+
+    assert crossing.destination == f"{EX}dover-3"
+    assert value_of(store, conn, LOC) == f"{EX}dover-3"
+    assert Decimal(value_of(store, conn, PURSE)) == 7
+
+
+async def test_a_crossing_into_a_holon_with_no_successor_is_unchanged(registry):
+    conn, store = _world()
+    registry["queries"] = _queries(conn)
+    crossing = await cross(store, conn, _portal(conn))
+    assert crossing.destination == DOVER
+
+
 async def test_a_traveller_somewhere_else_cannot_use_the_portal(registry):
     conn, store = _world()
     registry["queries"] = _queries(conn)
