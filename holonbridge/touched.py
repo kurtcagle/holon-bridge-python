@@ -19,7 +19,7 @@ from rdflib import Graph, URIRef, Variable
 
 from .turtle import looks_like_rdf12
 
-__all__ = ["turtle_predicates", "update_predicates"]
+__all__ = ["turtle_predicates", "turtle_subjects", "update_predicates", "update_subjects"]
 
 
 def turtle_predicates(turtle: str) -> frozenset[str] | None:
@@ -31,6 +31,18 @@ def turtle_predicates(turtle: str) -> frozenset[str] | None:
     except Exception:  # noqa: BLE001 - any failure means "could not tell"
         return None
     return frozenset(str(p) for p in set(graph.predicates()))
+
+
+def turtle_subjects(turtle: str) -> frozenset[str] | None:
+    """Every IRI subject in ``turtle`` (blank nodes are not holons), or ``None``
+    if it can't be read. Same rule as :func:`turtle_predicates`: only answer when sure."""
+    if not turtle or looks_like_rdf12(turtle):
+        return None if turtle else frozenset()
+    try:
+        graph = Graph().parse(data=turtle, format="turtle")
+    except Exception:  # noqa: BLE001 - any failure means "could not tell"
+        return None
+    return frozenset(str(s) for s in set(graph.subjects()) if isinstance(s, URIRef))
 
 
 def _triples(clause) -> list[tuple]:
@@ -75,3 +87,40 @@ def update_predicates(update: str) -> frozenset[str] | None:
                     return None
                 found.add(str(predicate))
     return frozenset(found)
+
+
+def update_subjects(update: str) -> tuple[frozenset[str], bool]:
+    """The IRI subjects a SPARQL update inserts or deletes, and whether that is *all* of them.
+
+    The flag is ``False`` when something cannot be listed: a variable subject (its
+    values come from the WHERE clause), a clause that is not an INSERT/DELETE
+    template (CLEAR, DROP, LOAD, COPY, MOVE, ADD) or text that does not parse.
+    Callers use the subjects they are given and must say what they do not cover.
+    """
+    from rdflib.plugins.sparql.algebra import translateUpdate  # noqa: PLC0415
+    from rdflib.plugins.sparql.parser import parseUpdate  # noqa: PLC0415
+
+    try:
+        requests = translateUpdate(parseUpdate(update)).algebra
+    except Exception:  # noqa: BLE001
+        return frozenset(), False
+
+    found: set[str] = set()
+    complete = True
+    for request in requests:
+        if request.name in {"InsertData", "DeleteData", "DeleteWhere"}:
+            clauses = [request]
+        elif request.name == "Modify":
+            clauses = [request[key] for key in ("delete", "insert") if key in request]
+        else:
+            complete = False
+            continue
+        for clause in clauses:
+            for subject, _p, _o in _triples(clause):
+                if isinstance(subject, URIRef):
+                    found.add(str(subject))
+                elif not isinstance(subject, Variable):
+                    continue  # a blank node in a template is never an existing holon
+                else:
+                    complete = False
+    return frozenset(found), complete
