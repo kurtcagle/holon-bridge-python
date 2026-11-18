@@ -298,3 +298,73 @@ def test_validate_route_returns_400_not_500_for_unparseable_shapes(mode):
     assert "shacl-all-v1.1#graph" in detail
     assert "smaller shapes graph" in detail
     assert stub.validated == []
+
+# --- delta fingerprint with anonymous (blank-node) source shapes ------------
+
+
+def _anon_report(label: str, focus: str = "urn:ex:a", message: str = "too few") -> str:
+    """A report whose sh:sourceShape is a blank node with the given label."""
+    return f"""@prefix sh: <http://www.w3.org/ns/shacl#> .
+[] a sh:ValidationReport ; sh:conforms false ;
+   sh:result [ a sh:ValidationResult ; sh:focusNode <{focus}> ;
+               sh:resultPath <http://example.org/p> ;
+               sh:sourceConstraintComponent sh:MinCountConstraintComponent ;
+               sh:resultSeverity sh:Violation ; sh:resultMessage "{message}" ;
+               sh:sourceShape _:{label} ] .
+"""
+
+
+class _SequencedClient(FakeClient):
+    """Returns the baseline report first, then the merged report."""
+
+    def __init__(self, reports: list[str]) -> None:
+        super().__init__(shapes_turtle=ORDINARY_SHAPES)
+        self._reports = list(reports)
+
+    async def shacl_validate(self, conn, *, target_graph, shapes_turtle):
+        self.validated.append(target_graph)
+        return self._reports.pop(0)
+
+    async def select(self, conn, query):
+        return {"boolean": True}  # the target already has content
+
+
+async def _delta(client):
+    conn = _conn()
+    return await shacl_mod.validate_delta(
+        client,
+        conn,
+        turtle="<urn:ex:b> <urn:ex:q> <urn:ex:c> .",
+        shapes_graph=conn.shapes_graph,
+        target_graph="urn:ds:holons",
+    )
+
+
+async def test_delta_ignores_blank_node_label_of_source_shape():
+    client = _SequencedClient([_anon_report("b0"), _anon_report("b7")])
+    report = await _delta(client)
+    assert report.results == []
+    assert report.conforms is True
+
+
+async def test_delta_still_reports_new_violation_on_anonymous_shape():
+    # different focus node
+    client = _SequencedClient(
+        [_anon_report("b0"), _anon_report("b7", focus="urn:ex:other")]
+    )
+    report = await _delta(client)
+    assert len(report.results) == 1
+    assert report.results[0]["focusNode"] == "urn:ex:other"
+    assert report.conforms is False
+    # different message
+    client = _SequencedClient(
+        [_anon_report("b0"), _anon_report("b7", message="a different problem")]
+    )
+    report = await _delta(client)
+    assert len(report.results) == 1
+    assert report.conforms is False
+
+
+def test_parse_report_marks_blank_node_source_shape():
+    result = shacl_mod.parse_report(_anon_report("b0")).results[0]
+    assert result["sourceShape"].startswith("_:")
