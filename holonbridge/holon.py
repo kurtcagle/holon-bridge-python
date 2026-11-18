@@ -82,7 +82,7 @@ from typing import Any
 from .conn import Conn
 from .databook import Block, DataBook
 from .fuseki import FusekiClient
-from .lifecycle import read_state
+from .lifecycle import read_state, read_succession
 from .persona_scope import ScopedGraph, build_neighbour_query, build_state_query
 
 HOLON = "https://w3id.org/holon/"
@@ -345,6 +345,11 @@ async def get_holon(
     }
     lifecycle = await read_state(client, conn, holon_iri)
     frontmatter["lifecycle"] = {"state": lifecycle.state, "since": lifecycle.since}
+    successor, predecessor = await read_succession(client, conn, holon_iri)
+    if successor:
+        frontmatter["lifecycle"]["succeededBy"] = successor
+    if predecessor:
+        frontmatter["lifecycle"]["predecessor"] = predecessor
     if as_of:
         # The lifecycle above is the holon's state now. Its state at observed_at is the
         # value of its hb:lifecycleStatus fluent in the state block below.

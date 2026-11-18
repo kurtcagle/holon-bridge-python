@@ -76,6 +76,8 @@ from .fuseki import FusekiClient
 HB = "https://w3id.org/holonbridge/"
 
 LIFECYCLE_PROPERTY = f"{HB}lifecycleStatus"
+SUCCEEDED_BY = f"{HB}succeededBy"
+PREDECESSOR = f"{HB}predecessor"
 ACTIVE = f"{HB}Active"
 INACTIVE = f"{HB}Inactive"
 TOMBSTONED = f"{HB}Tombstoned"
@@ -131,15 +133,22 @@ class LifecycleState:
     fluent: str | None  # None until the holon's first change of state
     assertion: str | None
     since: str | None  # valid time of the current assertion, if there is one
+    successor: str | None = None
+    predecessor: str | None = None
 
     def as_dict(self) -> dict:
-        return {
+        out = {
             "holon": self.holon,
             "state": self.state,
             "fluent": self.fluent,
             "assertion": self.assertion,
             "since": self.since,
         }
+        if self.successor:
+            out["successor"] = self.successor
+        if self.predecessor:
+            out["predecessor"] = self.predecessor
+        return out
 
 
 async def read_state(client: FusekiClient, conn: Conn, holon: str) -> LifecycleState:
@@ -166,6 +175,25 @@ SELECT ?fluent ?value ?assertion ?at WHERE {{
         assertion=row.get("assertion", {}).get("value"),
         since=row.get("at", {}).get("value"),
     )
+
+
+async def read_succession(
+    client: FusekiClient, conn: Conn, holon: str
+) -> tuple[str | None, str | None]:
+    """``(successor, predecessor)`` of ``holon``, each ``None`` if there is none.
+
+    A holon has at most one of each in this version: succession is one to one."""
+    query = f"""SELECT ?successor ?predecessor WHERE {{
+  GRAPH <{conn.holons_graph}> {{
+    OPTIONAL {{ <{holon}> <{SUCCEEDED_BY}> ?successor . }}
+    OPTIONAL {{ <{holon}> <{PREDECESSOR}> ?predecessor . }}
+  }}
+}} LIMIT 1"""
+    rows = (await client.select(conn, query)).get("results", {}).get("bindings", [])
+    if not rows:
+        return None, None
+    row = rows[0]
+    return row.get("successor", {}).get("value"), row.get("predecessor", {}).get("value")
 
 
 async def holon_exists(client: FusekiClient, conn: Conn, holon: str) -> bool:
@@ -266,6 +294,16 @@ async def prepare_transition(
     current = await read_state(client, conn, holon)
     if current.state == state:
         return LifecycleChange(holon, current.fluent, state, state, False, current.assertion)
+
+    if state == "Active":
+        successor, _predecessor = await read_succession(client, conn, holon)
+        if successor:
+            raise LifecycleError(
+                "has_successor",
+                f"<{holon}> was succeeded by <{successor}> and cannot be made Active again; "
+                "use the successor",
+                status=409,
+            )
 
     if not await vocabulary_declared(client, conn):
         await client.update(conn, _declare_vocabulary_update(conn))

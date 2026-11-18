@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.36
+version: 1.0.37
 created: 2026-09-27
 updated: 2026-11-17
 author:
@@ -45,6 +45,21 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-11-17 (a holon can be succeeded)
+
+- **`POST /holon/succeed` (MCP `succeed_holon`) closes a holon and opens a successor that
+  carries its final state.** The predecessor is made Inactive (or Tombstoned) first, so its
+  fluents cannot move while they are read. The successor then gets the predecessor's
+  outgoing triples, a fluent of its own for each of the predecessor's fluents, and each
+  fluent's final value (every member of a list), written as new ledger assertions with
+  `prov:wasDerivedFrom` to the originals. `hb:succeededBy` and `hb:predecessor` link the
+  two. A holon with a successor cannot be reactivated, and a portal crossing into it lands
+  on the end of its succession chain (the response carries `redirectedFrom`). If anything
+  fails the successor is removed and the predecessor restored. It is not one atomic
+  transaction: values go across in rounds (list members one per round), and the ledger
+  entries of a rolled-back attempt stay. One-to-one, at most 20 values, blank-node triples
+  not copied, incoming links not moved, one dataset.
 
 ### 2026-11-17 (a trigger can deactivate a holon)
 
@@ -869,6 +884,11 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-11-17-d a hb:ReleaseNote ;
+    dcterms:date "2026-11-17"^^xsd:date ;
+    rdfs:label "Holon succession: close a holon and open a successor with its final state" ;
+    dcterms:description "POST /holon/succeed (succeed_holon) freezes the predecessor (Inactive, or Tombstoned on request), reads its final fluent values, creates the successor from the predecessor's outgoing triples (minus fluents, lifecycle and, when a label is given, labels), gives the successor a fluent of its own for each of the predecessor's, and seeds them through update_fluents with prov:wasDerivedFrom pointing at the original assertions. hb:succeededBy and hb:predecessor link the pair; prepare_transition refuses to reactivate a holon that has a successor (409 has_successor); portal crossings into a succeeded holon resolve to the end of its chain and report redirectedFrom. Refusals before anything changes: same_holon, unknown_holon (404), successor_exists, already_succeeded, too_large (more than 20 values), cannot_carry (a datatype or lexical form that would not round-trip). A failure after the freeze removes the successor and restores the predecessor. Not atomic end to end: list members go one per round because a transaction changes each fluent once, and the ledger entries of a rolled-back attempt remain. One-to-one only; blank-node triples are not copied; incoming links are not moved; avatars and cross-dataset succession do not exist. Vocabulary is in hb: pending HCG ratification. Tested on rdflib; not run against a live Fuseki." .
 
 hb:release-2026-11-17-c a hb:ReleaseNote ;
     dcterms:date "2026-11-17"^^xsd:date ;

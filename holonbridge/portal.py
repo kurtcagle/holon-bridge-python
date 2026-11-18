@@ -172,6 +172,9 @@ class Crossing:
     traveller: str
     transaction: TransactionResult
     effects_applied: int
+    #: Where the traveller arrived. It differs from ``portal.to_holon`` when that holon has
+    #: been succeeded: the crossing follows ``hb:succeededBy`` to the end of the chain.
+    destination: str = ""
 
 
 # --- storage ------------------------------------------------------------------
@@ -448,11 +451,14 @@ async def traverse(
                     extra={"reason": reason} if reason else {},
                 )
 
+    from .succession import resolve_successor  # noqa: PLC0415
+
+    destination = await resolve_successor(client, conn, portal.to_holon)
     ops = [
         FluentOp(
             fluent=position,
             operation=Operation.SET,
-            value=portal.to_holon,
+            value=destination,
             is_iri=True,
             description=f"crossed portal {portal.id}",
             expect=TypedValue(kind="uri", lexical=portal.from_holon),
@@ -511,7 +517,10 @@ async def traverse(
             ),
         ) from exc
 
-    return Crossing(portal=portal, traveller=traveller, transaction=transaction, effects_applied=effects)
+    return Crossing(
+        portal=portal, traveller=traveller, transaction=transaction, effects_applied=effects,
+        destination=destination,
+    )
 
 
 def _violation(result: dict[str, str]) -> dict[str, str]:
