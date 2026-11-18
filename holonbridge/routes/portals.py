@@ -367,12 +367,15 @@ async def traverse_portal(
     except FusekiError as exc:
         raise HTTPException(exc.status or 502, detail=exc.as_dict()) from exc
 
+    arrived = crossing.destination or portal.to_holon
+    redirect = {"redirectedFrom": portal.to_holon} if arrived != portal.to_holon else {}
     return {
         "ok": True,
         "portal": portal.id,
         "traveller": traveller,
         "from": portal.from_holon,
-        "to": portal.to_holon,
+        "to": arrived,
+        **redirect,
         "transaction": crossing.transaction.transaction,
         "effectsApplied": crossing.effects_applied,
         "assertedBy": person,

@@ -2,13 +2,13 @@
 id: https://w3id.org/databook/holon-lifecycle
 title: "Holon Lifecycle: Active, Inactive and Tombstoned"
 type: databook
-version: 0.4.0
+version: 0.5.0
 created: 2026-11-17
 description: >
   How a holon is deactivated, reactivated and tombstoned in holon-bridge-python: the
-  three states, the decisions that shaped them, what the first implementation
-  (fluent-level freeze, discovery filter) does and does not guarantee, and what is
-  left for succession. Vocabulary is in the hb: namespace
+  three states, the decisions that shaped them, what the implementation
+  (fluent-level freeze, structural freeze, trigger-driven deactivation, succession) does and
+  does not guarantee. Vocabulary is in the hb: namespace
   pending HCG ratification.
 subject:
   - holon lifecycle
@@ -46,7 +46,7 @@ Two questions came out of the ingestion discussion:
 1. When a holon is tombstoned, is it closed?
 2. Can a holon be closed and a new one opened from its closing fluent states, boundaries and referenced entities?
 
-Phase 1 answers the first and lays the ground for the second. A holon is **Active**, **Inactive** or **Tombstoned**. Inactive and Tombstoned holons can be read but not mutated. A Tombstoned holon is also hidden from discovery. Every transition is reversible. Succession (the second question) is not built; it is Phase 3.
+Phase 1 answers the first and lays the ground for the second. A holon is **Active**, **Inactive** or **Tombstoned**. Inactive and Tombstoned holons can be read but not mutated. A Tombstoned holon is also hidden from discovery. Every transition is reversible. Succession (the second question) is Phase 3 below.
 
 ## Decisions
 
@@ -58,7 +58,7 @@ These are the Phase 0 decisions and how Phase 1 applies each.
 | Is the end terminal? | No. A holon is active or inactive; inactive can be queried but not mutated, and can be reactivated. | Any state moves to any other. Absence of a lifecycle fluent means Active. |
 | Who may change it? | An admin certainly; a trigger process possibly (energy minimisation). | The same write grants as `/fluent/update`, which admins hold. A trigger's fluent action may also carry lifecycle rows (see Phase 4); its definer needs the same grants. |
 | Does Tombstoned hide a holon? | Hidden from discovery, but readable. | Neighbour traversal excludes Tombstoned holons unless `include_tombstoned` is set. `get_holon` on its IRI still works. |
-| Fluents still holding a live value | Final-state fluents transfer to the new holon. | That is succession (Phase 3). Plain deactivation leaves values standing and clips nothing; reactivation resumes. |
+| Fluents still holding a live value | Final-state fluents transfer to the new holon. | That is succession (Phase 3, built). Plain deactivation leaves values standing and clips nothing; reactivation resumes. |
 
 ## The model
 
@@ -128,7 +128,7 @@ This is the part to read before relying on it.
 - **The structural freeze is not a seal.** Phase 2 (below) guards Turtle writes and the subjects a SPARQL update names outright. A SPARQL update whose subjects come from its WHERE clause, a whole-graph operation (CLEAR, DROP, LOAD, COPY, MOVE, ADD), named-rule writes and `/graph-op` are not checked; they stay an access-control matter.
 - **Discovery filtering is built into neighbour traversal only.** An arbitrary SPARQL query will still return Tombstoned holons. `tombstoned_filter` is the pattern to add to a query that should hide them.
 - **As-of reads show current lifecycle state**, not the state at `observed_at`; the frontmatter says so.
-- **No succession.** A holon is not prevented from being reactivated after a successor exists, because successors do not exist yet.
+- **Succession is not one atomic transaction.** See Phase 3: it freezes first, seeds in rounds and compensates on failure.
 - **Terminology.** The Holonitype open/closed (boundary condition) still needs a ruling so the words stay distinct.
 
 ## Next phases
@@ -149,8 +149,19 @@ An unreadable payload is allowed in a dataset where every holon is Active, so RD
 
 The check runs after the access-control decision and before the write lock. `POST /holon/lifecycle` writes its own fluent directly, so the freeze does not stand in its way.
 
-### Phase 3: succession
-One transition that deactivates A, creates B, seeds B's fluents from A's final values (each new assertion carrying `prov:wasDerivedFrom` to A's), links predecessor and successor, and re-registers referenced entities, in a single request. This extends `fluent_transaction` to the holons graph. It needs list-mode fluents to work in as-of reads, portal resolution through the successor, and a rule that a holon with a successor refuses reactivation. One dataset only; cross-dataset succession would need a saga.
+### Phase 3: succession (built)
+
+`POST /holon/succeed {holon, successor, reason?, label?, tombstone?, effective_at?}` (MCP `succeed_holon`) closes A and opens B. The first plan (one request, one transaction extended to the holons graph) was not built: a fluent transaction changes each fluent once and only writes fluents. What runs instead:
+
+1. **Plan, changing nothing.** Read A's fluents and their values. Refuse early if B exists (`successor_exists`), A was already succeeded (`already_succeeded`), A is unknown (404) or the same as B, there are more than 20 values (`too_large`), or a value would not store back exactly (`cannot_carry`: an unsupported datatype, or a lexical form such as `007` that would be normalised).
+2. **Freeze A** (Inactive, or Tombstoned with `tombstone`). From here its fluents cannot change, so what is read next is final.
+3. **Create B** in one update: A's outgoing triples (not its fluents, lifecycle link or blank-node objects), a fluent node of B's own for each of A's fluents with its triples, and the links `A hb:succeededBy B`, `B hb:predecessor A`. B's fluent IRIs are derived from B and A's fluent, so they are the same on a retry.
+4. **Seed B's fluents** through `update_fluents`: a SET for a scalar, one LIST_INSERT per member for a list. Because a transaction changes each fluent once, list members go in rounds; round one carries every scalar and each list's first member. Each new assertion gets `prov:wasDerivedFrom` to A's current assertion (or to A's fluent for a list member), recorded afterwards on a best-effort basis.
+5. **On any failure after the freeze**, remove B (its triples, and what the first rounds wrote to its fluents' scene values) and put A back as it was. The ledger entries of the rolled-back attempt stay as the record of it.
+
+A holon with a successor refuses to become Active again (`has_successor`, 409); it can still move between Inactive and Tombstoned. A portal crossing into a succeeded holon arrives at the end of its `hb:succeededBy` chain and reports `redirectedFrom`. `GET /holon/lifecycle` and `get_holon` show `successor` and `predecessor`. The route needs the grants lifecycle needs, plus the holons graph.
+
+Not covered: one-to-one only; at most 20 values; blank-node triples are not copied (counted in `skippedBlankNodeTriples`); incoming links from other holons are not moved; the boundaries and referenced entities of A are not "re-registered" (they are per dataset and not holons' own triples, and avatars do not exist); one dataset only, since cross-dataset succession would need a saga.
 
 ### Phase 4: trigger-driven deactivation (built)
 
@@ -184,12 +195,14 @@ SELECT ?holon ?state ?reason WHERE {
 - Do relationship holons close when either end goes inactive, or only when both do?
 - Should a reason be mandatory for Tombstoned?
 - Should succession be allowed across holonitypes?
-- If B's seeding fails SHACL, does the whole succession fail (proposed), or does B open empty?
+- Should succession ever be many-to-one (a merge) or one-to-many (a split)?
+- Should incoming links be moved to the successor, or left pointing at the predecessor and resolved on read?
 
 ## Where to look
 
 - `holonbridge/lifecycle.py`: states, `set_state`, `write_block`, `tombstoned_filter`.
-- `holonbridge/routes/lifecycle.py`: the two routes and their grants.
+- `holonbridge/routes/lifecycle.py`: the routes (state and succession) and their grants.
+- `holonbridge/succession.py`: `succeed` and `resolve_successor`.
 - `holonbridge/structural_freeze.py`: the subject guard for Turtle writes and SPARQL updates.
 - `holonbridge/routes/fluent.py`, `fluent_trigger_action.py`, `portal.py`: the guard sites; `fluent_trigger_action.py` also takes the lifecycle rows.
-- `tests/test_lifecycle.py`, `tests/test_structural_freeze.py`, `tests/test_trigger_lifecycle.py`: 90 tests against rdflib's SPARQL engine, not a live Fuseki.
+- `tests/test_lifecycle.py`, `tests/test_structural_freeze.py`, `tests/test_trigger_lifecycle.py`, `tests/test_succession.py` (and two in `tests/test_portal.py`): 121 tests against rdflib's SPARQL engine, not a live Fuseki.
