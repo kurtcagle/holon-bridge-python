@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/holon-lifecycle
 title: "Holon Lifecycle: Active, Inactive and Tombstoned"
 type: databook
-version: 0.3.0
+version: 0.4.0
 created: 2026-11-17
 description: >
   How a holon is deactivated, reactivated and tombstoned in holon-bridge-python: the
@@ -56,7 +56,7 @@ These are the Phase 0 decisions and how Phase 1 applies each.
 |---|---|---|
 | State names | Chosen as appropriate | Active, Inactive, Tombstoned. "Closed" is avoided: the Holonitype ruling already uses open/closed for a boundary condition. |
 | Is the end terminal? | No. A holon is active or inactive; inactive can be queried but not mutated, and can be reactivated. | Any state moves to any other. Absence of a lifecycle fluent means Active. |
-| Who may change it? | An admin certainly; a trigger process possibly (energy minimisation). | The same write grants as `/fluent/update`, which admins hold. Trigger-driven deactivation is deferred: it needs a new trigger action kind. |
+| Who may change it? | An admin certainly; a trigger process possibly (energy minimisation). | The same write grants as `/fluent/update`, which admins hold. A trigger's fluent action may also carry lifecycle rows (see Phase 4); its definer needs the same grants. |
 | Does Tombstoned hide a holon? | Hidden from discovery, but readable. | Neighbour traversal excludes Tombstoned holons unless `include_tombstoned` is set. `get_holon` on its IRI still works. |
 | Fluents still holding a live value | Final-state fluents transfer to the new holon. | That is succession (Phase 3). Plain deactivation leaves values standing and clips nothing; reactivation resumes. |
 
@@ -128,7 +128,6 @@ This is the part to read before relying on it.
 - **The structural freeze is not a seal.** Phase 2 (below) guards Turtle writes and the subjects a SPARQL update names outright. A SPARQL update whose subjects come from its WHERE clause, a whole-graph operation (CLEAR, DROP, LOAD, COPY, MOVE, ADD), named-rule writes and `/graph-op` are not checked; they stay an access-control matter.
 - **Discovery filtering is built into neighbour traversal only.** An arbitrary SPARQL query will still return Tombstoned holons. `tombstoned_filter` is the pattern to add to a query that should hide them.
 - **As-of reads show current lifecycle state**, not the state at `observed_at`; the frontmatter says so.
-- **No trigger action** that changes lifecycle yet.
 - **No succession.** A holon is not prevented from being reactivated after a successor exists, because successors do not exist yet.
 - **Terminology.** The Holonitype open/closed (boundary condition) still needs a ruling so the words stay distinct.
 
@@ -153,8 +152,32 @@ The check runs after the access-control decision and before the write lock. `POS
 ### Phase 3: succession
 One transition that deactivates A, creates B, seeds B's fluents from A's final values (each new assertion carrying `prov:wasDerivedFrom` to A's), links predecessor and successor, and re-registers referenced entities, in a single request. This extends `fluent_transaction` to the holons graph. It needs list-mode fluents to work in as-of reads, portal resolution through the successor, and a rule that a holon with a successor refuses reactivation. One dataset only; cross-dataset succession would need a saga.
 
-### Phase 4: trigger-driven deactivation
-A new trigger action kind, so a process (for instance one minimising energy) can deactivate holons without an admin in the loop.
+### Phase 4: trigger-driven deactivation (built)
+
+A named trigger's fluent action (`hev:onFireFluentQuery`) already runs a SELECT per matching focus and applies its rows as one transaction. A row may now name a holon instead of a fluent:
+
+| Column | |
+|---|---|
+| `?holon` | the holon (required) |
+| `?state` | `Active`, `Inactive` or `Tombstoned`, as a name or the `hb:` IRI (required) |
+| `?reason` | optional, added to the ledger note |
+| `?assertedAt` | optional valid time, shared by the whole firing as before |
+
+A lifecycle row is one more member of the firing's transaction, so a firing can set a holon's final fluent values and deactivate it together, all or none. The fluent rows are checked against the holon's state before the transaction, so they are not blocked by the deactivation in the same firing. A holon already in the requested state is skipped, and the firing says so. The ledger note reads `lifecycle: Inactive (reason) [trigger <id>]` and the entry is attributed to the person who armed the trigger.
+
+The definer needs write access to the holons graph, and the ontology graph the first time a dataset uses lifecycle, in addition to the events, scene and sequences graphs a fluent trigger already needs. That is checked at each firing, not at registration, because the query may or may not return lifecycle rows. Portal effects do not take lifecycle rows. There is no new trigger kind, route or MCP argument.
+
+An example action query, with a condition that selects the focus once its energy has settled:
+
+<!-- databook:id: lifecycle-trigger-example -->
+```sparql
+PREFIX ex: <https://example.org/>
+SELECT ?holon ?state ?reason WHERE {
+  BIND($focus AS ?holon)
+  BIND("Inactive" AS ?state)
+  BIND("energy settled" AS ?reason)
+}
+```
 
 ## Open questions
 
@@ -168,5 +191,5 @@ A new trigger action kind, so a process (for instance one minimising energy) can
 - `holonbridge/lifecycle.py`: states, `set_state`, `write_block`, `tombstoned_filter`.
 - `holonbridge/routes/lifecycle.py`: the two routes and their grants.
 - `holonbridge/structural_freeze.py`: the subject guard for Turtle writes and SPARQL updates.
-- `holonbridge/routes/fluent.py`, `fluent_trigger_action.py`, `portal.py`: the guard sites.
-- `tests/test_lifecycle.py`, `tests/test_structural_freeze.py`: 66 tests against rdflib's SPARQL engine, not a live Fuseki.
+- `holonbridge/routes/fluent.py`, `fluent_trigger_action.py`, `portal.py`: the guard sites; `fluent_trigger_action.py` also takes the lifecycle rows.
+- `tests/test_lifecycle.py`, `tests/test_structural_freeze.py`, `tests/test_trigger_lifecycle.py`: 90 tests against rdflib's SPARQL engine, not a live Fuseki.

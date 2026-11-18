@@ -23,6 +23,26 @@ Row columns of the action query:
 ``?description``      optional   free text recorded on the ledger entry
 ====================  =========  ==============================================
 
+**Lifecycle rows.** A row may instead name a holon and the lifecycle state it should
+move to, which is how a trigger deactivates a holon without an admin (for example when
+a process has minimised an energy):
+
+====================  =========  ==============================================
+``?holon``            required   IRI of the holon
+``?state``            required   ``Active``, ``Inactive`` or ``Tombstoned`` (the
+                                 name, or the ``hb:`` IRI)
+``?reason``           optional   free text, added to the ledger note
+``?assertedAt``       optional   as above
+====================  =========  ==============================================
+
+A lifecycle row is one more member of the same transaction, so a firing can set a
+holon's final fluent values and deactivate it all-or-none. A row for a holon already in
+that state is skipped. The definer also needs write access to the holons graph (and the
+ontology graph the first time the dataset uses lifecycle), as for
+``POST /holon/lifecycle``; that is checked at the firing. The fluent rows of the same
+firing are checked against the holon's state *before* the transaction, so they may run
+alongside the deactivation. Portal effects do not take lifecycle rows.
+
 **No review.** A fluent update is a guarded compare-and-set, not a merge of
 Turtle, so it cannot be staged as a candidate and approved later. A trigger with
 this action must therefore be registered with ``reviewRequired=false``. The
@@ -83,9 +103,24 @@ if TYPE_CHECKING:  # pragma: no cover
 MAX_ROWS = MAX_OPS
 
 _XSD = "http://www.w3.org/2001/XMLSchema#"
-_INTEGERS = {f"{_XSD}{n}" for n in ("integer", "int", "long", "short", "byte", "nonNegativeInteger",
-                                     "positiveInteger", "negativeInteger", "nonPositiveInteger",
-                                     "unsignedInt", "unsignedLong", "unsignedShort", "unsignedByte")}
+_INTEGERS = {
+    f"{_XSD}{n}"
+    for n in (
+        "integer",
+        "int",
+        "long",
+        "short",
+        "byte",
+        "nonNegativeInteger",
+        "positiveInteger",
+        "negativeInteger",
+        "nonPositiveInteger",
+        "unsignedInt",
+        "unsignedLong",
+        "unsignedShort",
+        "unsignedByte",
+    )
+}
 _DECIMALS = {f"{_XSD}{n}" for n in ("decimal", "double", "float")}
 _TRUE = {"true", "1", "yes"}
 _FALSE = {"false", "0", "no", ""}
@@ -107,12 +142,24 @@ class FluentRow:
 
 
 @dataclass(frozen=True)
+class LifecycleRow:
+    """A row that moves a holon to a lifecycle state (see the module docstring)."""
+
+    holon: str
+    state: str
+    asserted_at: datetime | None
+    reason: str | None
+
+
+@dataclass(frozen=True)
 class FluentOutcome:
     """What a firing did: ``applied`` of ``total`` rows. The rows are one
     transaction, so this is all of them or the firing raised."""
 
     applied: int
     total: int
+    #: lifecycle rows for a holon already in the requested state: nothing to write
+    skipped: int = 0
 
 
 def bind_action(query: NamedQuery, focus: str | None) -> str:
@@ -176,7 +223,9 @@ def _typed(cell: dict) -> tuple[Any, bool]:
         if datatype == f"{_XSD}date":
             return date.fromisoformat(text.strip()), False
     except (ValueError, InvalidOperation, FluentActionInvalid) as exc:
-        raise FluentActionInvalid(f"?value {text!r} is not a valid {datatype.rsplit('#', 1)[-1]}") from exc
+        raise FluentActionInvalid(
+            f"?value {text!r} is not a valid {datatype.rsplit('#', 1)[-1]}"
+        ) from exc
     return text, False
 
 
@@ -187,8 +236,22 @@ def _safe(value: str, what: str) -> str:
         raise FluentActionInvalid(f"{what}: {exc}") from exc
 
 
-def parse_rows(bindings: list[dict]) -> list[FluentRow]:
-    """Turn the action query's result rows into :class:`FluentRow` values.
+def _state(text: str) -> str:
+    from .lifecycle import STATES, state_name
+
+    name = state_name(text.strip())
+    if name not in STATES:
+        name = text.strip().rsplit("/", 1)[-1].rsplit("#", 1)[-1]
+    if name not in STATES:
+        raise FluentActionInvalid(f"?state {text!r} is not one of {', '.join(STATES)}")
+    return name
+
+
+def parse_rows(
+    bindings: list[dict], *, allow_lifecycle: bool = False
+) -> list[FluentRow | LifecycleRow]:
+    """Turn the action query's result rows into :class:`FluentRow` values (and, if
+    ``allow_lifecycle``, :class:`LifecycleRow` values for rows with ``?holon``).
 
     Checks everything and raises :class:`FluentActionInvalid` naming the row, so a
     bad row is found before any good one is applied. An empty result is fine: the
@@ -198,10 +261,26 @@ def parse_rows(bindings: list[dict]) -> list[FluentRow]:
         raise FluentActionInvalid(
             f"the action query returned {len(bindings)} rows; one firing applies at most {MAX_ROWS}"
         )
-    rows: list[FluentRow] = []
+    rows: list[FluentRow | LifecycleRow] = []
     for index, binding in enumerate(bindings, start=1):
         label = f"row {index}"
         try:
+            holon_cell = _cell(binding, "holon")
+            if allow_lifecycle and holon_cell is not None and _cell(binding, "fluent") is None:
+                state_cell = _cell(binding, "state")
+                if state_cell is None:
+                    raise FluentActionInvalid("a lifecycle row has ?holon but no ?state")
+                at_cell = _cell(binding, "assertedAt")
+                reason_cell = _cell(binding, "reason")
+                rows.append(
+                    LifecycleRow(
+                        holon=_safe(str(holon_cell["value"]), "?holon"),
+                        state=_state(str(state_cell["value"])),
+                        asserted_at=_timestamp(str(at_cell["value"])) if at_cell else None,
+                        reason=str(reason_cell["value"]) if reason_cell else None,
+                    )
+                )
+                continue
             fluent_cell = _cell(binding, "fluent")
             value_cell = _cell(binding, "value")
             if fluent_cell is None:
@@ -288,8 +367,11 @@ async def authorize_fluent_trigger(
         raise TriggerDenied(
             400, {"error": "action_query_not_bindable", "message": str(exc)}, reason=str(exc)
         ) from exc
-    if "?fluent" not in action_sparql and "$fluent" not in action_sparql:
-        warnings.append(f"action query {action_query.id!r} never mentions ?fluent; it will apply nothing")
+    mentions = ("?fluent", "$fluent", "?holon", "$holon")
+    if not any(name in action_sparql for name in mentions):
+        warnings.append(
+            f"action query {action_query.id!r} never mentions ?fluent or ?holon; it will apply nothing"
+        )
     if "focus" not in action_query.declared:
         warnings.append(
             f"action query {action_query.id!r} declares no 'focus' parameter, so every firing "
@@ -328,7 +410,7 @@ async def fire_fluent(
         )
     sparql = bind_action(action_query, focus)
     result = await client.select(conn, sparql)
-    rows = parse_rows(result.get("results", {}).get("bindings", []))
+    rows = parse_rows(result.get("results", {}).get("bindings", []), allow_lifecycle=True)
 
     # A traveller's position changes only by crossing a portal (holonbridge/portal.py).
     # Checked for every row before any is applied, like the rest of the validation.
@@ -336,11 +418,15 @@ async def fire_fluent(
     from .portal import governing_portals, portal_governed_message  # noqa: PLC0415
 
     for number, row in enumerate(rows, start=1):
+        if isinstance(row, LifecycleRow):
+            continue
         governed = await governing_portals(client, conn, row.fluent)
         if governed:
-            raise FluentActionInvalid(f"row {number}: {portal_governed_message(row.fluent, governed)}")
+            raise FluentActionInvalid(
+                f"row {number}: {portal_governed_message(row.fluent, governed)}"
+            )
         # An inactive holon's fluents do not change, and a holon's lifecycle state changes
-        # only through POST /holon/lifecycle (holonbridge/lifecycle.py).
+        # only through POST /holon/lifecycle (holonbridge/lifecycle.py), or a lifecycle row.
         blocked = await write_block(client, conn, row.fluent)
         if blocked:
             raise FluentActionInvalid(f"row {number}: {blocked.message}")
@@ -348,14 +434,33 @@ async def fire_fluent(
     if not rows:
         return FluentOutcome(0, 0)
 
+    ops = [
+        FluentOp(
+            fluent=row.fluent,
+            operation=row.operation,
+            value=row.value,
+            is_iri=row.is_iri,
+            description=row.description,
+        )
+        for row in rows
+        if isinstance(row, FluentRow)
+    ]
+    skipped = 0
+    lifecycle_rows = [(n, r) for n, r in enumerate(rows, start=1) if isinstance(r, LifecycleRow)]
+    if lifecycle_rows:
+        ops_from_lifecycle, skipped = await _lifecycle_ops(client, conn, trig, lifecycle_rows)
+        ops.extend(ops_from_lifecycle)
+
     seen: set[str] = set()
     for number, row in enumerate(rows, start=1):
-        if row.fluent in seen:
+        key = row.fluent if isinstance(row, FluentRow) else f"lifecycle:{row.holon}"
+        if key in seen:
+            what = f"<{row.fluent}>" if isinstance(row, FluentRow) else f"holon <{row.holon}>"
             raise FluentActionInvalid(
-                f"row {number}: <{row.fluent}> appears in more than one row; the rows of a firing "
+                f"row {number}: {what} appears in more than one row; the rows of a firing "
                 "are one transaction, which changes each fluent once"
             )
-        seen.add(row.fluent)
+        seen.add(key)
     times = {row.asserted_at for row in rows}
     if len(times) > 1:
         raise FluentActionInvalid(
@@ -363,25 +468,78 @@ async def fire_fluent(
             "with one valid time, so give every row the same ?assertedAt or none"
         )
 
+    if not ops:
+        return FluentOutcome(0, len(rows), skipped)
     try:
         await update_fluents(
             client,
             conn,
-            ops=[
-                FluentOp(
-                    fluent=row.fluent,
-                    operation=row.operation,
-                    value=row.value,
-                    is_iri=row.is_iri,
-                    description=row.description,
-                )
-                for row in rows
-            ],
+            ops=ops,
             asserted_by=trig.armed_by,
             asserted_datetime=times.pop(),
             description=f"trigger {trig.id}",
         )
     except (FluentError, SequenceError, FusekiError) as exc:
         reason = re.sub(r"\s+", " ", str(exc)).strip()[:300]
-        raise FluentActionInvalid(f"none of the {len(rows)} row(s) was applied: {reason}") from exc
-    return FluentOutcome(len(rows), len(rows))
+        raise FluentActionInvalid(f"none of the {len(ops)} row(s) was applied: {reason}") from exc
+    return FluentOutcome(len(ops), len(rows), skipped)
+
+
+async def _lifecycle_ops(
+    client: FusekiClient,
+    conn: Conn,
+    trig: "Trigger",
+    rows: list[tuple[int, LifecycleRow]],
+) -> tuple[list[FluentOp], int]:
+    """Fluent operations for the lifecycle rows, and how many rows needed none.
+
+    Checks the definer may write what a lifecycle change writes, then prepares each
+    holon (validates, declares the vocabulary, creates its lifecycle fluent node). Those
+    preparations are idempotent and stay if the transaction later fails.
+    """
+    from . import lifecycle as lc
+    from .acl import check_write
+
+    async def query_fn(q: str) -> dict:
+        return await client.select(conn, q)
+
+    graphs = [conn.holons_graph]
+    if not await lc.vocabulary_declared(client, conn):
+        graphs.append(conn.ontology_graph)
+    for graph in graphs:
+        decision = await check_write(
+            query_fn, conn.holons_graph, person=trig.armed_by, target=graph
+        )
+        if not decision.allowed:
+            raise FluentActionInvalid(
+                f"lifecycle rows need write access to <{graph}> for the trigger's definer: "
+                f"{decision.reason}"
+            )
+
+    ops: list[FluentOp] = []
+    skipped = 0
+    for number, row in rows:
+        try:
+            prepared = await lc.prepare_transition(
+                client,
+                conn,
+                holon=row.holon,
+                state=row.state,
+                reason=row.reason,
+                source=f"trigger {trig.id}",
+            )
+        except lc.LifecycleError as exc:
+            raise FluentActionInvalid(f"row {number}: {exc}") from exc
+        if isinstance(prepared, lc.LifecycleChange):  # already in that state
+            skipped += 1
+            continue
+        ops.append(
+            FluentOp(
+                fluent=prepared.fluent,
+                operation=Operation.SET,
+                value=prepared.target,
+                is_iri=True,
+                description=prepared.description,
+            )
+        )
+    return ops, skipped
