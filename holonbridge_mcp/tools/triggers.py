@@ -153,7 +153,11 @@ async def register_named_trigger(
     none, at most 20 a firing; they share one valid time and may not repeat a
     fluent. A failure leaves nothing written and is retried. The
     updates do not themselves fire state triggers, so a chain advances one step
-    per evaluation. Exactly one of ``on_fire``, ``on_fire_agent`` and
+    per evaluation. A row may instead carry ``?holon`` and ``?state``
+    (``Active``, ``Inactive`` or ``Tombstoned``; optional ``?reason``) to
+    change a holon's lifecycle state in the same transaction, which is how a
+    trigger deactivates a holon without an admin; you then also need write
+    access to the holons graph (and the ontology graph the first time). Exactly one of ``on_fire``, ``on_fire_agent`` and
     ``on_fire_fluent_query``.
     """
     return await _call(

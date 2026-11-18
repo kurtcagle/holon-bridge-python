@@ -2,7 +2,7 @@
 id: https://w3id.org/databook/holon-bridge-python-whats-new
 title: "What's New — holon-bridge-python"
 type: databook
-version: 1.0.35
+version: 1.0.36
 created: 2026-09-27
 updated: 2026-11-17
 author:
@@ -45,6 +45,17 @@ process:
    not needed yet.
 
 ## Log
+
+### 2026-11-17 (a trigger can deactivate a holon)
+
+- **A fluent-action trigger can now move a holon to a lifecycle state.** The action query
+  may return `?holon` and `?state` (`Active`, `Inactive` or `Tombstoned`, optional `?reason`)
+  instead of `?fluent` and `?value`. A lifecycle row is one more member of the firing's
+  all-or-none transaction, so a firing can set a holon's final fluent values and deactivate
+  it together; a holon already in the state is skipped. The definer needs write access to
+  the holons graph (and the ontology graph the first time) as well as the usual three, checked
+  at each firing. No new trigger kind, route or MCP argument. Portal effects do not take
+  lifecycle rows.
 
 ### 2026-11-17 (an inactive holon can no longer be rewritten through the ingest paths)
 
@@ -858,6 +869,11 @@ process:
 @prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+
+hb:release-2026-11-17-c a hb:ReleaseNote ;
+    dcterms:date "2026-11-17"^^xsd:date ;
+    rdfs:label "Triggers can deactivate holons (lifecycle rows in a fluent action)" ;
+    dcterms:description "The rows of an onFireFluentQuery action may carry ?holon and ?state (Active, Inactive or Tombstoned, as a name or the hb: IRI) and an optional ?reason instead of ?fluent and ?value. Each such row becomes a SetValueMode operation on the holon's lifecycle fluent inside the firing's single update_fluents transaction, so final fluent values and the deactivation land together or not at all. Fluent rows are checked against holder state before the transaction. A holon already in the state is skipped and reported. The ledger note reads lifecycle: STATE (reason) [trigger ID] and the entry is attributed to the person who armed the trigger. The definer needs write access to the holons graph, and the ontology graph the first time a dataset uses lifecycle, checked at every firing. Portal effect rows do not accept lifecycle rows. Prepared steps (vocabulary declaration and creating the lifecycle fluent node) are idempotent and remain if the transaction fails. Tested on rdflib; not run against a live Fuseki." .
 
 hb:release-2026-11-17-b a hb:ReleaseNote ;
     dcterms:date "2026-11-17"^^xsd:date ;

@@ -1423,6 +1423,8 @@ async def _evaluate(
                         outcome=kind_word, candidate_iri=None,
                     )
                     detail = f"{outcome.applied} of {outcome.total} fluent update(s) applied"
+                    if outcome.skipped:
+                        detail += f", {outcome.skipped} already in the requested lifecycle state"
                     firings.append(TriggerFiring(trig.id, focus, kind_word, detail=detail))
                 elif trig.review_required:
                     # A re-armed focus may still have the proposal from its

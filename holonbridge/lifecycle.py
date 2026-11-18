@@ -222,27 +222,36 @@ class LifecycleChange:
         }
 
 
-async def set_state(
+@dataclass(frozen=True)
+class PreparedTransition:
+    """A lifecycle change that is ready to be written as one fluent operation: the
+    fluent node exists and the vocabulary is declared. ``description`` is the ledger note."""
+
+    holon: str
+    fluent: str
+    previous: str
+    state: str
+    target: str
+    description: str
+
+
+async def prepare_transition(
     client: FusekiClient,
     conn: Conn,
     *,
     holon: str,
     state: str,
-    asserted_by: str | None,
     reason: str | None = None,
-    asserted_datetime: datetime | None = None,
-    gate_scope: str = "assertion",
-) -> LifecycleChange:
-    """Move ``holon`` to ``state`` (``Active``, ``Inactive`` or ``Tombstoned``).
+    source: str | None = None,
+) -> PreparedTransition | LifecycleChange:
+    """Validate a change and make the ground ready for it.
 
-    Any state may follow any other. Asking for the state a holon is already in
-    changes nothing and writes no ledger entry (``changed`` is False). The change
-    itself is an ordinary fluent transition, so it is gated, ledgered and
-    attributed like any other, and state triggers see it.
-
-    The caller is responsible for authorisation: this writes the ledger, the
-    scene, the sequences and the holons graph, and the ontology graph the first
-    time a dataset uses lifecycle (:func:`vocabulary_declared`).
+    Returns a :class:`LifecycleChange` with ``changed`` False if ``holon`` is already in
+    ``state`` (nothing is written), otherwise a :class:`PreparedTransition` for the caller
+    to apply, alone (:func:`set_state`) or inside a larger fluent transaction (a trigger's
+    action). Declares the vocabulary and creates the lifecycle fluent node if they are
+    missing; both are idempotent and harmless if the transition is then not applied.
+    ``source`` is added to the ledger note, for example ``trigger <id>``.
     """
     target = STATES.get(state)
     if target is None:
@@ -265,24 +274,58 @@ async def set_state(
     if current.fluent is None:
         await client.update(conn, _create_fluent_update(conn, holon, fluent))
 
-    note = f"lifecycle: {state}" + (f" ({reason})" if reason else "")
+    note = f"lifecycle: {state}"
+    if reason:
+        note += f" ({reason})"
+    if source:
+        note += f" [{source}]"
+    return PreparedTransition(holon, fluent, current.state, state, target, note)
+
+
+async def set_state(
+    client: FusekiClient,
+    conn: Conn,
+    *,
+    holon: str,
+    state: str,
+    asserted_by: str | None,
+    reason: str | None = None,
+    asserted_datetime: datetime | None = None,
+    gate_scope: str = "assertion",
+) -> LifecycleChange:
+    """Move ``holon`` to ``state`` (``Active``, ``Inactive`` or ``Tombstoned``).
+
+    Any state may follow any other. Asking for the state a holon is already in
+    changes nothing and writes no ledger entry (``changed`` is False). The change
+    itself is an ordinary fluent transition, so it is gated, ledgered and
+    attributed like any other, and state triggers see it.
+
+    The caller is responsible for authorisation: this writes the ledger, the
+    scene, the sequences and the holons graph, and the ontology graph the first
+    time a dataset uses lifecycle (:func:`vocabulary_declared`).
+    """
+    prepared = await prepare_transition(client, conn, holon=holon, state=state, reason=reason)
+    if isinstance(prepared, LifecycleChange):
+        return prepared
     try:
         result = await update_fluent(
             client,
             conn,
-            fluent=fluent,
+            fluent=prepared.fluent,
             operation=Operation.SET,
-            value=target,
+            value=prepared.target,
             is_iri=True,
             asserted_datetime=asserted_datetime,
             asserted_by=asserted_by,
-            description=note,
+            description=prepared.description,
             gate_scope=gate_scope,
         )
     except FluentError as exc:
         raise LifecycleError("fluent_error", str(exc)) from exc
 
-    return LifecycleChange(holon, fluent, current.state, state, True, result.assertion_iri)
+    return LifecycleChange(
+        holon, prepared.fluent, prepared.previous, state, True, result.assertion_iri
+    )
 
 
 # --- the guard --------------------------------------------------------------------
