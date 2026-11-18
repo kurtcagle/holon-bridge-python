@@ -233,8 +233,13 @@ async def get_holon(
     on_behalf_of: str | None = None,
     observed_at: str | None = None,
     inserted_at: str | None = None,
+    include_tombstoned: bool = False,
 ) -> str | dict:
     """Retrieve a holon as a DataBook.
+
+    The frontmatter reports the holon's ``lifecycle`` state (Active, Inactive or
+    Tombstoned). Neighbour lists leave out Tombstoned holons unless
+    ``include_tombstoned`` is true; the holon you ask for is returned whatever its state.
 
     Projection modes: immersive, cinematic, active_inference, exploded_view.
 
@@ -273,6 +278,8 @@ async def get_holon(
         params["observed_at"] = observed_at
     if inserted_at:
         params["inserted_at"] = inserted_at
+    if include_tombstoned:
+        params["include_tombstoned"] = "true"
     return await _call("GET", "/holon", params=params, text=True)
 
 

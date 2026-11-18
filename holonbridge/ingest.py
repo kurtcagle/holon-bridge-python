@@ -57,6 +57,12 @@ the taxonomy graph joined the ontology as read-only context) -- see
 can refuse the write with a 422. A dataset with no context shapes is
 validated exactly as before. A caller-supplied ``shapes_graph`` means
 "validate against exactly this", so the context pack is not added to it.
+
+CHANGED 2026-11-17 (holon lifecycle): every write also passes
+``structural_freeze.check_structural``, which refuses (409) a payload whose
+subjects include an Inactive or Tombstoned holon or one of its fluents, any use
+of ``hb:lifecycleStatus``, and a ``replace`` of a graph that holds such subjects.
+The check runs after the ACL decision and before the lock.
 """
 
 from __future__ import annotations
@@ -72,7 +78,8 @@ from . import write_lock
 from .acl import Animus, check_replace, check_write
 from .conn import Conn
 from .fuseki import FusekiClient, FusekiError
-from .touched import turtle_predicates
+from .structural_freeze import check_structural
+from .touched import turtle_graph, turtle_predicates, turtle_subjects
 from .trigger_hook import after_write
 
 logger = logging.getLogger(__name__)
@@ -174,6 +181,18 @@ async def write_turtle_to_graph(
             status.HTTP_403_FORBIDDEN,
             detail=f"{decision.reason} (graph: {graph_iri})",
         )
+
+    # An Inactive or Tombstoned holon cannot be rewritten through this path.
+    await check_structural(
+        client,
+        conn,
+        subjects=turtle_subjects(turtle),
+        predicates=turtle_predicates(turtle),
+        raw_text=turtle,
+        graph=graph_iri,
+        replace=mode == "replace",
+        payload=turtle_graph(turtle) if mode == "replace" else None,
+    )
 
     resolved_shapes_graph = shapes_graph
     if resolved_shapes_graph is None and shacl_required:

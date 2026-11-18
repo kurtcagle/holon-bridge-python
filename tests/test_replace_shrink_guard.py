@@ -37,6 +37,10 @@ class FakeFuseki:
 
     async def select(self, conn, query):
         self.calls.append(("select", query))
+        if "COUNT" not in query.upper():
+            # Other reads (the structural freeze's holder lookup, the trigger registry)
+            # find nothing in this fake world.
+            return {"results": {"bindings": []}}
         graph = query.split("GRAPH <", 1)[1].split(">", 1)[0]
         return {"results": {"bindings": [{"n": {"value": str(self.graphs.get(graph, 0))}}]}}
 

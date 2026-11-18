@@ -113,8 +113,8 @@ class RegisterTriggerRequest(BaseModel):
     on_fire_fluent_query: str | None = Field(
         default=None,
         description="id of a named SELECT whose rows (?fluent, ?value, optional ?operation, ?isIri, "
-        "?assertedAt, ?description), bound to the focus, are applied as fluent updates by the bridge, "
-        "as you. Needs review_required=false. Exactly one of on_fire, on_fire_agent and "
+        "?assertedAt, ?description; or ?holon and ?state to change a holon's lifecycle state), "
+        "bound to the focus, are applied as fluent updates by the bridge, as you. Needs review_required=false. Exactly one of on_fire, on_fire_agent and "
         "on_fire_fluent_query.",
     )
     agent_task: str | None = Field(default=None, description="what to ask the agent (on_fire_agent only)")

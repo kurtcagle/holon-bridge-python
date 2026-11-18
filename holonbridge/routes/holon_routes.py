@@ -62,6 +62,10 @@ async def holon(
         default=None,
         description="Transaction-time bound: only entries inserted (hevt:insertedAt) by then count, so this reads what the record held at that moment. Omit for no bound. Entries from before insertion time was stamped count as known.",
     ),
+    include_tombstoned: bool = Query(
+        default=False,
+        description="List Tombstoned holons among the neighbours. The holon asked for is returned whatever its state.",
+    ),
     on_behalf_of: str | None = Query(
         default=None,
         description=(
@@ -164,6 +168,7 @@ async def holon(
             include_shapes=include_shapes,
             observed_at=observed_at,
             inserted_at=inserted_at,
+            include_tombstoned=include_tombstoned,
         )
     except AsOfUnsupportedError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

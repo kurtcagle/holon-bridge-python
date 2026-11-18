@@ -82,6 +82,7 @@ from typing import Any
 from .conn import Conn
 from .databook import Block, DataBook
 from .fuseki import FusekiClient
+from .lifecycle import read_state, read_succession
 from .persona_scope import ScopedGraph, build_neighbour_query, build_state_query
 
 HOLON = "https://w3id.org/holon/"
@@ -244,8 +245,13 @@ async def get_holon(
     include_shapes: bool = True,
     observed_at: datetime | None = None,
     inserted_at: datetime | None = None,
+    include_tombstoned: bool = False,
 ) -> DataBook:
     """Retrieve a holon and project it as a DataBook.
+
+    Neighbour lists (contained by, contains, connected to) leave out Tombstoned
+    holons unless ``include_tombstoned`` is set. The holon asked for is returned
+    whatever its state, and the frontmatter reports it under ``lifecycle``.
 
     ``scope`` is the caller's resolved read scope (see
     ``persona_scope.resolve_scope_graphs``) -- the route, not this
@@ -294,10 +300,15 @@ async def get_holon(
 
     state = await client.construct(conn, query)
 
-    up_query = build_neighbour_query(conn, holon_iri, scope, root="isPartOf", direction="up")
-    down_query = build_neighbour_query(conn, holon_iri, scope, root="isPartOf", direction="down")
+    hide = not include_tombstoned
+    up_query = build_neighbour_query(
+        conn, holon_iri, scope, root="isPartOf", direction="up", hide_tombstoned=hide
+    )
+    down_query = build_neighbour_query(
+        conn, holon_iri, scope, root="isPartOf", direction="down", hide_tombstoned=hide
+    )
     across_query = build_neighbour_query(
-        conn, holon_iri, scope, root="isConnectedTo", direction="across"
+        conn, holon_iri, scope, root="isConnectedTo", direction="across", hide_tombstoned=hide
     )
 
     parents = await _neighbours(client, conn, up_query)
@@ -329,9 +340,20 @@ async def get_holon(
             "parents": len(parents),
             "children": len(children),
             "connections": len(peers),
+            "tombstonedHidden": hide,
         },
     }
+    lifecycle = await read_state(client, conn, holon_iri)
+    frontmatter["lifecycle"] = {"state": lifecycle.state, "since": lifecycle.since}
+    successor, predecessor = await read_succession(client, conn, holon_iri)
+    if successor:
+        frontmatter["lifecycle"]["succeededBy"] = successor
+    if predecessor:
+        frontmatter["lifecycle"]["predecessor"] = predecessor
     if as_of:
+        # The lifecycle above is the holon's state now. Its state at observed_at is the
+        # value of its hb:lifecycleStatus fluent in the state block below.
+        frontmatter["lifecycle"]["note"] = "current state, not as of observed_at"
         frontmatter["neighbourScope"] = [g.iri for g in scope]
         frontmatter["asOf"] = {
             "observedAt": eff_observed.isoformat() if eff_observed else None,
