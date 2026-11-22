@@ -106,12 +106,12 @@ def revoke_update(holons_graph: str, iri: str, when: datetime) -> str:
 
 
 async def list_grants(query_fn: QueryFn, holons_graph: str, *, grantee: str | None = None) -> list[dict]:
-    who = f"<{grantee}>" if grantee else "?grantee"
+    only = f"FILTER(?grantee = <{safe_iri(grantee)}>)" if grantee else ""
     result = await _run(query_fn, f"""PREFIX holon: <{HOLON}>
 SELECT ?grant ?grantee ?fluent ?prefix ?until ?revoked WHERE {{
   GRAPH <{holons_graph}> {{
-    ?grant a holon:FluentGrant ; holon:grantee {who} .
-    BIND({who} AS ?grantee)
+    ?grant a holon:FluentGrant ; holon:grantee ?grantee .
+    {only}
     OPTIONAL {{ ?grant holon:coversFluent ?fluent }}
     OPTIONAL {{ ?grant holon:coversFluentPrefix ?prefix }}
     OPTIONAL {{ ?grant holon:validUntil ?until }}
@@ -121,7 +121,7 @@ SELECT ?grant ?grantee ?fluent ?prefix ?until ?revoked WHERE {{
     grants: dict[str, dict] = {}
     for b in _bindings(result):
         g = grants.setdefault(b["grant"]["value"], {
-            "grant": b["grant"]["value"], "grantee": b.get("grantee", {}).get("value", grantee),
+            "grant": b["grant"]["value"], "grantee": b["grantee"]["value"],
             "fluents": set(), "prefixes": set(), "until": None, "revoked": False})
         if "fluent" in b:
             g["fluents"].add(b["fluent"]["value"])
