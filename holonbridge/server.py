@@ -34,6 +34,7 @@ from .routes import (
     delegation,
     events,
     fluent,
+    fluent_grants as fluent_grant_routes,
     graphs,
     holon_routes,
     identity_admin,
@@ -130,6 +131,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(lifecycle_routes.router)
     app.include_router(events.router)
     app.include_router(fluent.router)
+    app.include_router(fluent_grant_routes.router)
     app.include_router(identity_admin.router)
     app.include_router(dataset_claim.router)
     app.include_router(dataset_create.router)
