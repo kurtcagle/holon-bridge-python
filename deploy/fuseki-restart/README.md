@@ -29,6 +29,14 @@ the bridge uses. Optional: `FUSEKI_RESTART_DIR` (default `/var/lib/holonbridge`)
 | `SNAPSHOT_DIR` | where snapshots and the pinned default backup live |
 | `FUSEKI_BACKUP_DIR` | the nightly backup's folder; `SNAPSHOT_DIR` may not be inside it |
 
+## Bridge unit dependency
+
+`holonbridge.service` must use `Wants=fuseki.service` (with `After=fuseki.service`), not
+`Requires=`. With `Requires=`, restarting Fuseki stops the bridge first, and the bridge is the
+process waiting for the helper's result: its shutdown hangs until systemd's stop timeout (about
+90 s), the call is dropped, and in-memory datasets are never rebuilt. After changing the line,
+`systemctl daemon-reload`; no restart is needed.
+
 ## Rollback
 
 After every restart that comes back healthy, the helper copies Fuseki's configuration to
