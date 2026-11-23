@@ -216,6 +216,10 @@ class Settings:
     # Largest response ``source_url`` will read, in bytes, counted after
     # decompression. Larger responses are abandoned and the ingest fails.
     fetch_max_bytes: int = 10 * 1024 * 1024
+    # Largest image/audio/video ``POST /media/fetch`` (the ``fetch_media`` tool) will return, in
+    # bytes. It uses the same ``FETCH_ALLOWLIST`` policy; a caller's own ``max_bytes`` can only
+    # lower this. The body travels back base64-encoded, about a third larger.
+    fetch_media_max_bytes: int = 8 * 1024 * 1024
     # JSON-LD (holonbridge/jsonld.py). A JSON-LD payload may name a remote
     # ``@context``; by default the bridge refuses those rather than fetch them
     # (``JSONLD_FETCH_CONTEXTS``). Turned on, each context is fetched through the
@@ -389,6 +393,9 @@ class Settings:
             webhook_allowlist=parse_allowlist(os.getenv("WEBHOOK_ALLOWLIST")),
             fetch_allowlist=parse_allowlist(os.getenv("FETCH_ALLOWLIST")),
             fetch_max_bytes=max(1, int(os.getenv("FETCH_MAX_BYTES", str(10 * 1024 * 1024)))),
+            fetch_media_max_bytes=max(
+                1, int(os.getenv("FETCH_MEDIA_MAX_BYTES", str(8 * 1024 * 1024)))
+            ),
             jsonld_fetch_contexts=_flag("JSONLD_FETCH_CONTEXTS", False),
             jsonld_max_bytes=max(1, int(os.getenv("JSONLD_MAX_BYTES", str(5 * 1024 * 1024)))),
             jsonld_output_engine=_jsonld_engine(os.getenv("JSONLD_OUTPUT_ENGINE")),
