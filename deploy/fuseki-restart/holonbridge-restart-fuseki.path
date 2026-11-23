@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch for a request to restart Fuseki (holon-bridge restart_fuseki)
+
+[Path]
+# Fires the service when the bridge writes the request file. The helper moves the file aside
+# first thing, so one request is exactly one restart.
+PathExists=/var/lib/holonbridge/restart-fuseki.request
+Unit=holonbridge-restart-fuseki.service
+
+[Install]
+WantedBy=multi-user.target

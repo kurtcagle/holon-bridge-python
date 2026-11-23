@@ -151,7 +151,7 @@ async def provision_text_index(
 
 @mcp.tool()
 async def create_dataset(
-    name: str, kind: str, claim: bool = True, shapes: bool = True
+    name: str, kind: str, claim: bool = True, shapes: bool = True, restart: str = "plan"
 ) -> dict:
     """Create a new, empty dataset on the backend. There is no drop tool.
 
@@ -179,15 +179,24 @@ async def create_dataset(
     the bridge adds one to the dataset's configuration file, and it only
     exists after Fuseki is RESTARTED (``restartRequired`` in the result;
     ``shaclEnabled`` is true once it is live). Until then a SHACL-gated bridge
-    cannot write to the dataset -- tell the person to restart Fuseki. Unless
-    ``shapes=false``, the bundled identity/delegation/fluent shapes are
-    seeded into the shapes graph at once. Pass ``shapes=false`` too when you
-    want a completely untouched dataset.
+    cannot write to the dataset. Unless ``shapes=false``, the bundled
+    identity/delegation/fluent shapes are seeded into the shapes graph at once.
+    Pass ``shapes=false`` too when you want a completely untouched dataset.
+
+    When a restart is needed the result carries a ``restart`` block: the dry-run
+    plan from ``restart_fuseki`` (datasets, kinds, backup sources, blockers),
+    ``canRestart``, and what to do next. ``restart="commit"`` also performs the
+    restart in the same call -- only for a caller on the operator's
+    ``FUSEKI_RESTARTERS`` (checked BEFORE the dataset is created; otherwise 403
+    and nothing is made). If something blocks the restart the dataset is still
+    created and ``restarted`` is false. The default, ``"plan"``, never restarts.
 
     Does not switch you to the new dataset; call ``switch_dataset`` for that.
     """
     return await _call(
-        "POST", "/datasets", json_body={"name": name, "kind": kind, "claim": claim, "shapes": shapes}
+        "POST",
+        "/datasets",
+        json_body={"name": name, "kind": kind, "claim": claim, "shapes": shapes, "restart": restart},
     )
 
 
@@ -238,7 +247,8 @@ async def snapshot_dataset() -> dict:
 async def restore_dataset(snapshot: str | None = None) -> dict:
     """Put a snapshot of the ACTIVE dataset back into it. Use after Fuseki lost it.
 
-    ``snapshot`` is an id from ``list_snapshots``; leave it out for the newest.
+    ``snapshot`` is an id from ``list_snapshots``; leave it out for the newest, or
+    pass ``"default"`` for the pinned default backup (``pin_default_backup``).
 
     Only fills an EMPTY dataset and never overwrites: a dataset with any content
     is refused. Restores exactly what ``snapshot_dataset`` saved, ownership
@@ -316,3 +326,19 @@ async def export_download_link(export_id: str, ttl_seconds: int | None = None) -
     if ttl_seconds is not None:
         body["ttlSeconds"] = ttl_seconds
     return await _call("POST", f"/admin/dataset/export/{export_id}/link", json_body=body)
+
+
+@mcp.tool()
+async def pin_default_backup(snapshot: str | None = None) -> dict:
+    """Pin a snapshot of the ACTIVE dataset as its DEFAULT BACKUP.
+
+    The default backup is a copy kept apart from the rotating snapshots, so retention
+    never removes it. ``restart_fuseki`` rebuilds an in-memory dataset from it in
+    preference to the newest snapshot, and ``restore_dataset(snapshot="default")`` reads
+    it. ``snapshot`` is an id from ``list_snapshots``; leave it out for the newest. Replaces
+    the previous default. Take a snapshot first (``snapshot_dataset``).
+
+    Needs admin on the dataset. Off unless the operator set ``SNAPSHOT_DIR``.
+    Acts on the active dataset -- ``switch_dataset`` first.
+    """
+    return await _call("POST", "/admin/dataset/pin-default", json_body={"snapshot": snapshot})
