@@ -1,7 +1,8 @@
 [Unit]
 Description=Restart Fuseki for holon-bridge, with rollback of a bad configuration
-# Do not run at the same time as the nightly backup: a restart during a dump aborts it.
-Conflicts=holonbridge-backup.service
+# No Conflicts= on holonbridge-backup.service: that would STOP a running backup when this unit
+# starts, which is the very thing to avoid. The bridge refuses to request a restart while a
+# Fuseki backup task is running (/$/tasks), so the two do not overlap in practice.
 
 [Service]
 Type=oneshot
