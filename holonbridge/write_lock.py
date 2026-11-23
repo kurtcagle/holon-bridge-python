@@ -45,6 +45,11 @@ from .conn import Conn
 _locks: defaultdict[tuple[str, str], asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
+def locked_datasets(base_url: str) -> list[str]:
+    """Datasets on ``base_url`` that have a write in flight right now."""
+    return sorted(ds for (url, ds), lock in _locks.items() if url == base_url and lock.locked())
+
+
 def for_conn(conn: Conn) -> asyncio.Lock:
     """The mutex guarding writes against this connection's target dataset.
 

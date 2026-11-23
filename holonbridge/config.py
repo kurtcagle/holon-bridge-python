@@ -150,6 +150,18 @@ def parse_dataset_creators(raw: str | None) -> tuple[str, ...]:
     return _parse_identifier_list(raw, "DATASET_CREATORS")
 
 
+def parse_fuseki_restarters(raw: str | None) -> tuple[str, ...]:
+    """``FUSEKI_RESTARTERS="login-a,login-b"`` -> the external identifiers that may
+    restart the Fuseki server (``restart_fuseki``).
+
+    A restart interrupts every dataset on the server and empties every in-memory
+    one, so it is a server-level act with its own list, separate from
+    ``DATASET_CREATORS``: being allowed to create a dataset does not imply being
+    allowed to take the server down. Empty by default, which turns it off.
+    """
+    return _parse_identifier_list(raw, "FUSEKI_RESTARTERS")
+
+
 @dataclass
 class Settings:
     """Process-level settings, all overridable by environment variable."""
@@ -304,6 +316,22 @@ class Settings:
     # whether this process can see that host's disk.
     fuseki_config_dir: Path | None = None
 
+    # ``restart_fuseki``: external identifiers allowed to restart Fuseki. Empty
+    # turns it off. See fuseki_restart.py.
+    fuseki_restarters: tuple[str, ...] = ()
+    # Directory shared with the root helper that actually restarts Fuseki (a
+    # systemd path unit watches it; see deploy/fuseki-restart/). The bridge
+    # writes ``restart-fuseki.request`` here and reads ``restart-fuseki.result.json``
+    # back. Unset turns ``restart_fuseki`` off.
+    fuseki_restart_dir: Path | None = None
+    # Minimum seconds between two restarts, so a loop cannot keep Fuseki down.
+    fuseki_restart_min_interval: int = 60
+    # Where Fuseki's own backup API writes its dumps (``$BK`` in the nightly
+    # backup script). Optional; when set, SNAPSHOT_DIR must not be inside it,
+    # because a retention sweep over that folder would delete the pinned default
+    # backup.
+    fuseki_backup_dir: Path | None = None
+
     def __post_init__(self) -> None:
         if self.fluent_gate_scope not in ("assertion", "holder"):
             raise ValueError(
@@ -319,6 +347,14 @@ class Settings:
                 "ALLOW_LEGACY_BEARER=false but no IDENTITY_TOKENS or PROXY_TOKENS are "
                 "configured: no credential could ever authenticate"
             )
+        if self.snapshot_dir is not None and self.fuseki_backup_dir is not None:
+            snap = self.snapshot_dir.resolve()
+            bk = self.fuseki_backup_dir.resolve()
+            if snap == bk or bk in snap.parents:
+                raise ValueError(
+                    "SNAPSHOT_DIR must not be inside FUSEKI_BACKUP_DIR: the nightly backup's "
+                    "retention sweep over that folder would delete the pinned default backup"
+                )
         seen: dict[str, str] = {}
         for token, role in (
             *( (t, "identity") for t in self.identity_tokens),
@@ -385,6 +421,14 @@ class Settings:
             scheduler_max_firing_depth=int(os.getenv("SCHEDULER_MAX_FIRING_DEPTH", "3")),
             config_path=Path(os.getenv("HOLONBRIDGE_CONFIG", str(DEFAULT_CONFIG_PATH))),
             fuseki_config_dir=Path(fuseki_config_dir_raw) if fuseki_config_dir_raw else None,
+            fuseki_restarters=parse_fuseki_restarters(os.getenv("FUSEKI_RESTARTERS")),
+            fuseki_restart_dir=(
+                Path(os.environ["FUSEKI_RESTART_DIR"]) if os.getenv("FUSEKI_RESTART_DIR") else None
+            ),
+            fuseki_restart_min_interval=max(0, int(os.getenv("FUSEKI_RESTART_MIN_INTERVAL", "60"))),
+            fuseki_backup_dir=(
+                Path(os.environ["FUSEKI_BACKUP_DIR"]) if os.getenv("FUSEKI_BACKUP_DIR") else None
+            ),
         )
 
 

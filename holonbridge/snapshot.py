@@ -40,6 +40,9 @@ Rules, written down because each one guards something:
   the dataset is empty again and the restore can be retried.
 * **Bounded.** ``SNAPSHOT_MAX_BYTES`` caps each snapshot, checked before
   anything is written; disk use is at most that times ``SNAPSHOT_KEEP``.
+* **A pinned default backup survives pruning.** ``{dataset}/default/`` is a copy of one
+  snapshot, made by :func:`pin_default` and nothing else. Its name is not a snapshot id, so
+  the retention rules above cannot reach it, and ``restore(snapshot="default")`` reads it.
 * **Confined.** The directory name and the snapshot id are checked against
   strict patterns, graph files have fixed names, and manifest entries are
   re-checked on restore, so nothing a caller or a manifest says can name a path
@@ -68,6 +71,9 @@ _ID = re.compile(r"^\d{8}T\d{6}Z(?:-\d+)?$")
 _GRAPH_FILE = re.compile(r"^g\d{4,}\.ttl$")
 MANIFEST = "manifest.json"
 VERSION = 1
+#: Name of the pinned default backup: ``{dataset}/default/``. It is not a valid snapshot id,
+#: so listing and pruning never touch it; only :func:`pin_default` writes it.
+DEFAULT = "default"
 
 
 class SnapshotError(Exception):
@@ -289,19 +295,28 @@ class Restored:
 
 def _read_manifest(settings: Settings, dataset: str, snapshot: str | None) -> tuple[Path, dict[str, Any]]:
     directory = _dir(settings, dataset)
-    if snapshot is not None and not _ID.match(snapshot):
+    if snapshot is not None and snapshot != DEFAULT and not _ID.match(snapshot):
         raise SnapshotError(400, "bad_snapshot_id", f"{snapshot!r} is not a snapshot id")
-    ids = snapshot_ids(settings, dataset)
-    if not ids or (snapshot is not None and snapshot not in ids):
-        have = f"; it has {', '.join(reversed(ids))}" if ids else ""
-        raise SnapshotError(
-            404,
-            "no_snapshot",
-            f"no snapshot{' ' + snapshot if snapshot else ''} of {dataset!r}{have}; "
-            "seed_dataset_shapes can at least restore its shapes",
-        )
-    chosen = snapshot or ids[-1]
-    snap_dir = directory / chosen
+    if snapshot == DEFAULT:
+        snap_dir, chosen = directory / DEFAULT, DEFAULT
+        if not (snap_dir / MANIFEST).is_file():
+            raise SnapshotError(
+                404,
+                "no_default_backup",
+                f"no default backup is pinned for {dataset!r}; pin_default_backup creates one",
+            )
+    else:
+        ids = snapshot_ids(settings, dataset)
+        if not ids or (snapshot is not None and snapshot not in ids):
+            have = f"; it has {', '.join(reversed(ids))}" if ids else ""
+            raise SnapshotError(
+                404,
+                "no_snapshot",
+                f"no snapshot{' ' + snapshot if snapshot else ''} of {dataset!r}{have}; "
+                "seed_dataset_shapes can at least restore its shapes",
+            )
+        chosen = snapshot or ids[-1]
+        snap_dir = directory / chosen
     try:
         manifest = json.loads((snap_dir / MANIFEST).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -318,6 +333,70 @@ def _read_manifest(settings: Settings, dataset: str, snapshot: str | None) -> tu
             raise SnapshotError(500, "bad_snapshot", f"unusable entry in the snapshot manifest: {entry!r}")
     manifest["_id"] = chosen
     return snap_dir, manifest
+
+
+def has_default(settings: Settings, dataset: str) -> bool:
+    """Whether a default backup is pinned for ``dataset`` (False when snapshots are off)."""
+    try:
+        return (_dir(settings, dataset) / DEFAULT / MANIFEST).is_file()
+    except SnapshotError:
+        return False
+
+
+def newest_id(settings: Settings, dataset: str) -> str | None:
+    """The newest snapshot id of ``dataset``, or ``None`` (also when snapshots are off)."""
+    try:
+        ids = snapshot_ids(settings, dataset)
+    except SnapshotError:
+        return None
+    return ids[-1] if ids else None
+
+
+@dataclass(frozen=True)
+class Pinned:
+    dataset: str
+    source: str
+    graphs: int
+    bytes: int
+    pinned_at: str
+
+
+def pin_default(settings: Settings, dataset: str, snapshot: str | None = None) -> Pinned:
+    """Copy a snapshot of ``dataset`` (the newest unless ``snapshot`` names one) to ``default/``.
+
+    The only writer of the default backup. Built beside it and moved into place, so a crash
+    leaves the previous default intact. Raises :class:`SnapshotError`.
+    """
+    src_dir, manifest = _read_manifest(settings, dataset, None if snapshot in (None, "latest") else snapshot)
+    if manifest["_id"] == DEFAULT:
+        raise SnapshotError(400, "bad_snapshot_id", "the default backup cannot be pinned from itself")
+    directory = _dir(settings, dataset)
+    tmp = directory / f".{DEFAULT}.tmp-{os.getpid()}"
+    old = directory / f".{DEFAULT}.old-{os.getpid()}"
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir()
+        for entry in manifest["graphs"]:
+            shutil.copy2(src_dir / entry["file"], tmp / entry["file"])
+        pinned = {k: v for k, v in manifest.items() if k != "_id"}
+        pinned.update(pinnedFrom=manifest["_id"], pinnedAt=now)
+        (tmp / MANIFEST).write_text(json.dumps(pinned, indent=2), encoding="utf-8")
+        target = directory / DEFAULT
+        if target.exists():
+            os.replace(target, old)
+        os.replace(tmp, target)
+        shutil.rmtree(old, ignore_errors=True)
+    except OSError as exc:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise SnapshotError(500, "snapshot_write_failed", f"cannot pin the default backup: {exc}") from exc
+    return Pinned(
+        dataset,
+        manifest["_id"],
+        len(manifest["graphs"]),
+        sum(int(g.get("bytes", 0)) for g in manifest["graphs"]),
+        now,
+    )
 
 
 async def restore(

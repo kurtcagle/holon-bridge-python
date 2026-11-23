@@ -27,6 +27,7 @@ from __future__ import annotations
 from . import (
     agents,
     audit,
+    backend,
     banks,
     candidates,
     core,
@@ -52,6 +53,7 @@ from . import (
 __all__ = [
     "agents",
     "audit",
+    "backend",
     "banks",
     "candidates",
     "core",

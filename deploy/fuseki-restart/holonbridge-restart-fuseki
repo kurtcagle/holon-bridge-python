@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Root helper behind restart_fuseki. Fired by holonbridge-restart-fuseki.path when the bridge
+# writes restart-fuseki.request into $FUSEKI_RESTART_DIR. Install as
+# /usr/local/sbin/holonbridge-restart-fuseki (root:root, 0755).
+#
+# What it does, in order:
+#   1. Takes the request (moves it aside, so one request is one restart) and reads ONE field,
+#      its id, which must be 32 hex characters. Nothing in the request is ever executed.
+#   2. Restarts fuseki.service and waits up to HEALTH_WAIT seconds for it to be active AND
+#      answering /$/ping.
+#   3. Healthy: copies Fuseki's configuration to last-known-good/ and reports ok.
+#      Not healthy: puts last-known-good/ back over the configuration, restarts again, and
+#      reports rolledBack. (One bad assembler file aborts the whole server, which is the usual
+#      way a restart fails.) With no last-known-good yet it cannot roll back and says so.
+#   4. Writes restart-fuseki.result.json atomically, for the bridge to read.
+set -uo pipefail
+
+CONF_FILE="${HOLONBRIDGE_HOST_CONF:-/etc/holonbridge/host.conf}"
+# shellcheck disable=SC1090
+[ -r "$CONF_FILE" ] && . "$CONF_FILE"
+
+STATE="${FUSEKI_RESTART_DIR:-/var/lib/holonbridge}"
+CONFIG_DIR="${FUSEKI_CONFIG_DIR:?FUSEKI_CONFIG_DIR must be set in $CONF_FILE}"
+SERVICE="${FUSEKI_SERVICE:-fuseki.service}"
+PING_URL="${FUSEKI_PING_URL:-http://127.0.0.1:3030/\$/ping}"
+HEALTH_WAIT="${HEALTH_WAIT:-60}"
+LKG="$STATE/last-known-good"
+
+REQ="$STATE/restart-fuseki.request"
+PROC="$STATE/restart-fuseki.processing"
+RES="$STATE/restart-fuseki.result.json"
+
+now() { date -u +%Y-%m-%dT%H:%M:%S+00:00; }
+
+[ -f "$REQ" ] || exit 0
+mv -f "$REQ" "$PROC" || exit 0
+
+ID="$(python3 - "$PROC" <<'PY'
+import json, re, sys
+try:
+    rid = json.load(open(sys.argv[1])).get("id", "")
+except Exception:
+    rid = ""
+print(rid if re.fullmatch(r"[0-9a-f]{32}", str(rid)) else "")
+PY
+)"
+
+report() {  # report ok rolledBack message
+    python3 - "$RES" "$ID" "$1" "$2" "$3" "$STARTED" "$(now)" <<'PY'
+import json, os, sys
+path, rid, ok, rolled, message, started, finished = sys.argv[1:8]
+tmp = path + ".tmp"
+with open(tmp, "w") as fh:
+    json.dump({"id": rid, "ok": ok == "true", "rolledBack": rolled == "true",
+               "message": message, "startedAt": started, "finishedAt": finished}, fh, indent=2)
+os.replace(tmp, path)
+PY
+    rm -f "$PROC"
+}
+
+STARTED="$(now)"
+if [ -z "$ID" ]; then
+    echo "restart request has no valid id; ignoring" >&2
+    rm -f "$PROC"
+    exit 0
+fi
+
+healthy() {  # wait up to HEALTH_WAIT s for the service to be active and answering
+    local deadline=$((SECONDS + HEALTH_WAIT))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if systemctl is-active --quiet "$SERVICE" && curl -fsS --max-time 3 "$PING_URL" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+systemctl restart "$SERVICE"
+if healthy; then
+    mkdir -p "$LKG.new" && rm -rf "$LKG.new"/* && cp -a "$CONFIG_DIR"/. "$LKG.new"/ \
+        && rm -rf "$LKG" && mv "$LKG.new" "$LKG"
+    report true false "Fuseki restarted and is answering"
+    exit 0
+fi
+
+if [ -d "$LKG" ]; then
+    echo "Fuseki did not come back; restoring the last known-good configuration" >&2
+    find "$CONFIG_DIR" -mindepth 1 -delete
+    cp -a "$LKG"/. "$CONFIG_DIR"/
+    systemctl restart "$SERVICE"
+    if healthy; then
+        report false true "Fuseki did not start with the new configuration; the last known-good configuration was restored and Fuseki is running again"
+    else
+        report false true "Fuseki did not start, and did not start after restoring the last known-good configuration either; it needs a person (journalctl -u $SERVICE)"
+    fi
+else
+    report false false "Fuseki did not come back and there is no last-known-good configuration yet to roll back to (the first successful restart creates it); it needs a person (journalctl -u $SERVICE)"
+fi
+exit 0

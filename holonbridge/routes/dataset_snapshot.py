@@ -34,7 +34,7 @@ from ..deps import (
     TokenAuth,
     require_auth,
 )
-from ..snapshot import SnapshotError, list_snapshots, restore, take
+from ..snapshot import SnapshotError, list_snapshots, pin_default, restore, take
 
 router = APIRouter(prefix="/admin/dataset", tags=["admin"])
 
@@ -82,8 +82,53 @@ async def snapshot_dataset(
 class RestoreRequest(BaseModel):
     snapshot: str | None = Field(
         default=None,
-        description="Id of the snapshot to restore (from list_snapshots). Default: the newest.",
+        description="Id of the snapshot to restore (from list_snapshots), or \"default\" for the pinned "
+        "default backup. Default: the newest snapshot.",
     )
+
+
+class PinRequest(BaseModel):
+    snapshot: str | None = Field(
+        default=None,
+        description="Id of the snapshot to pin (from list_snapshots). Default: the newest.",
+    )
+
+
+@router.post("/pin-default")
+async def pin_default_backup(
+    body: PinRequest, animus: AnimusDep, conn: ConnDep, client: ClientDep, settings: SettingsDep
+) -> dict:
+    """Pin a snapshot of the active dataset as its *default backup*.
+
+    The default backup is a copy kept apart from the rotating snapshots, so retention never
+    removes it; ``restart_fuseki`` rebuilds an in-memory dataset from it in preference to the
+    newest snapshot. Admin on the dataset only, like taking the snapshot it copies. Replaces
+    the previous default. 404 ``no_snapshot`` if there is nothing to pin; 503
+    ``snapshot_dir_unset`` when snapshots are off.
+    """
+
+    async def query_fn(query: str) -> dict:
+        return await client.select(conn, query)
+
+    if not await is_admin(query_fn, conn.holons_graph, person=animus.person):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail="admin role required")
+    try:
+        pinned = pin_default(settings, conn.dataset, body.snapshot)
+    except SnapshotError as exc:
+        audit.annotate(reason=exc.code)
+        raise HTTPException(exc.status, detail=exc.detail()) from exc
+    audit.annotate(
+        authorised_by=animus.person,
+        authorised_reason=f"snapshot {pinned.source} of {pinned.dataset!r} pinned as its default backup",
+    )
+    return {
+        "ok": True,
+        "dataset": pinned.dataset,
+        "pinnedFrom": pinned.source,
+        "graphs": pinned.graphs,
+        "bytes": pinned.bytes,
+        "pinnedAt": pinned.pinned_at,
+    }
 
 
 def _creator_or_403(request: Request, settings, token_auth, what: str):

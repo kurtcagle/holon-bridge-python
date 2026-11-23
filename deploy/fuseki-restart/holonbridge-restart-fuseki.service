@@ -1,0 +1,10 @@
+[Unit]
+Description=Restart Fuseki for holon-bridge, with rollback of a bad configuration
+# Do not run at the same time as the nightly backup: a restart during a dump aborts it.
+Conflicts=holonbridge-backup.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/holonbridge-restart-fuseki
+# One restart at a time, and give a failed start plus a rollback time to finish.
+TimeoutStartSec=300

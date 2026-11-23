@@ -146,6 +146,28 @@ def creator(
     return Claimant(*who)
 
 
+def restarter(
+    settings: Settings,
+    token_auth: Any,
+    *,
+    header_id: str | None,
+    header_type: str | None,
+    default_type: str,
+) -> Claimant | None:
+    """The caller as a :class:`Claimant`, or ``None`` if they may not restart Fuseki.
+
+    Same two halves as :func:`creator` (established identity, listed by the
+    operator) against ``FUSEKI_RESTARTERS``. A separate list, because a restart
+    interrupts every dataset on the server and empties every in-memory one.
+    """
+    who = _established(
+        token_auth, header_id=header_id, header_type=header_type, default_type=default_type
+    )
+    if who is None or who[0] not in settings.fuseki_restarters:
+        return None
+    return Claimant(*who)
+
+
 def _unclaimed_pattern(holons_graph: str) -> str:
     return (
         f"GRAPH <{holons_graph}> {{ ?anyone holon:hasRole ?anyRole . "

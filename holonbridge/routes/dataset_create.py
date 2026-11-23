@@ -11,13 +11,14 @@ route cannot be used to ask what exists. All the rules are in
 
 from __future__ import annotations
 
-from typing import Annotated
+import logging
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from .. import audit
-from ..claim import creator
+from ..claim import creator, restarter
 from ..dataset_create import CreateError, Kind, create, describe_new, reseed_shapes
 from ..deps import (
     ANIMUS_ID_HEADER,
@@ -29,6 +30,10 @@ from ..deps import (
     TokenAuth,
     require_auth,
 )
+
+from ..fuseki_restart import RestartError, build_plan, commit as restart_commit
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["datasets"])
 
@@ -49,6 +54,14 @@ class CreateDatasetRequest(BaseModel):
         "dataset's shapes graph. On by default, because every created dataset has SHACL "
         "enabled and a gated bridge rejects writes to a dataset with no shapes. Set false "
         "to leave the shapes graph empty, e.g. to configure bank scoping first.",
+    )
+    restart: Literal["plan", "commit"] = Field(
+        default="plan",
+        description="A new dataset only gets its /shacl endpoint when Fuseki restarts. 'plan' "
+        "(the default) creates the dataset and returns the restart dry run under 'restart'. "
+        "'commit' also performs the restart, when the caller is on FUSEKI_RESTARTERS (checked "
+        "BEFORE anything is created) and nothing stands in the way; if something does, the "
+        "dataset is still created and 'restarted' is false.",
     )
     claim: bool = Field(
         default=True,
@@ -90,6 +103,23 @@ async def create_dataset(
             status.HTTP_403_FORBIDDEN, detail="this caller may not create a dataset"
         )
 
+    restart_who = None
+    if body.restart == "commit":
+        # Decided before anything is created: a caller who may not restart Fuseki must not
+        # leave a half-finished dataset behind by asking for it.
+        restart_who = restarter(
+            settings,
+            token_auth,
+            header_id=request.headers.get(ANIMUS_ID_HEADER),
+            header_type=request.headers.get(ANIMUS_TYPE_HEADER),
+            default_type=DEFAULT_ANIMUS_TYPE,
+        )
+        if restart_who is None:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail="this caller may not restart Fuseki (restart='commit'); nothing was created",
+            )
+
     try:
         created = await create(
             client, conn, settings, who, name=body.name, kind=body.kind, claim_for_creator=body.claim,
@@ -127,6 +157,11 @@ async def create_dataset(
             f"this dataset has no shacl endpoint ({created.shacl_config_error}); add one in "
             "Fuseki's configuration for it, then restart Fuseki"
         )
+    if created.shacl_configured and not created.shacl_enabled:
+        result["restart"] = await _restart_block(
+            client, conn, settings, restart_who, body.restart, created.dataset
+        )
+        result["restarted"] = bool(result["restart"].get("restarted"))
     audit.annotate(
         authorised_by=created.claim["person"] if created.claim else None,
         authorised_reason=(
@@ -135,6 +170,48 @@ async def create_dataset(
         ),
     )
     return result
+
+
+async def _restart_block(client, conn, settings, who, mode: str, dataset: str) -> dict:
+    """The ``restart`` part of a create result: the dry-run plan, and the outcome if committed.
+
+    Advisory: the dataset already exists, so nothing here may turn the response into an error.
+    """
+    try:
+        plan = await build_plan(client, conn, settings)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("restart plan for new dataset %s failed: %s", dataset, exc)
+        return {"required": True, "planError": str(exc), "restarted": False}
+    block: dict = {
+        "required": True,
+        "plan": plan.to_dict(),
+        "canRestart": plan.can_restart,
+        "restarted": False,
+        "next": (
+            "call restart_fuseki(commit=true) to bring the dataset's /shacl endpoint up"
+            if plan.can_restart
+            else "restart_fuseki reports what is in the way; clear it, then restart_fuseki(commit=true)"
+        ),
+    }
+    if mode != "commit" or who is None:
+        return block
+    if not plan.can_restart:
+        block["commitSkipped"] = plan.blockers
+        return block
+    try:
+        outcome = await restart_commit(
+            client,
+            conn,
+            settings,
+            by=who.external_id,
+            reason=f"new dataset {dataset!r} needs its shacl endpoint",
+        )
+    except RestartError as exc:
+        block["commitError"] = exc.detail()
+        return block
+    block["outcome"] = outcome
+    block["restarted"] = outcome.get("restarted") is True
+    return block
 
 
 class ReseedRequest(BaseModel):

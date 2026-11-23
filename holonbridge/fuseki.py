@@ -265,6 +265,22 @@ class FusekiClient:
         out.sort(key=lambda d: d["name"])
         return out
 
+    async def list_tasks(self, conn: Conn) -> list[dict[str, Any]]:
+        """Fuseki's admin task list (``/$/tasks``): backups, compactions and the like.
+
+        Each entry has a ``task`` name and ``taskId``, and a ``finished`` time once it
+        is done, so an entry without one is still running. Raises :class:`FusekiError`
+        when the admin API refuses.
+        """
+        url = f"{conn.base_url}/$/tasks"
+        response = await self._client.get(
+            url, headers=self._headers(conn, {"Accept": "application/json"})
+        )
+        if response.status_code >= 400:
+            raise FusekiError(response.status_code, response.text.strip(), endpoint=url)
+        body = response.json()
+        return [t for t in body if isinstance(t, dict)] if isinstance(body, list) else []
+
     async def create_dataset(self, conn: Conn, name: str, *, persistent: bool) -> None:
         """Create an empty dataset through Fuseki's admin API.
 
