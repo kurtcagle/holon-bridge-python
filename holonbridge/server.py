@@ -39,6 +39,7 @@ from .routes import (
     holon_routes,
     identity_admin,
     lifecycle as lifecycle_routes,
+    media,
     named_projections,
     named_queries,
     named_rules,
@@ -149,6 +150,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(scheduler_routes.router)
     app.include_router(projection.router)
     app.include_router(persona.router)
+    app.include_router(media.router)
     app.include_router(whoami.router)
     return app
 
