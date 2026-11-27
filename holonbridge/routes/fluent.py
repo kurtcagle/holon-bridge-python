@@ -55,6 +55,7 @@ from pydantic import BaseModel, Field
 from .. import audit
 from .. import delegation as dg
 from ..acl import check_write
+from .. import fluent_grants as fg
 from ..deps import AnimusDep, ClientDep, ConnDep, SettingsDep
 from ..fluent import FluentError, FluentUpdateResult, Operation, TypedValue, prior_value, update_fluent
 from ..fluent_transaction import MAX_OPS, FluentOp, update_fluents
@@ -125,6 +126,27 @@ def _safe(value: str, what: str) -> str:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=f"{what}: {exc}") from exc
 
 
+async def _authorise(query_fn, conn, person: str, graphs: list[str], fluents: list[str]) -> None:
+    """Graph-level grants as before; failing that, a live ``holon:FluentGrant`` covering
+    every fluent in the request (see :mod:`holonbridge.fluent_grants`)."""
+    first_refusal: str | None = None
+    for graph in graphs:
+        decision = await check_write(query_fn, conn.holons_graph, person=person, target=graph)
+        if decision.allowed:
+            audit.annotate(authorised_by=decision.matched_grant, authorised_reason=decision.reason)
+            continue
+        first_refusal = first_refusal or f"{decision.reason} (graph: {graph})"
+        break
+    if first_refusal is None:
+        return
+    cover = await fg.find_cover(query_fn, conn.holons_graph, person=person, fluents=fluents)
+    if cover:
+        audit.annotate(authorised_by=",".join(sorted(set(cover.values()))), authorised_reason="fluent grant")
+        return
+    audit.annotate(reason=first_refusal)
+    raise HTTPException(status.HTTP_403_FORBIDDEN, detail=first_refusal)
+
+
 @router.post("/update")
 async def update(
     body: UpdateFluentRequest,
@@ -162,13 +184,7 @@ async def update(
     async def query_fn(q: str) -> dict:
         return await client.select(conn, q)
 
-    for graph in graphs:
-        decision = await check_write(query_fn, conn.holons_graph, person=person, target=graph)
-        audit.annotate(authorised_by=decision.matched_grant, authorised_reason=decision.reason)
-        if not decision.allowed:
-            detail = f"{decision.reason} (graph: {graph})"
-            audit.annotate(reason=detail)
-            raise HTTPException(status.HTTP_403_FORBIDDEN, detail=detail)
+    await _authorise(query_fn, conn, person, graphs, [fluent])
 
     governed = await governing_portals(client, conn, fluent)
     if governed:
@@ -279,13 +295,7 @@ async def update_many(
     async def query_fn(q: str) -> dict:
         return await client.select(conn, q)
 
-    for graph in graphs:
-        decision = await check_write(query_fn, conn.holons_graph, person=person, target=graph)
-        audit.annotate(authorised_by=decision.matched_grant, authorised_reason=decision.reason)
-        if not decision.allowed:
-            detail = f"{decision.reason} (graph: {graph})"
-            audit.annotate(reason=detail)
-            raise HTTPException(status.HTTP_403_FORBIDDEN, detail=detail)
+    await _authorise(query_fn, conn, person, graphs, [op.fluent for op in ops])
 
     for op in ops:
         governed = await governing_portals(client, conn, op.fluent)
